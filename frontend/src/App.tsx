@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { WebSerialDeviceClient, type DeviceConnectionState } from "./deviceSerial";
 
 type Status = "idle" | "created" | "running" | "waiting_preview" | "completed" | "failed" | "blocked" | "cancelled" | "timeout";
 type Language = "zh" | "en";
@@ -70,7 +71,7 @@ type SessionSummary = Omit<SessionState, "generation"> & { generation?: Generati
 
 const defaultPrompt = "做一个极简四则运算计算器，按钮要大，适合触摸屏";
 const defaultPromptEn = "Build a minimal four-function calculator with large touch-friendly buttons";
-const wasmRuntimeUrl = "http://127.0.0.1:8000/mpos-web/index.html?embed=1&bridge=2";
+const wasmRuntimeUrl = "http://127.0.0.1:8000/mpos-web/index.html?embed=1&bridge=3";
 const apiUrl = "http://localhost:8000";
 const stages = [
   ["analysis", "需求分析"],
@@ -105,6 +106,13 @@ export default function App() {
   const [sessionState, setSessionState] = useState<SessionState | null>(null);
   const [history, setHistory] = useState<SessionSummary[]>([]);
   const [deviceMessage, setDeviceMessage] = useState("");
+  const [serialConnected, setSerialConnected] = useState(false);
+  const [deviceState, setDeviceState] = useState<DeviceConnectionState>("disconnected");
+  const [deviceLogs, setDeviceLogs] = useState("");
+  const [deviceCommand, setDeviceCommand] = useState("");
+  const [deviceBusy, setDeviceBusy] = useState("");
+  const [deviceProgress, setDeviceProgress] = useState(0);
+  const [deviceError, setDeviceError] = useState("");
   const [continuing, setContinuing] = useState(false);
   const [wasmReady, setWasmReady] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState("正在启动 MicroPythonOS WASM…");
@@ -112,9 +120,11 @@ export default function App() {
   const lastRun = useRef("");
   const requestAbort = useRef<AbortController | null>(null);
   const eventStream = useRef<EventSource | null>(null);
+  const eventCursors = useRef<Record<string, number>>({});
   const executionTimer = useRef<number | null>(null);
   const wasmTimer = useRef<number | null>(null);
   const resultRef = useRef<GenerationResult | null>(null);
+  const serialClientRef = useRef<WebSerialDeviceClient | null>(null);
   const repairAttempts = useRef(0);
   const repairing = useRef(false);
   const repairHandler = useRef<(detail: string) => boolean>(() => false);
@@ -129,10 +139,18 @@ export default function App() {
     wasmTimer.current = null;
   };
 
-  useEffect(() => () => {
-    requestAbort.current?.abort();
-    eventStream.current?.close();
-    clearRuntimeTimers();
+  useEffect(() => {
+    const releaseSerialPort = () => {
+      void serialClientRef.current?.disconnect();
+    };
+    window.addEventListener("pagehide", releaseSerialPort);
+    return () => {
+      window.removeEventListener("pagehide", releaseSerialPort);
+      requestAbort.current?.abort();
+      eventStream.current?.close();
+      releaseSerialPort();
+      clearRuntimeTimers();
+    };
   }, []);
   useEffect(() => {
     localStorage.setItem("mpos-language", language);
@@ -205,19 +223,29 @@ export default function App() {
 
   const openEventStream = (sessionId: string) => {
     eventStream.current?.close();
-    const stream = new EventSource(`${apiUrl}/api/sessions/${sessionId}/events`);
-    stream.onmessage = (event) => {
-      const item = JSON.parse(event.data) as { type: string; phase: string; payload: { message?: string; status?: string } };
-      const message = item.payload.message || item.payload.status || item.type;
+    const cursor = eventCursors.current[sessionId] || 0;
+    const stream = new EventSource(`${apiUrl}/api/sessions/${sessionId}/events?after=${cursor}`);
+    const appendEvent = (event: MessageEvent) => {
+      const item = JSON.parse(event.data) as {
+        seq?: number;
+        type: string;
+        phase: string;
+        payload: { message?: string; status?: string; result?: string };
+      };
+      const seq = Number(item.seq || 0);
+      if (seq && seq <= (eventCursors.current[sessionId] || 0)) return;
+      if (seq) eventCursors.current[sessionId] = seq;
+      const message = item.payload.message || item.payload.status || item.payload.result || item.type;
       setLogs((entries) => [...entries, `[${item.phase}] ${message}`]);
     };
+    stream.onmessage = appendEvent;
     for (const eventName of ["start_phase", "status_update", "phase_complete", "structured_error"]) {
-      stream.addEventListener(eventName, (event) => {
-        const item = JSON.parse((event as MessageEvent).data) as { type: string; phase: string; payload: { message?: string; status?: string; result?: string } };
-        const message = item.payload.message || item.payload.status || item.payload.result || item.type;
-        setLogs((entries) => [...entries, `[${item.phase}] ${message}`]);
-      });
+      stream.addEventListener(eventName, (event) => appendEvent(event as MessageEvent));
     }
+    stream.addEventListener("stream_end", () => {
+      stream.close();
+      if (eventStream.current === stream) eventStream.current = null;
+    });
     eventStream.current = stream;
   };
 
@@ -250,7 +278,7 @@ export default function App() {
             body: JSON.stringify({
               idempotency_key: `preview-success-${savedSession}`,
               result: "success",
-              message: "MicroPythonOS WASM started and self_test passed",
+              message: "MicroPythonOS WASM installed and launched the generated app through AppManager",
             }),
           }).then((response) => response.json()).then((session: SessionState) => setSessionState(session));
         }
@@ -559,24 +587,173 @@ export default function App() {
   };
 
   const scanDevices = async () => {
-    if (!sessionState) {
-      setToast(tr("请先创建生成会话", "Create a session first"));
+    if (!WebSerialDeviceClient.isSupported()) {
+      setDeviceMessage(tr(
+        "当前浏览器不支持串口连接。请在 Chrome、Edge 或 Brave 中打开本页面。",
+        "This browser does not support serial connections. Open this page in Chrome, Edge, or Brave.",
+      ));
       return;
     }
-    const serialPermission = sessionState.permissions.find((item) => item.permission_type === "serial_scan");
-    if (!serialPermission || serialPermission.decision !== "allow_once") {
-      setPermissionOpen(true);
-      setToast(tr("请先确认串口扫描权限", "Approve serial scan first"));
-      return;
-    }
-    const response = await fetch(`${apiUrl}/api/sessions/${sessionState.session_id}/devices/scan`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ idempotency_key: `device-scan-${crypto.randomUUID()}` }),
+    setDeviceError("");
+    setDeviceLogs("");
+    const client = new WebSerialDeviceClient({
+      onData: (text) => setDeviceLogs((previous) => `${previous}${text}`.slice(-100_000)),
+      onState: (nextState, detail) => {
+        setDeviceState(nextState);
+        setSerialConnected(nextState === "connected");
+        if (nextState === "connected") {
+          setDeviceMessage(tr(
+            `已连接 ${detail || "USB 串口设备"}，波特率 115200。`,
+            `Connected to ${detail || "USB serial device"} at 115200 baud.`,
+          ));
+        } else if (nextState === "error") {
+          setDeviceError(detail || tr("串口连接异常", "Serial connection error"));
+        }
+      },
     });
-    const data = await response.json() as { message?: string; ports?: unknown[] };
-    setDeviceMessage(data.message || tr(`检测到 ${data.ports?.length || 0} 个设备`, `Found ${data.ports?.length || 0} devices`));
+    try {
+      serialClientRef.current = client;
+      await client.connect();
+    } catch (error) {
+      serialClientRef.current = null;
+      setDeviceState("error");
+      setSerialConnected(false);
+      const reason = error instanceof Error ? error.message : String(error);
+      if (error instanceof DOMException && error.name === "NotFoundError") {
+        setDeviceMessage(tr("没有选择设备。请重试并选择 COM5。", "No device selected. Try again and choose COM5."));
+      } else {
+        setDeviceError(reason);
+        setDeviceMessage(tr(
+          `连接失败：${reason}。请关闭占用 COM5 的串口工具后重试。`,
+          `Connection failed: ${reason}. Close any serial tool using COM5 and try again.`,
+        ));
+      }
+    }
   };
+
+  const disconnectDevice = async () => {
+    try {
+      await serialClientRef.current?.disconnect();
+    } catch {
+      // The USB cable may already be disconnected.
+    } finally {
+      serialClientRef.current = null;
+      setSerialConnected(false);
+      setDeviceState("disconnected");
+      setDeviceBusy("");
+      setDeviceProgress(0);
+      setDeviceMessage(tr("设备已断开。", "Device disconnected."));
+    }
+  };
+
+  const runDeviceAction = async (label: string, action: (client: WebSerialDeviceClient) => Promise<void>) => {
+    const client = serialClientRef.current;
+    if (!client?.connected) {
+      setDeviceError(tr("请先连接 ESP32。", "Connect the ESP32 first."));
+      return;
+    }
+    setDeviceBusy(label);
+    setDeviceError("");
+    try {
+      await action(client);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      setDeviceError(reason);
+      setDeviceLogs((previous) => `${previous}\n[ERROR] ${reason}\n`.slice(-100_000));
+    } finally {
+      setDeviceBusy("");
+    }
+  };
+
+  const probeDevice = () => runDeviceAction("probe", async (client) => {
+    setDeviceMessage(tr("正在检测 MicroPythonOS…", "Probing MicroPythonOS…"));
+    await client.execute([
+      "import sys",
+      "import mpos",
+      "print('MicroPython:', sys.version)",
+      "print('MicroPythonOS: ready')",
+    ].join("\n"));
+    setDeviceMessage(tr("MicroPythonOS 已就绪，可以安装和运行 App。", "MicroPythonOS is ready for app install and launch."));
+  });
+
+  const sendDeviceCommand = () => {
+    const command = deviceCommand.trim();
+    if (!command) return;
+    void runDeviceAction("command", async (client) => {
+      setDeviceLogs((previous) => `${previous}\n>>> ${command}\n`.slice(-100_000));
+      await client.sendLine(command);
+      setDeviceCommand("");
+    });
+  };
+
+  const interruptDevice = () => runDeviceAction("interrupt", async (client) => {
+    await client.interrupt();
+    setDeviceMessage(tr("已向设备发送 Ctrl+C。", "Sent Ctrl+C to the device."));
+  });
+
+  const installGeneratedMpk = () => runDeviceAction("install", async (client) => {
+    if (!result) throw new Error(tr("请先生成 App 和 MPK。", "Generate an App and MPK first."));
+    const writePermission = sessionState?.permissions.find((item) => item.permission_type === "device_write");
+    if (writePermission && writePermission.decision !== "allow_once") {
+      setPermissionOpen(true);
+      throw new Error(tr("请先允许本次设备写入权限，然后再次点击安装。", "Allow device write for this session, then click install again."));
+    }
+    setDeviceProgress(0);
+    setDeviceMessage(tr("正在上传 MPK 到 ESP32…", "Uploading MPK to the ESP32…"));
+    const safeFilename = result.mpk_filename.replace(/[^A-Za-z0-9_.-]/g, "_");
+    const remotePath = `/tmp/${safeFilename}`;
+    await client.uploadBase64(remotePath, result.mpk_base64, setDeviceProgress);
+    setDeviceMessage(tr("MPK 已上传，正在安装…", "MPK uploaded. Installing…"));
+    await client.execute([
+      "from mpos.content.app_manager import AppManager",
+      `AppManager.install_mpk(${JSON.stringify(remotePath)}, ${JSON.stringify(`apps/${result.package_name}`)})`,
+      "AppManager.refresh_apps()",
+      `assert AppManager.is_installed_by_name(${JSON.stringify(result.package_name)}), 'App was extracted but is not registered'`,
+      `print('Installed: ${result.package_name}')`,
+    ].join("\n"), 120_000);
+    setDeviceProgress(100);
+    setDeviceMessage(tr(
+      `安装成功：${result.package_name}`,
+      `Installed successfully: ${result.package_name}`,
+    ));
+  });
+
+  const runInstalledApp = () => runDeviceAction("run", async (client) => {
+    const appName = result?.package_name || packageName;
+    await client.execute([
+      "from mpos import AppManager",
+      "AppManager.refresh_apps()",
+      `assert AppManager.is_installed_by_name(${JSON.stringify(appName)}), 'App is not installed; click Install generated MPK first'`,
+      `started = AppManager.start_app(${JSON.stringify(appName)})`,
+      "assert started, 'MicroPythonOS could not start the installed App'",
+      "print('Started:', started)",
+    ].join("\n"), 45_000);
+    setDeviceMessage(tr(`已启动 ${appName}`, `Started ${appName}`));
+  });
+
+  const stopInstalledApp = () => runDeviceAction("stop", async (client) => {
+    await client.execute([
+      "from mpos.ui.view import finish_current_activity",
+      "finish_current_activity()",
+      "print('Foreground activity stopped')",
+    ].join("\n"), 30_000);
+    setDeviceMessage(tr("当前 App 已停止。", "The current App has stopped."));
+  });
+
+  const restartInstalledApp = () => runDeviceAction("restart", async (client) => {
+    const appName = result?.package_name || packageName;
+    await client.execute([
+      "from mpos.ui.view import finish_current_activity",
+      "finish_current_activity()",
+      "from mpos import AppManager",
+      "AppManager.refresh_apps()",
+      `assert AppManager.is_installed_by_name(${JSON.stringify(appName)}), 'App is not installed; click Install generated MPK first'`,
+      `started = AppManager.start_app(${JSON.stringify(appName)})`,
+      "assert started, 'MicroPythonOS could not restart the installed App'",
+      "print('Restarted:', started)",
+    ].join("\n"), 45_000);
+    setDeviceMessage(tr(`已重启 ${appName}`, `Restarted ${appName}`));
+  });
 
   const downloadMpk = () => {
     if (!result) return;
@@ -643,11 +820,65 @@ export default function App() {
               <label><input type="checkbox" checked={packageTarget} onChange={(event) => setPackageTarget(event.target.checked)} /> Package only<small>{tr("生成可以下载的 _rN.mpk", "Create a downloadable _rN.mpk")}</small></label>
             </div>
             <div className="device-guide">
-              <div><strong>{tr("要在真实设备上运行？", "Want to run on a real device?")}</strong><span>{tr("先用 Chrome、Edge 或 Brave，通过 USB 给设备安装 MicroPythonOS，然后回到这里下载 MPK。", "First install MicroPythonOS over USB with Chrome, Edge, or Brave, then return here to download the MPK.")}</span></div>
-              {sessionState && <button onClick={() => void scanDevices()}>{tr("扫描设备", "Scan devices")}</button>}
+              <div><strong>{tr("要在真实设备上运行？", "Want to run on a real device?")}</strong><span>{tr("请使用 Chrome、Edge 或 Brave，点击连接后在系统窗口中选择 COM5。", "Use Chrome, Edge, or Brave, then choose COM5 in the system dialog.")}</span></div>
+              <button onClick={() => void (serialConnected ? disconnectDevice() : scanDevices())}>
+                {serialConnected ? tr("断开设备", "Disconnect") : tr("连接 ESP32", "Connect ESP32")}
+              </button>
               <a href="https://install.micropythonos.com/" target="_blank" rel="noreferrer">{tr("打开系统安装器", "Open OS installer")}</a>
             </div>
             {deviceMessage && <small className="device-message">{deviceMessage}</small>}
+            {(serialConnected || deviceState !== "disconnected") && (
+              <section className="device-console">
+                <div className="device-console-head">
+                  <div>
+                    <span className={`device-dot ${deviceState}`} />
+                    <strong>{tr("ESP32 设备控制台", "ESP32 device console")}</strong>
+                    <small>{deviceState === "connecting"
+                      ? tr("正在连接", "Connecting")
+                      : deviceState === "connected"
+                        ? tr("COM5 · 115200 · 已连接", "COM5 · 115200 · connected")
+                        : tr("连接异常", "Connection error")}</small>
+                  </div>
+                  <button disabled={!serialConnected || Boolean(deviceBusy)} onClick={() => void probeDevice()}>
+                    {deviceBusy === "probe" ? tr("检测中…", "Probing…") : tr("检测系统", "Probe OS")}
+                  </button>
+                </div>
+
+                {deviceError && <div className="device-error">{deviceError}</div>}
+                {deviceBusy === "install" && (
+                  <div className="device-progress">
+                    <div><span>{tr("上传并安装 MPK", "Upload and install MPK")}</span><b>{deviceProgress}%</b></div>
+                    <progress max="100" value={deviceProgress} />
+                  </div>
+                )}
+
+                <div className="device-actions">
+                  <button className="device-primary" disabled={!serialConnected || !result || Boolean(deviceBusy)} onClick={() => void installGeneratedMpk()}>
+                    {deviceBusy === "install" ? tr("正在安装…", "Installing…") : tr("安装生成的 MPK", "Install generated MPK")}
+                  </button>
+                  <button disabled={!serialConnected || Boolean(deviceBusy)} onClick={() => void runInstalledApp()}>{tr("运行 App", "Run App")}</button>
+                  <button disabled={!serialConnected || Boolean(deviceBusy)} onClick={() => void stopInstalledApp()}>{tr("停止 App", "Stop App")}</button>
+                  <button disabled={!serialConnected || Boolean(deviceBusy)} onClick={() => void restartInstalledApp()}>{tr("重启 App", "Restart App")}</button>
+                  <button disabled={!serialConnected || Boolean(deviceBusy)} onClick={() => void interruptDevice()}>{tr("中断命令", "Interrupt")}</button>
+                </div>
+
+                <div className="device-terminal-head">
+                  <strong>{tr("实时串口日志", "Live serial log")}</strong>
+                  <button onClick={() => setDeviceLogs("")}>{tr("清空", "Clear")}</button>
+                </div>
+                <pre className="device-terminal">{deviceLogs || tr("等待设备输出…", "Waiting for device output…")}</pre>
+                <form className="device-command" onSubmit={(event) => { event.preventDefault(); sendDeviceCommand(); }}>
+                  <span>&gt;&gt;&gt;</span>
+                  <input
+                    value={deviceCommand}
+                    onChange={(event) => setDeviceCommand(event.target.value)}
+                    placeholder={tr("输入一行 MicroPython 命令", "Enter one MicroPython command")}
+                    disabled={!serialConnected || Boolean(deviceBusy)}
+                  />
+                  <button type="submit" disabled={!serialConnected || !deviceCommand.trim() || Boolean(deviceBusy)}>{tr("发送", "Send")}</button>
+                </form>
+              </section>
+            )}
 
             <div className="actions">
               {status === "running"
@@ -710,6 +941,7 @@ export default function App() {
                   src={wasmRuntimeUrl}
                   allow="clipboard-read; clipboard-write"
                   onLoad={() => {
+                    lastRun.current = "";
                     setWasmReady(false);
                     setRuntimeStatus(tr("正在启动 MicroPythonOS WASM…", "Starting MicroPythonOS WASM…"));
                     iframeRef.current?.contentWindow?.postMessage({ source: "mpos-builder", type: "PING" }, "*");

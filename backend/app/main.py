@@ -26,9 +26,23 @@ from .session_service import SessionNotFound, session_service
 load_dotenv()
 
 app = FastAPI(title="MicroPythonOS AI App Builder API", version="0.1.0")
+local_frontend_origins = [
+    "http://localhost:5173",
+    "http://localhost:5174",
+    "http://127.0.0.1:5173",
+    "http://127.0.0.1:5174",
+]
+configured_frontend_origins = os.getenv(
+    "FRONTEND_ORIGINS",
+    os.getenv("FRONTEND_ORIGIN", ""),
+)
+frontend_origins = list(dict.fromkeys(
+    local_frontend_origins
+    + [origin.strip() for origin in configured_frontend_origins.split(",") if origin.strip()]
+))
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[os.getenv("FRONTEND_ORIGIN", "http://localhost:5173")],
+    allow_origins=frontend_origins,
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -92,6 +106,10 @@ async def session_events(
             if state["status"] in {"completed", "failed", "cancelled", "blocked", "timeout"} and cursor >= len(
                 events
             ):
+                yield (
+                    "event: stream_end\n"
+                    f"data: {json.dumps({'session_id': session_id, 'status': state['status']}, ensure_ascii=False)}\n\n"
+                )
                 break
             idle_ticks += 1
             if idle_ticks >= 20:

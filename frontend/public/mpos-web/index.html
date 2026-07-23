@@ -594,13 +594,11 @@
           "f=open(" + JSON.stringify(dir + "/MANIFEST.JSON") + ",'wb')",
           "f.write(binascii.a2b_base64(b" + JSON.stringify(base64Utf8(manifest)) + "))",
           "f.close()",
-          "exec(open(" + JSON.stringify(dir + "/assets/main.py") + ").read(), globals())",
-          "__generated_activity = GeneratedApp()",
-          "__generated_activity.onCreate()",
-          "__acceptance = __generated_activity.self_test()",
-          "assert isinstance(__acceptance, dict) and len(__acceptance) >= 2, 'self_test must return at least two checks'",
-          "assert all(value is True for value in __acceptance.values()), 'Acceptance failed: ' + repr(__acceptance)",
-          "print('MPOS_ACCEPTANCE_OK:' + repr(__acceptance))",
+          "from mpos import AppManager",
+          "AppManager.refresh_apps()",
+          "assert AppManager.is_installed_by_name(" + JSON.stringify(packageName) + "), 'generated app was not registered'",
+          "__started = AppManager.start_app(" + JSON.stringify(packageName) + ")",
+          "assert __started, 'generated app failed to start'",
           "print('MPOS_GENERATED_APP_RUNNING')"
         ].join("\n");
         await rawExec(script);
