@@ -1,3 +1,6 @@
 [submodule "vendor/MicroPythonOS"]
 	path = vendor/MicroPythonOS
 	url = https://github.com/MicroPythonOS/MicroPythonOS.git
+[submodule "vendor/MicroPython_Skills"]
+	path = vendor/MicroPython_Skills
+	url = https://github.com/FreakStudioCN/MicroPython_Skills.git

@@ -3,10 +3,13 @@
 !.env.example
 
 node_modules/
+node_modules.*/
 dist/
 build/
+*.tsbuildinfo
 
 .venv/
+.venv-win/
 __pycache__/
 *.pyc
 

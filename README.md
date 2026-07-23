@@ -22,7 +22,7 @@
 ├── docs/                     # 架构、协议和开发文档
 └── vendor/
     ├── MicroPythonOS/        # 官方 OS，Git submodule
-    └── MicroPython_Skills/   # 待提供远程 URL 后接入
+    └── MicroPython_Skills/   # FreakStudioCN，Git submodule
 ```
 
 ## Development rules
@@ -44,4 +44,15 @@ git submodule update --init --recursive
 ## Dependency status
 
 - `vendor/MicroPythonOS`：已接入官方仓库。
-- `vendor/MicroPython_Skills`：等待仓库所有者提供可访问的 Git URL 后接入。
+- `vendor/MicroPython_Skills`：已接入
+  `https://github.com/FreakStudioCN/MicroPython_Skills.git`，固定到父仓库记录的 commit。
+
+## Browser protocol
+
+前后端按 `mpos-ai-app/v1` 工作：
+
+- `POST /api/sessions` 创建可恢复会话。
+- `GET /api/sessions/:id/events` 通过 SSE 返回阶段事件。
+- 生成、重试、取消和 Web preview 结果都写入 checkpoint。
+- 产物由 `artifact_manifest.json` 驱动，不向前端暴露服务器绝对路径。
+- `.mpk` 使用 `<fullname>_rN.mpk`，发布仅提供 uPyStore 手工上传检查与引导。
