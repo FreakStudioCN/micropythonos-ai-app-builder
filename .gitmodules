@@ -1,0 +1,3 @@
+[submodule "vendor/MicroPythonOS"]
+	path = vendor/MicroPythonOS
+	url = https://github.com/MicroPythonOS/MicroPythonOS.git
