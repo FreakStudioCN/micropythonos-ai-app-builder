@@ -12,6 +12,14 @@
 6. 可选 ESP32/ESP32-S3 真机部署
 7. 发布前检查与上传指导
 
+新浏览器用户首次获得 50 点，每次开始一个新的 App revision 消耗 10 点。
+右上角显示余额并提供 Go、Plus、Pro 套餐选择。当前仓库默认启用本地演示订阅，
+不会产生真实扣款；正式上线前必须关闭 `MPOS_BILLING_DEMO_MODE`，并由微信、
+支付宝或 Stripe 的已验证支付回调发放点数。
+
+当前浏览器 ID 只适用于本机原型。正式收费前还必须接入登录系统，并从服务端
+登录态确定用户身份，不能信任前端自行传入的用户 ID。
+
 ## Repository layout
 
 ```text
@@ -96,3 +104,14 @@ WebSerial 只在安全上下文中可用。本机开发请使用 `localhost`；�
   正在等待浏览器连接设备，不会被前端误报为生成失败。
 - `POST /api/sessions/:id/screenshots` 校验并保存 PNG/JPEG/WebP 发布截图，
   同时更新 `publish_result.json` 的截图门禁。
+- `GET /api/sessions/:id/summary` 返回适合交付和发布页展示的脱敏摘要；
+  `GET /api/sessions/:id/activity-log` 分别支持用户视图和工程师视图。
+- `GET /api/sessions/:id/export?kind=session` 导出脱敏 session bundle；
+  `kind=demo-artifacts` 导出宣传素材包。
+- `POST /api/demo/sessions` 可创建或恢复 `countdown`、`calendar`、
+  `device-dashboard` 三个确定性 Demo，不依赖模型随机输出。
+- `POST /api/sessions/:id/demo-error` 仅在
+  `MPOS_DEMO_ERROR_INJECTION=true` 时启用，用于录制“失败 → 回传 → 重试”；
+  默认关闭，不能用于生产环境。
+- 从失败、超时或取消状态重试前，后端会把旧状态、activity log 和 result
+  JSON 保存到 `failed-attempts/attempt-NNN/`，不会覆盖失败现场。

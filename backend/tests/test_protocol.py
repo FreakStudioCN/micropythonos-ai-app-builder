@@ -1,12 +1,16 @@
 import base64
 import json
+import os
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 from app.generator import _build_mpk
 from app.models import (
+    DemoErrorInjectionRequest,
+    DemoSessionRequest,
     DeviceResultRequest,
     GeneratedFile,
     GenerateResponse,
@@ -198,6 +202,109 @@ class ProtocolTests(unittest.TestCase):
         )
         self.assertTrue(screenshot["path"].startswith("artifacts/screenshots/"))
         self.assertNotIn("..", screenshot["path"])
+
+    def test_demo_seed_is_deterministic_and_exports_redacted_bundle(self) -> None:
+        request = DemoSessionRequest(
+            idempotency_key="demo-seed-test-0001",
+            seed="countdown",
+        )
+        first = self.service.create_demo(request)
+        second = self.service.create_demo(request)
+        self.assertEqual(first["session_id"], second["session_id"])
+        self.assertEqual(first["status"], "completed")
+        self.assertEqual(first["generation"]["model"], "deterministic-demo-seed")
+        roles = {item["role"] for item in first["artifacts"]}
+        self.assertIn("mpk", roles)
+        self.assertIn("publish_result", roles)
+
+        bundle, artifact = self.service.export_bundle(
+            first["session_id"], kind="demo-artifacts"
+        )
+        self.assertEqual(artifact["role"], "demo_artifact_bundle")
+        with zipfile.ZipFile(bundle) as archive:
+            names = set(archive.namelist())
+            self.assertIn("session_summary.json", names)
+            self.assertIn("activity_log.redacted.jsonl", names)
+            self.assertTrue(any(name.endswith("_r1.mpk") for name in names))
+
+    def test_activity_log_export_redacts_secrets_paths_and_serial_ports(self) -> None:
+        state = self.service.create(
+            SessionCreateRequest(
+                idempotency_key="redaction-test-0001",
+                prompt="Build a safe log viewer",
+                package_name="com.example.logviewer",
+                targets=["package-only"],
+            )
+        )
+        self.service._event(
+            state,
+            "status_update",
+            "mpos-test-app-web",
+            {
+                "message": (
+                    "Authorization: Bearer sk-super-secret-token-123456 "
+                    "C:\\Users\\demo\\private\\file.py COM5"
+                )
+            },
+        )
+        exported = self.service.activity_log(
+            state["session_id"], view="engineer", redacted=True
+        )
+        serialized = json.dumps(exported, ensure_ascii=False)
+        self.assertNotIn("sk-super-secret", serialized)
+        self.assertNotIn("C:\\Users\\demo", serialized)
+        self.assertNotIn("COM5", serialized)
+        self.assertIn("[REDACTED_TOKEN]", serialized)
+
+    def test_demo_error_injection_is_disabled_by_default_and_audited(self) -> None:
+        state = self.service.create_demo(
+            DemoSessionRequest(
+                idempotency_key="demo-error-seed-0001",
+                seed="calendar",
+            )
+        )
+        request = DemoErrorInjectionRequest(
+            idempotency_key="demo-error-test-0001",
+            code="LVGL_API_MISSING",
+        )
+        with patch.dict(os.environ, {"MPOS_DEMO_ERROR_INJECTION": "false"}):
+            with self.assertRaises(PermissionError):
+                self.service.inject_demo_error(state["session_id"], request)
+        with patch.dict(os.environ, {"MPOS_DEMO_ERROR_INJECTION": "true"}):
+            failed = self.service.inject_demo_error(state["session_id"], request)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["last_error"]["code"], "LVGL_API_MISSING")
+        self.assertTrue(failed["last_error"]["details"]["injected"])
+
+    def test_retry_archives_failed_state_and_result_files(self) -> None:
+        state = self.service.create(
+            SessionCreateRequest(
+                idempotency_key="retry-archive-create-0001",
+                prompt="Build a calendar",
+                package_name="com.example.retrycalendar",
+                targets=["package-only"],
+            )
+        )
+        state["status"] = "failed"
+        state["checkpoint_id"] = "failed"
+        state["last_error"] = {"code": "APP_GENERATION_FAILED"}
+        self.service._write_artifact_json(
+            state,
+            "generation_result",
+            "mpos-gen-app-web",
+            {"result": "failed"},
+        )
+        self.service._write_state(state)
+        self.service._archive_failed_attempt(state, "retry-archive-run-0001")
+        updated = self.service.get(state["session_id"])
+        self.assertEqual(len(updated["retry_history"]), 1)
+        archive = (
+            Path(self.temp.name)
+            / state["session_id"]
+            / updated["retry_history"][0]["activity_log"]
+        )
+        self.assertTrue(archive.is_file())
+        self.assertTrue(updated["retry_history"][0]["result_files"])
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):

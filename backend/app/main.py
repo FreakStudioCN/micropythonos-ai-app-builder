@@ -5,13 +5,16 @@ import os
 from pathlib import Path
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .billing import InsufficientCredits, billing_service
 from .generator import GenerationError, generate_app
 from .models import (
+    DemoErrorInjectionRequest,
+    DemoSessionRequest,
     GenerateRequest,
     GenerateResponse,
     DeviceScanRequest,
@@ -23,6 +26,7 @@ from .models import (
     ScreenshotUploadRequest,
     SessionActionRequest,
     SessionCreateRequest,
+    SubscriptionRequest,
 )
 from .session_service import SessionNotFound, session_service
 
@@ -74,9 +78,41 @@ def capabilities() -> dict:
     return session_service.capabilities()
 
 
+@app.get("/api/billing/plans")
+def billing_plans() -> dict:
+    return billing_service.plans()
+
+
+@app.get("/api/billing/account")
+def billing_account(
+    user_id: str = Query(min_length=8, max_length=128),
+) -> dict:
+    return billing_service.account(user_id)
+
+
+@app.post("/api/billing/subscribe")
+def subscribe(request: SubscriptionRequest) -> dict:
+    try:
+        return billing_service.subscribe(
+            request.user_id,
+            request.plan_id,
+            request.idempotency_key,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
 @app.get("/api/sessions")
 def list_sessions() -> list[dict]:
     return session_service.list_sessions()
+
+
+@app.post("/api/demo/sessions", status_code=201)
+def create_demo_session(request: DemoSessionRequest) -> dict:
+    """Create or restore a deterministic, model-independent demo session."""
+    return session_service.create_demo(request)
 
 
 @app.post("/api/sessions", status_code=201)
@@ -149,11 +185,35 @@ async def generate_session(session_id: str, request: SessionActionRequest) -> di
 
 
 @app.post("/api/sessions/{session_id}/actions/run", status_code=202)
-async def run_session(session_id: str, request: SessionActionRequest) -> dict:
+async def run_session(
+    session_id: str,
+    request: SessionActionRequest,
+    user_id: str = Header(
+        default="local-anonymous",
+        alias="X-MPOS-User-ID",
+        min_length=8,
+        max_length=128,
+    ),
+) -> dict:
     try:
+        state = session_service.get(session_id)
+        billing_service.consume_generation(
+            user_id,
+            f"generation:{session_id}:{state['revision_id']}",
+        )
         return session_service.start_generation(session_id, request)
     except SessionNotFound as exc:
         raise HTTPException(status_code=404, detail="Session 不存在") from exc
+    except InsufficientCredits as exc:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "INSUFFICIENT_CREDITS",
+                "message": str(exc),
+                "balance": exc.balance,
+                "required": exc.required,
+            },
+        ) from exc
 
 
 @app.post("/api/sessions/{session_id}/actions/prepare-deps", status_code=202)
@@ -251,6 +311,59 @@ def session_artifacts(session_id: str) -> dict:
         }
     except SessionNotFound as exc:
         raise HTTPException(status_code=404, detail="Session 不存在") from exc
+
+
+@app.get("/api/sessions/{session_id}/summary")
+def session_summary(session_id: str) -> dict:
+    try:
+        return session_service.session_summary(session_id)
+    except SessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="Session 不存在") from exc
+
+
+@app.get("/api/sessions/{session_id}/activity-log")
+def session_activity_log(
+    session_id: str,
+    view: str = Query(default="engineer", pattern="^(user|engineer)$"),
+) -> dict:
+    try:
+        return session_service.activity_log(
+            session_id, view=view, redacted=True
+        )
+    except SessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="Session 不存在") from exc
+
+
+@app.get("/api/sessions/{session_id}/export")
+def export_session(
+    session_id: str,
+    kind: str = Query(default="session", pattern="^(session|demo-artifacts)$"),
+) -> FileResponse:
+    try:
+        path, artifact = session_service.export_bundle(session_id, kind=kind)
+        return FileResponse(
+            path,
+            media_type="application/zip",
+            filename=artifact["display_name"],
+        )
+    except SessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="Session 不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/sessions/{session_id}/demo-error")
+def inject_demo_error(
+    session_id: str, request: DemoErrorInjectionRequest
+) -> dict:
+    try:
+        return session_service.inject_demo_error(session_id, request)
+    except SessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="Session 不存在") from exc
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.get("/api/artifacts/{artifact_id}")

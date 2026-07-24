@@ -78,6 +78,30 @@ interface SessionState {
   };
 }
 type SessionSummary = Omit<SessionState, "generation"> & { generation?: GenerationResult | null };
+interface BillingAccount {
+  user_id: string;
+  credits: number;
+  plan: "free" | "go" | "plus" | "pro";
+  subscription_status: string;
+  generation_cost: number;
+  initial_credits: number;
+  checkout_mode: "demo" | "provider_required";
+}
+interface BillingPlan {
+  id: "go" | "plus" | "pro";
+  name: string;
+  price_cny: number;
+  credits: number;
+  generations: number;
+  featured: boolean;
+  benefits_zh: string[];
+  benefits_en: string[];
+}
+interface BillingPlansResponse {
+  checkout_mode: "demo" | "provider_required";
+  generation_cost: number;
+  plans: BillingPlan[];
+}
 
 const defaultPrompt = "做一个极简四则运算计算器，按钮要大，适合触摸屏";
 const defaultPromptEn = "Build a minimal four-function calculator with large touch-friendly buttons";
@@ -90,6 +114,13 @@ const stages = [
   ["package", "生成真实 MPK"],
   ["publish", "发布准备检查"],
 ] as const;
+const getBillingUserId = () => {
+  const saved = localStorage.getItem("mpos-billing-user-id");
+  if (saved) return saved;
+  const created = `browser-${crypto.randomUUID()}`;
+  localStorage.setItem("mpos-billing-user-id", created);
+  return created;
+};
 
 export default function App() {
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem("mpos-language") === "en" ? "en" : "zh");
@@ -126,6 +157,11 @@ export default function App() {
   const [deviceError, setDeviceError] = useState("");
   const [screenshotBusy, setScreenshotBusy] = useState(false);
   const [continuing, setContinuing] = useState(false);
+  const [billingUserId] = useState(getBillingUserId);
+  const [billingAccount, setBillingAccount] = useState<BillingAccount | null>(null);
+  const [billingPlans, setBillingPlans] = useState<BillingPlan[]>([]);
+  const [subscriptionOpen, setSubscriptionOpen] = useState(false);
+  const [subscriptionBusy, setSubscriptionBusy] = useState("");
   const [wasmReady, setWasmReady] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState("正在启动 MicroPythonOS WASM…");
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -184,13 +220,51 @@ export default function App() {
       .then(setHistory)
       .catch(() => setHistory([]));
   };
+  const refreshBilling = async () => {
+    const response = await fetch(
+      `${apiUrl}/api/billing/account?user_id=${encodeURIComponent(billingUserId)}`,
+    );
+    if (!response.ok) throw new Error("billing unavailable");
+    setBillingAccount(await response.json() as BillingAccount);
+  };
   useEffect(() => {
     refreshHistory();
+    void refreshBilling().catch(() => setBillingAccount(null));
+    void fetch(`${apiUrl}/api/billing/plans`)
+      .then((response) => response.ok ? response.json() as Promise<BillingPlansResponse> : null)
+      .then((payload) => setBillingPlans(payload?.plans || []))
+      .catch(() => setBillingPlans([]));
     void fetch(`${apiUrl}/api/capabilities`)
       .then((response) => response.ok ? response.json() : null)
       .then((payload) => setDesktopAvailable(Boolean(payload?.capabilities?.desktop_preview)))
       .catch(() => setDesktopAvailable(false));
   }, []);
+
+  const subscribeToPlan = async (plan: BillingPlan) => {
+    setSubscriptionBusy(plan.id);
+    try {
+      const response = await fetch(`${apiUrl}/api/billing/subscribe`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: billingUserId,
+          plan_id: plan.id,
+          idempotency_key: `subscribe-${crypto.randomUUID()}`,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(typeof payload.detail === "string" ? payload.detail : tr("订阅激活失败", "Could not activate subscription"));
+      }
+      setBillingAccount(payload as BillingAccount);
+      setSubscriptionOpen(false);
+      setToast(tr(`${plan.name} 已激活，到账 ${plan.credits} 点`, `${plan.name} activated with ${plan.credits} credits`));
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : tr("订阅激活失败", "Could not activate subscription"));
+    } finally {
+      setSubscriptionBusy("");
+    }
+  };
 
   const applySession = (session: SessionState) => {
     localStorage.setItem("mpos-session-id", session.session_id);
@@ -232,6 +306,14 @@ export default function App() {
         return response.json() as Promise<SessionState>;
       })
       .then((session) => {
+        if (["completed", "cancelled", "failed", "timeout"].includes(session.status)) {
+          localStorage.removeItem("mpos-session-id");
+          setStatus("idle");
+          setSessionState(null);
+          setErrorMessage("");
+          setLogs([]);
+          return;
+        }
         applySession(session);
         setLogs((items) => [...items, liveText(`[resume] 已恢复会话 ${session.session_id}（${session.checkpoint_id}）`, `[resume] Restored ${session.session_id} at ${session.checkpoint_id}`)]);
       })
@@ -376,6 +458,15 @@ export default function App() {
   }, [result, wasmReady, sessionState]);
 
   const run = async (repair?: { runtimeError: string; previousCode: string }) => {
+    if (
+      !repair
+      && billingAccount
+      && billingAccount.credits < billingAccount.generation_cost
+    ) {
+      setSubscriptionOpen(true);
+      setToast(tr("点数不足，请先选择订阅套餐", "Not enough credits. Choose a subscription plan."));
+      return;
+    }
     requestAbort.current?.abort();
     clearRuntimeTimers();
     setPermissionOpen(false);
@@ -483,7 +574,10 @@ export default function App() {
       openEventStream(sessionId);
       const actionResponse = await fetch(`${apiUrl}/api/sessions/${sessionId}/${repair ? "retry" : "actions/run"}`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: {
+          "Content-Type": "application/json",
+          "X-MPOS-User-ID": billingUserId,
+        },
         body: JSON.stringify({
           idempotency_key: `${repair ? "repair" : "generate"}-${crypto.randomUUID()}`,
           previous_code: repair?.previousCode,
@@ -491,7 +585,19 @@ export default function App() {
         }),
         signal: controller.signal,
       });
-      if (!actionResponse.ok) throw new Error(tr("后端拒绝启动生成任务", "Backend refused to start generation"));
+      if (!actionResponse.ok) {
+        const failure = await actionResponse.json().catch(() => null);
+        if (actionResponse.status === 402) {
+          await refreshBilling().catch(() => undefined);
+          setSubscriptionOpen(true);
+          throw new Error(
+            failure?.detail?.message
+            || tr("点数不足，请先订阅或充值", "Not enough credits. Subscribe or recharge first."),
+          );
+        }
+        throw new Error(tr("后端拒绝启动生成任务", "Backend refused to start generation"));
+      }
+      if (!repair) await refreshBilling().catch(() => undefined);
 
       let session = await actionResponse.json() as SessionState;
       while (!["waiting_preview", "waiting_device", "completed", "failed", "blocked", "cancelled", "timeout"].includes(session.status)) {
@@ -915,6 +1021,12 @@ export default function App() {
       <header>
         <div className="brand"><span>MP</span><div><strong>MicroPythonOS AI App Builder</strong><small>{tr("用自然语言生成 App", "Build apps with natural language")}</small></div></div>
         <div className="header-actions">
+          <button className="credits-button" onClick={() => setSubscriptionOpen(true)}>
+            <span>◆</span>{billingAccount?.credits ?? 50} {tr("点", "credits")}
+          </button>
+          <button className="subscription-button" onClick={() => setSubscriptionOpen(true)}>
+            {tr("订阅", "Subscribe")}
+          </button>
           <button className="language-button" onClick={() => setLanguage(isZh ? "en" : "zh")} aria-label={tr("切换为英文", "Switch to Chinese")}>
             {isZh ? "English" : "中文"}
           </button>
@@ -1163,6 +1275,41 @@ export default function App() {
             onClick={() => { setPermissionOpen(false); void run(); }}
           >{tr("全部确认，开始运行", "Continue")}</button>
         </div>
+      </div></div>}
+      {subscriptionOpen && <div className="modal-backdrop"><div className="modal subscription-modal">
+        <button className="modal-close" onClick={() => setSubscriptionOpen(false)} aria-label={tr("关闭", "Close")}>×</button>
+        <h2>{tr("选择适合你的方案", "Choose your plan")}</h2>
+        <p>{tr(
+          `当前有 ${billingAccount?.credits ?? 50} 点，每次生成消耗 ${billingAccount?.generation_cost ?? 10} 点。`,
+          `You have ${billingAccount?.credits ?? 50} credits. Each generation costs ${billingAccount?.generation_cost ?? 10}.`,
+        )}</p>
+        <div className="plan-grid">
+          {billingPlans.map((plan) => (
+            <article className={`plan-card ${plan.featured ? "featured" : ""}`} key={plan.id}>
+              {plan.featured && <b className="popular-badge">{tr("最受欢迎", "Most popular")}</b>}
+              <h3>{plan.name}</h3>
+              <div className="plan-price"><strong>¥{plan.price_cny}</strong><span>/{tr("月", "month")}</span></div>
+              <div className="plan-credits">{plan.credits} {tr("点", "credits")}</div>
+              <ul>
+                {(isZh ? plan.benefits_zh : plan.benefits_en).map((benefit) => <li key={benefit}>✓ {benefit}</li>)}
+              </ul>
+              <button
+                className={plan.featured ? "main-button" : "secondary-button"}
+                disabled={Boolean(subscriptionBusy)}
+                onClick={() => void subscribeToPlan(plan)}
+              >
+                {subscriptionBusy === plan.id
+                  ? tr("处理中…", "Processing…")
+                  : billingAccount?.plan === plan.id
+                    ? tr("再次充值", "Recharge again")
+                    : tr(`选择 ${plan.name}`, `Choose ${plan.name}`)}
+              </button>
+            </article>
+          ))}
+        </div>
+        <small>{billingAccount?.checkout_mode === "provider_required"
+          ? tr("尚未配置支付服务商，套餐暂时不能付款激活。", "A payment provider is not configured yet.")
+          : tr("当前为本地演示订阅，不会发生真实扣款。接入微信、支付宝或 Stripe 后再切换为正式支付。", "This is a local demo subscription and no real charge occurs. Connect WeChat Pay, Alipay, or Stripe before production.")}</small>
       </div></div>}
       {toast && <div className="toast">{toast}</div>}
     </div>

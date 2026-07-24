@@ -110,6 +110,28 @@ class SessionActionRequest(BaseModel):
     timeout_seconds: int = Field(default=180, ge=10, le=600)
 
 
+class SubscriptionRequest(BaseModel):
+    user_id: str = Field(min_length=8, max_length=128)
+    plan_id: Literal["go", "plus", "pro"]
+    idempotency_key: str = Field(min_length=8, max_length=160)
+
+
+class DemoSessionRequest(BaseModel):
+    idempotency_key: str = Field(min_length=8, max_length=200)
+    seed: Literal["countdown", "calendar", "device-dashboard"] = "countdown"
+    ui_locale: Literal["zh-CN", "en-US"] = "zh-CN"
+
+
+class DemoErrorInjectionRequest(BaseModel):
+    idempotency_key: str = Field(min_length=8, max_length=200)
+    code: Literal[
+        "LVGL_API_MISSING",
+        "SCRIPT_TIMEOUT",
+        "DEVICE_NOT_CONNECTED",
+        "WEB_PREVIEW_BUILD_FAILED",
+    ] = "LVGL_API_MISSING"
+
+
 class RevisionRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=200)
     prompt: str = Field(min_length=3, max_length=4000)

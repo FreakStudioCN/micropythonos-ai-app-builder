@@ -22,6 +22,12 @@ header {
 .brand div { display: flex; flex-direction: column; }
 .brand small { color: #7a8498; margin-top: 2px; }
 .header-actions { display: flex; align-items: center; gap: 10px; }
+.credits-button, .subscription-button { padding: 8px 12px; border-radius: 999px; font-size: 13px; font-weight: 800; }
+.credits-button { display: flex; align-items: center; gap: 6px; color: #7c3aed; background: #faf5ff; border: 1px solid #ddd6fe; }
+.credits-button span { color: #f59e0b; font-size: 11px; }
+.subscription-button { color: white; background: #4f46e5; border: 1px solid #4f46e5; }
+.credits-button:hover { background: #f3e8ff; }
+.subscription-button:hover { background: #4338ca; }
 .language-button { padding: 8px 12px; color: #4338ca; background: white; border: 1px solid #c7d2fe; border-radius: 999px; font-size: 13px; font-weight: 800; }
 .language-button:hover { background: #eef2ff; }
 .run-state { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 700; padding: 8px 12px; border: 1px solid #d9e5dd; background: #effaf2; color: #18703c; border-radius: 999px; }
@@ -202,6 +208,20 @@ summary { cursor: pointer; font-weight: 700; font-size: 14px; }
 .modal > div { display: flex; justify-content: flex-end; gap: 9px; margin-top: 20px; }
 .modal small { display: block; padding: 10px; background: #f5f7fa; border-radius: 7px; font-size: 11px; }
 .modal.permission-host { width: min(760px, 100%); max-height: calc(100vh - 40px); overflow: auto; }
+.subscription-modal { position: relative; width: min(900px, 100%); max-height: calc(100vh - 40px); overflow: auto; }
+.subscription-modal .modal-close { position: absolute; top: 14px; right: 16px; width: 32px; height: 32px; color: #64748b; background: #f8fafc; border: 0; border-radius: 50%; font-size: 22px; line-height: 1; }
+.subscription-modal > .plan-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: stretch; gap: 14px; margin: 20px 0; }
+.plan-card { position: relative; display: flex; flex-direction: column; min-width: 0; padding: 20px; border: 1px solid #dbe3ee; border-radius: 13px; background: #fff; }
+.plan-card.featured { border: 2px solid #6366f1; box-shadow: 0 10px 30px rgba(79, 70, 229, .12); }
+.popular-badge { position: absolute; top: -12px; left: 50%; transform: translateX(-50%); padding: 4px 10px; white-space: nowrap; color: white; background: #4f46e5; border-radius: 999px; font-size: 10px; }
+.plan-card h3 { margin: 4px 0 12px; font-size: 21px; }
+.plan-price { display: flex; align-items: baseline; gap: 3px; }
+.plan-price strong { font-size: 30px; }
+.plan-price span { color: #7a8498; font-size: 12px; }
+.plan-credits { margin-top: 5px; color: #4f46e5; font-weight: 800; }
+.plan-card ul { flex: 1; margin: 16px 0; padding: 0; list-style: none; }
+.plan-card li { margin: 9px 0; color: #4b5563; font-size: 12px; line-height: 1.45; }
+.plan-card > button { width: 100%; padding: 10px; border-radius: 8px; font-weight: 800; }
 .permission-host > .permission-list { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 16px; }
 .permission-card { display: flex; flex-direction: column; gap: 8px; padding: 14px; border: 1px solid #dbe3ee; border-left-width: 4px; border-radius: 10px; }
 .permission-card.risk-low { border-left-color: #22c55e; }
@@ -231,6 +251,8 @@ summary { cursor: pointer; font-weight: 700; font-size: 14px; }
   .brand strong { font-size: 12px; }
   .run-state { display: none; }
   .language-button { padding: 7px 10px; }
+  .subscription-button { display: none; }
+  .credits-button { padding: 7px 9px; }
   main { padding: 32px 12px 60px; }
   .input-card, .progress-card { padding: 17px; }
   .targets, .meta-grid { grid-template-columns: 1fr; }
@@ -239,4 +261,5 @@ summary { cursor: pointer; font-weight: 700; font-size: 14px; }
   .preview-pane { padding: 15px; }
   .device { width: 100%; max-width: 320px; }
   .permission-host > .permission-list { grid-template-columns: 1fr; }
+  .subscription-modal > .plan-grid { grid-template-columns: 1fr; }
 }
