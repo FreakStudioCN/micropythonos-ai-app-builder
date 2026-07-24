@@ -26,13 +26,12 @@ from .models import (
     ScreenshotUploadRequest,
     SessionActionRequest,
     SessionCreateRequest,
-    SubscriptionRequest,
 )
 from .session_service import SessionNotFound, session_service
 
 load_dotenv()
 
-app = FastAPI(title="MicroPythonOS AI App Builder API", version="0.1.0")
+app = FastAPI(title="Blockless-Make-APP API", version="0.1.0")
 local_frontend_origins = [
     "http://localhost:5173",
     "http://localhost:5174",
@@ -78,30 +77,11 @@ def capabilities() -> dict:
     return session_service.capabilities()
 
 
-@app.get("/api/billing/plans")
-def billing_plans() -> dict:
-    return billing_service.plans()
-
-
 @app.get("/api/billing/account")
 def billing_account(
     user_id: str = Query(min_length=8, max_length=128),
 ) -> dict:
     return billing_service.account(user_id)
-
-
-@app.post("/api/billing/subscribe")
-def subscribe(request: SubscriptionRequest) -> dict:
-    try:
-        return billing_service.subscribe(
-            request.user_id,
-            request.plan_id,
-            request.idempotency_key,
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except RuntimeError as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.get("/api/sessions")

@@ -50,6 +50,15 @@ const encodeBase64 = (text: string) => {
 
 const pythonString = (value: string) => JSON.stringify(value);
 
+const decodeBase64 = (value: string) => {
+  const binary = window.atob(value);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+  return bytes;
+};
+
 export class WebSerialDeviceClient {
   private port: BrowserSerialPort | null = null;
   private reader: SerialReader | null = null;
@@ -79,8 +88,13 @@ export class WebSerialDeviceClient {
     }
     this.options.onState("connecting");
     const port = await serial.requestPort();
+    const info = port.getInfo?.() || {};
+    // ESP32-S3 native USB (Espressif VID 0x303A) is not tied to a physical
+    // 115200-baud UART. Asking Web Serial for a high baud rate removes the
+    // conservative host-side throttle; UART bridge boards keep 115200.
+    const baudRate = info.usbVendorId === 0x303a ? 921600 : 115200;
     try {
-      await port.open({ baudRate: 115200, bufferSize: 4096 });
+      await port.open({ baudRate, bufferSize: 65_536 });
     } catch (error) {
       try {
         await port.close();
@@ -101,14 +115,13 @@ export class WebSerialDeviceClient {
     this.reader = port.readable.getReader();
     this.writer = port.writable.getWriter();
     this.reading = true;
-    const info = port.getInfo?.() || {};
     const identity = info.usbVendorId
       ? `VID ${info.usbVendorId.toString(16).padStart(4, "0").toUpperCase()}`
       : "USB serial device";
-    this.options.onState("connected", identity);
+    this.options.onState("connected", `${identity} · ${baudRate} baud`);
     void this.readLoop();
     await this.writeRaw("\r\n");
-    return info;
+    return { ...info, baudRate };
   }
 
   async disconnect() {
@@ -192,6 +205,170 @@ export class WebSerialDeviceClient {
   }
 
   async uploadBase64(
+    remotePath: string,
+    base64: string,
+    onProgress: (percent: number) => void,
+  ) {
+    const bytes = decodeBase64(base64);
+    const token = crypto.randomUUID().replace(/-/g, "");
+    const readyMarker = `__MPOS_UPLOAD_READY_${token}__`;
+    const okMarker = `__MPOS_UPLOAD_OK_${token}__`;
+    const errorMarker = `__MPOS_UPLOAD_ERROR_${token}__`;
+    const doneMarker = `__MPOS_UPLOAD_DONE_${token}__`;
+
+    await this.execute([
+      "import os",
+      "try:",
+      " os.mkdir('/tmp')",
+      "except OSError:",
+      " pass",
+    ].join("\n"));
+
+    // Start one receiver on the device and then stream the MPK as raw bytes.
+    // The previous implementation sent a Base64 command for every tiny chunk,
+    // making every 384 bytes pay for a full REPL round trip and file stat.
+    const receiver = [
+      "import sys, os, micropython",
+      `print(${pythonString(readyMarker)})`,
+      "micropython.kbd_intr(-1)",
+      `_f = open(${pythonString(remotePath)}, 'wb')`,
+      `_remaining = ${bytes.length}`,
+      "_written = 0",
+      "try:",
+      " while _remaining:",
+      "  _part = sys.stdin.buffer.read(min(4096, _remaining))",
+      "  if not _part:",
+      "   raise OSError('serial upload ended before all bytes arrived')",
+      "  _count = _f.write(_part)",
+      "  _written += _count",
+      "  _remaining -= len(_part)",
+      " _f.close()",
+      ` if _written != ${bytes.length}:`,
+      "  raise OSError('serial upload wrote %d bytes' % _written)",
+      ` print(${pythonString(okMarker)})`,
+      "except Exception as e:",
+      " try:",
+      "  _f.close()",
+      " except Exception:",
+      "  pass",
+      " sys.print_exception(e)",
+      ` print(${pythonString(errorMarker)} + repr(e))`,
+      "finally:",
+      " micropython.kbd_intr(3)",
+      ` print(${pythonString(doneMarker)})`,
+    ].join("\n");
+    const command = `exec(__import__('ubinascii').a2b_base64(${pythonString(encodeBase64(receiver))}).decode())`;
+    const start = this.output.length;
+    const readyPromise = this.waitForOutput(readyMarker, start, 15_000);
+    await this.sendLine(command);
+    await readyPromise;
+
+    const secondsAtSlowSerialRate = Math.ceil(bytes.length / 2_000);
+    const transferTimeout = Math.max(30_000, (secondsAtSlowSerialRate + 20) * 1_000);
+    const donePromise = this.waitForOutput(doneMarker, start, transferTimeout);
+    const writeSize = 4096;
+    onProgress(0);
+    for (let offset = 0; offset < bytes.length; offset += writeSize) {
+      const end = Math.min(bytes.length, offset + writeSize);
+      await this.writeRaw(bytes.subarray(offset, end));
+      onProgress(Math.round((end / bytes.length) * 100));
+    }
+    const output = await donePromise;
+    const errorIndex = output.indexOf(errorMarker);
+    if (errorIndex >= 0) {
+      const message = output.slice(errorIndex + errorMarker.length).split(/\r?\n/, 1)[0].trim();
+      throw new Error(message || "Device rejected the MPK upload");
+    }
+    if (!output.includes(okMarker)) {
+      throw new Error("Device did not confirm the MPK upload");
+    }
+    onProgress(100);
+  }
+
+  async installMpkBase64(
+    packageName: string,
+    base64: string,
+    onProgress: (percent: number) => void,
+  ) {
+    const bytes = decodeBase64(base64);
+    const destination = `apps/${packageName}`;
+    const token = crypto.randomUUID().replace(/-/g, "");
+    const readyMarker = `__MPOS_INSTALL_READY_${token}__`;
+    const okMarker = `__MPOS_INSTALL_OK_${token}__`;
+    const errorMarker = `__MPOS_INSTALL_ERROR_${token}__`;
+    const doneMarker = `__MPOS_INSTALL_DONE_${token}__`;
+
+    // Feed the serial bytes directly into MicroPythonOS' streaming unzip
+    // implementation. This avoids writing /tmp/*.mpk, reading it back,
+    // extracting it, and deleting it as four separate flash operations.
+    const receiver = [
+      "import sys, os, micropython, shutil",
+      "from mpos import AppManager",
+      "from mpos.content.streaming_unzip import StreamingUnzip",
+      "try:",
+      ` _st = os.stat(${pythonString(destination)})`,
+      " if _st[0] & 0x4000:",
+      `  shutil.rmtree(${pythonString(destination)})`,
+      " else:",
+      `  os.remove(${pythonString(destination)})`,
+      "except OSError:",
+      " pass",
+      `_extractor = StreamingUnzip(${pythonString(destination)}, expected_app_name=${pythonString(packageName)}, free_space_limit=lambda req: AppManager._check_free_space('.', req))`,
+      `print(${pythonString(readyMarker)})`,
+      "micropython.kbd_intr(-1)",
+      `_remaining = ${bytes.length}`,
+      "try:",
+      " while _remaining:",
+      "  _part = sys.stdin.buffer.read(min(8192, _remaining))",
+      "  if not _part:",
+      "   raise OSError('serial install ended before all bytes arrived')",
+      "  _extractor.feed(_part)",
+      "  _remaining -= len(_part)",
+      " _extractor.finish()",
+      " AppManager.refresh_apps()",
+      ` if not AppManager.is_installed_by_name(${pythonString(packageName)}):`,
+      "  raise OSError('App was extracted but is not registered')",
+      ` print(${pythonString(okMarker)})`,
+      "except Exception as e:",
+      " try:",
+      `  shutil.rmtree(${pythonString(destination)})`,
+      " except Exception:",
+      "  pass",
+      " sys.print_exception(e)",
+      ` print(${pythonString(errorMarker)} + repr(e))`,
+      "finally:",
+      " micropython.kbd_intr(3)",
+      ` print(${pythonString(doneMarker)})`,
+    ].join("\n");
+    const command = `exec(__import__('ubinascii').a2b_base64(${pythonString(encodeBase64(receiver))}).decode())`;
+    const start = this.output.length;
+    const readyPromise = this.waitForOutput(readyMarker, start, 15_000);
+    await this.sendLine(command);
+    await readyPromise;
+
+    const secondsAtSlowSerialRate = Math.ceil(bytes.length / 2_000);
+    const transferTimeout = Math.max(30_000, (secondsAtSlowSerialRate + 25) * 1_000);
+    const donePromise = this.waitForOutput(doneMarker, start, transferTimeout);
+    const writeSize = 16_384;
+    onProgress(0);
+    for (let offset = 0; offset < bytes.length; offset += writeSize) {
+      const end = Math.min(bytes.length, offset + writeSize);
+      await this.writeRaw(bytes.subarray(offset, end));
+      onProgress(Math.round((end / bytes.length) * 95));
+    }
+    const output = await donePromise;
+    const errorIndex = output.indexOf(errorMarker);
+    if (errorIndex >= 0) {
+      const message = output.slice(errorIndex + errorMarker.length).split(/\r?\n/, 1)[0].trim();
+      throw new Error(message || "Device rejected the MPK install");
+    }
+    if (!output.includes(okMarker)) {
+      throw new Error("Device did not confirm the MPK install");
+    }
+    onProgress(100);
+  }
+
+  async uploadBase64WithReplChunks(
     remotePath: string,
     base64: string,
     onProgress: (percent: number) => void,

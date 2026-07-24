@@ -34,7 +34,11 @@ SYSTEM_PROMPT = """
 - 必须使用控件自己的、已经验证的 set_style_* 方法完成现代化视觉设计，style selector 参数统一传 0
 - 事件回调必须使用 `widget.add_event_cb(callback, lv.EVENT.CLICKED, None)`
 - 严禁使用 `lv.event_code`、`lv.EVENT_CLICKED` 等其他事件名称；当前 MicroPythonOS 只支持 `lv.EVENT.CLICKED` 这种写法
-- 不使用 `label.set_text_align()`；需要摆放文字时使用 `label.align(...)`
+- 不使用 `label.set_text_align()`；需要相对父容器摆放文字时使用
+  `label.align(lv.ALIGN.CENTER, x, y)`，只能传 align、x、y 三个参数
+- 需要相对另一个控件摆放时使用
+  `label.align_to(other, lv.ALIGN.OUT_BOTTOM_MID, x, y)`；严禁写
+  `label.align(other, lv.ALIGN.CENTER, x, y)`，该旧式写法会在当前绑定中参数超量
 - Web 模拟器的默认字体不含中文字形，所有可见控件文字必须使用简短英文或 ASCII，避免显示方框乱码
 - 实际显示区域是 320x240，不是手机屏幕；优先使用百分比尺寸和 flex 布局，确保所有内容都在屏幕内
 - 游戏必须真的提供可点击的开始/跳跃/重置等交互；日历使用 label、button、obj 组成简单网格，不使用未验证的 calendar 高级 API
@@ -43,7 +47,10 @@ SYSTEM_PROMPT = """
 - 射击游戏必须保存玩家和子弹的数字坐标，用 `set_pos()` 更新对象；使用 `lv.timer_create()` 更新子弹、敌人、碰撞和分数
 - 不调用任何控件的 `get_pos()`、`get_coords()`、`get_x()`、`get_y()`；位置必须保存在 `self.player_x`、`self.bullet_y` 等 Python 数字状态中
 - 不调用 `get_child_cnt()`、`get_child()` 或其他控件树读取方法；创建控件时保存到 `self.day_buttons` 等 Python 列表，需要数量时使用 `len(self.day_buttons)`
-- `onCreate()` 必须快速返回，严禁任何 `while` 循环以及 `sleep()`、`sleep_ms()` 等阻塞等待
+- `onCreate()` 必须快速返回，严禁 `while True`、界面主循环以及
+  `sleep()`、`sleep_ms()` 等阻塞等待
+- 计算器解析表达式等纯计算逻辑允许使用有明确退出条件的有限 `while`；
+  循环体必须推进索引或缩小集合。动画、倒计时和游戏更新仍必须使用 lv.timer_create
 - 动画和游戏更新必须使用 `self.update_timer = lv.timer_create(self.update_frame, 33, None)`；回调接收 timer 参数，不能自己写主循环
 - 每个 App 都必须实现 `self_test(self)`，程序化调用真实功能方法并比较操作前后的状态，返回至少两个布尔结果组成的 dict
 - `self_test()` 不能直接返回写死的 True；必须包含方法调用和前后值比较，并在结束前恢复被修改的状态，保证用户看到的是初始界面
@@ -51,7 +58,9 @@ SYSTEM_PROMPT = """
 
 只使用下面这些稳定的 UI 能力，不要猜 API：
 - 创建：lv.obj(parent)、lv.label(parent)、lv.button(parent)、lv.textarea(parent)
-- 布局：set_size、set_width、set_height、set_pos、set_x、set_y、align、center、set_flex_flow(flow)、set_flex_align(main, cross, track)
+- 布局：set_size、set_width、set_height、set_pos、set_x、set_y、
+  align(align, x, y)、align_to(other, align, x, y)、center、
+  set_flex_flow(flow)、set_flex_align(main, cross, track)
 - set_flex_flow 只能传一个 flow 参数，正确示例：`container.set_flex_flow(lv.FLEX_FLOW.ROW_WRAP)`；严禁额外传 selector 或 0
 - 交互：add_event_cb(callback, lv.EVENT.CLICKED, None)、lv.timer_create(callback, milliseconds, None)
 - 文字：label.set_text、label.get_text
@@ -319,6 +328,19 @@ def _validate_code(code: str) -> list[str]:
         raise GenerationError(f"生成结果缺少必要结构：{', '.join(missing)}")
     hits: list[str] = []
     forbidden_calls = {"eval", "exec", "compile", "open"}
+    blocking_while_nodes: set[int] = set()
+    for function in ast.walk(tree):
+        if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for child in ast.walk(function):
+            if not isinstance(child, ast.While):
+                continue
+            condition_is_always_true = (
+                isinstance(child.test, ast.Constant)
+                and child.test.value in {True, 1}
+            )
+            if function.name == "onCreate" or condition_is_always_true:
+                blocking_while_nodes.add(id(child))
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id in forbidden_calls:
@@ -340,8 +362,18 @@ def _validate_code(code: str) -> list[str]:
                 and node.func.attr in {"sleep", "sleep_ms", "sleep_us"}
             ):
                 hits.append(f"{node.func.attr}（会阻塞 WASM）")
-        elif isinstance(node, ast.While):
-            hits.append("while 循环（动画请使用 lv.timer_create）")
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "align"
+                and len(node.args) == 4
+            ):
+                hits.append(
+                    "align(base, align, x, y)（请改用 align_to(base, align, x, y)）"
+                )
+        elif isinstance(node, ast.While) and id(node) in blocking_while_nodes:
+            hits.append(
+                "阻塞式 while 循环（有限计算循环可以保留；界面更新请使用 lv.timer_create）"
+            )
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             modules = [alias.name for alias in node.names]
             if any(name == "subprocess" for name in modules):
@@ -739,6 +771,18 @@ def _normalize_lvgl_code(code: str) -> tuple[str, list[str]]:
     )
     if flex_flow_count:
         applied.append("已移除 set_flex_flow 不支持的 selector 参数")
+    normalized, legacy_align_count = re.subn(
+        r"(?P<target>[A-Za-z_][\w.]*)\.align\(\s*"
+        r"(?P<base>[A-Za-z_][\w.]*)\s*,\s*"
+        r"(?P<align>lv\.ALIGN\.[A-Z0-9_]+)\s*,\s*"
+        r"(?P<x>[^,\n()]+)\s*,\s*(?P<y>[^,\n()]+)\s*\)",
+        r"\g<target>.align_to(\g<base>, \g<align>, \g<x>, \g<y>)",
+        normalized,
+    )
+    if legacy_align_count:
+        applied.append(
+            "已将旧式 align(base, align, x, y) 转换为 align_to(base, align, x, y)"
+        )
     font_free_lines: list[str] = []
     for line in normalized.splitlines():
         if "set_style_text_font" in line or "lv.font_" in line:
@@ -775,6 +819,18 @@ def _build_correction(error: GenerationError, candidate: str = "") -> str:
         )
     if "set_text_align" in message:
         suggestions.append("删除 set_text_align，使用 label.align(...) 摆放标签。")
+    if "align(base, align, x, y)" in message:
+        suggestions.append(
+            "当前绑定中 widget.align 只能传 align、x、y 三个参数。"
+            "相对另一个控件定位必须改为 "
+            "widget.align_to(base, lv.ALIGN.CENTER, x, y)。"
+        )
+    if "阻塞式 while" in message:
+        suggestions.append(
+            "只删除 while True、onCreate 内循环或持续刷新界面的主循环。"
+            "动画和倒计时改用 lv.timer_create。若是计算器解析表达式，"
+            "可以保留有限 while，但每轮必须推进索引并具有明确退出条件。"
+        )
     if "界面仍像未设计的原型" in message:
         suggestions.append(
             "按照三层设计系统完整重做界面：screen、内容卡片和主要按钮分别设置背景；"

@@ -1,1 +1,1 @@
-"""MicroPythonOS AI App Builder backend."""
+"""Blockless-Make-APP backend."""

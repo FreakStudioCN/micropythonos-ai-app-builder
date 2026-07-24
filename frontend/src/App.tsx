@@ -85,22 +85,6 @@ interface BillingAccount {
   subscription_status: string;
   generation_cost: number;
   initial_credits: number;
-  checkout_mode: "demo" | "provider_required";
-}
-interface BillingPlan {
-  id: "go" | "plus" | "pro";
-  name: string;
-  price_cny: number;
-  credits: number;
-  generations: number;
-  featured: boolean;
-  benefits_zh: string[];
-  benefits_en: string[];
-}
-interface BillingPlansResponse {
-  checkout_mode: "demo" | "provider_required";
-  generation_cost: number;
-  plans: BillingPlan[];
 }
 
 const defaultPrompt = "做一个极简四则运算计算器，按钮要大，适合触摸屏";
@@ -114,6 +98,66 @@ const stages = [
   ["package", "生成真实 MPK"],
   ["publish", "发布准备检查"],
 ] as const;
+const stageIndexForError = (stage?: string) => {
+  const indexByStage: Record<string, number> = {
+    analysis: 0,
+    generation: 1,
+    test: 2,
+    package: 3,
+    deploy: 4,
+    publish: 4,
+  };
+  return stage ? (indexByStage[stage] ?? 1) : 1;
+};
+const simulationProjects = [
+  {
+    seed: "countdown",
+    titleZh: "极简倒计时器",
+    titleEn: "Minimal Countdown",
+    sceneZh: "新手可玩",
+    sceneEn: "Beginner",
+    descriptionZh: "大按钮、开始暂停与重置，适合第一次体验和课堂练习。",
+    descriptionEn: "Large controls with start, pause, and reset for first-time makers.",
+    tags: ["Timer", "Touch", "r1"],
+  },
+  {
+    seed: "calendar",
+    titleZh: "触摸日历",
+    titleEn: "Touch Calendar",
+    sceneZh: "热门复刻",
+    sceneEn: "Popular remix",
+    descriptionZh: "月份切换、日期选择和返回今天，可直接在浏览器体验。",
+    descriptionEn: "Browse months, select dates, and jump back to today in the browser.",
+    tags: ["Calendar", "UI", "r1"],
+  },
+  {
+    seed: "device-dashboard",
+    titleZh: "设备状态面板",
+    titleEn: "Device Dashboard",
+    sceneZh: "STEM 课堂",
+    sceneEn: "STEM classroom",
+    descriptionZh: "展示 CPU、内存、存储、WiFi 和电量的仪表盘示例。",
+    descriptionEn: "A dashboard example for CPU, memory, storage, WiFi, and battery.",
+    tags: ["Dashboard", "STEM", "r1"],
+  },
+] as const;
+const verifiedBoards = [
+  ["Freenove", "ESP32-S3 Display", "ESP32-S3", "触摸屏", "入门交互"],
+  ["Fri3d Camp", "2024 Badge", "ESP32-S3", "徽章屏幕", "活动徽章"],
+  ["Fri3d Camp", "2026 Badge", "ESP32-S3", "徽章屏幕", "活动作品"],
+  ["LilyGO", "T4 V1.3", "ESP32", "大屏", "信息面板"],
+  ["LilyGO", "T-Display S3", "ESP32-S3", "彩色小屏", "便携工具"],
+  ["LilyGO", "T-HMI", "ESP32-S3", "触摸屏", "人机界面"],
+  ["LilyGO", "T-Watch S3 Plus", "ESP32-S3", "腕上触摸屏", "穿戴应用"],
+  ["M5Stack", "Core2", "ESP32", "触摸屏", "新手创作"],
+  ["M5Stack", "Fire", "ESP32", "彩色屏", "传感器项目"],
+  ["Makerfabs", "MaTouch ESP32-S3 SPI IPS 2.8\" + OV3660", "ESP32-S3", "2.8\" 触摸屏", "视觉项目"],
+  ["Hardkernel", "ODROID-GO", "ESP32", "游戏屏幕", "掌机应用"],
+  ["SQUiXL", "SQUiXL", "ESP32-S3", "触摸屏", "桌面信息"],
+  ["DFRobot", "UniHiker K10", "ESP32-S3", "彩色屏", "STEM 课堂"],
+  ["unPhone", "unPhone 9", "ESP32-S3", "触摸屏", "移动创作"],
+  ["Waveshare", "ESP32-S3-Touch-LCD-2", "ESP32-S3", "2\" 触摸屏", "新手与展示"],
+] as const;
 const getBillingUserId = () => {
   const saved = localStorage.getItem("mpos-billing-user-id");
   if (saved) return saved;
@@ -126,6 +170,36 @@ export default function App() {
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem("mpos-language") === "en" ? "en" : "zh");
   const isZh = language === "zh";
   const tr = (zh: string, en: string) => isZh ? zh : en;
+  const boardText = (value: string) => {
+    if (isZh) return value;
+    const translations: Record<string, string> = {
+      "触摸屏": "touch display",
+      "徽章屏幕": "badge display",
+      "大屏": "large display",
+      "彩色小屏": "compact color display",
+      "腕上触摸屏": "watch touch display",
+      "2.8\" 触摸屏": "2.8\" touch display",
+      "游戏屏幕": "game display",
+      "彩色屏": "color display",
+      "2\" 触摸屏": "2\" touch display",
+      "入门交互": "beginner interaction",
+      "活动徽章": "event badge",
+      "活动作品": "event projects",
+      "信息面板": "information panels",
+      "便携工具": "portable tools",
+      "人机界面": "HMI projects",
+      "穿戴应用": "wearables",
+      "新手创作": "beginner making",
+      "传感器项目": "sensor projects",
+      "视觉项目": "vision projects",
+      "掌机应用": "handheld games",
+      "桌面信息": "desktop information",
+      "STEM 课堂": "STEM classrooms",
+      "移动创作": "mobile making",
+      "新手与展示": "beginners and demos",
+    };
+    return translations[value] || value;
+  };
   const [prompt, setPrompt] = useState(defaultPrompt);
   const [packageName, setPackageName] = useState("com.example.myapp");
   const [displayName, setDisplayName] = useState("我的 App");
@@ -159,9 +233,7 @@ export default function App() {
   const [continuing, setContinuing] = useState(false);
   const [billingUserId] = useState(getBillingUserId);
   const [billingAccount, setBillingAccount] = useState<BillingAccount | null>(null);
-  const [billingPlans, setBillingPlans] = useState<BillingPlan[]>([]);
-  const [subscriptionOpen, setSubscriptionOpen] = useState(false);
-  const [subscriptionBusy, setSubscriptionBusy] = useState("");
+  const [libraryBusy, setLibraryBusy] = useState("");
   const [wasmReady, setWasmReady] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState("正在启动 MicroPythonOS WASM…");
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -225,46 +297,18 @@ export default function App() {
       `${apiUrl}/api/billing/account?user_id=${encodeURIComponent(billingUserId)}`,
     );
     if (!response.ok) throw new Error("billing unavailable");
-    setBillingAccount(await response.json() as BillingAccount);
+    const account = await response.json() as BillingAccount;
+    setBillingAccount(account);
+    return account;
   };
   useEffect(() => {
     refreshHistory();
     void refreshBilling().catch(() => setBillingAccount(null));
-    void fetch(`${apiUrl}/api/billing/plans`)
-      .then((response) => response.ok ? response.json() as Promise<BillingPlansResponse> : null)
-      .then((payload) => setBillingPlans(payload?.plans || []))
-      .catch(() => setBillingPlans([]));
     void fetch(`${apiUrl}/api/capabilities`)
       .then((response) => response.ok ? response.json() : null)
       .then((payload) => setDesktopAvailable(Boolean(payload?.capabilities?.desktop_preview)))
       .catch(() => setDesktopAvailable(false));
   }, []);
-
-  const subscribeToPlan = async (plan: BillingPlan) => {
-    setSubscriptionBusy(plan.id);
-    try {
-      const response = await fetch(`${apiUrl}/api/billing/subscribe`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          user_id: billingUserId,
-          plan_id: plan.id,
-          idempotency_key: `subscribe-${crypto.randomUUID()}`,
-        }),
-      });
-      const payload = await response.json();
-      if (!response.ok) {
-        throw new Error(typeof payload.detail === "string" ? payload.detail : tr("订阅激活失败", "Could not activate subscription"));
-      }
-      setBillingAccount(payload as BillingAccount);
-      setSubscriptionOpen(false);
-      setToast(tr(`${plan.name} 已激活，到账 ${plan.credits} 点`, `${plan.name} activated with ${plan.credits} credits`));
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : tr("订阅激活失败", "Could not activate subscription"));
-    } finally {
-      setSubscriptionBusy("");
-    }
-  };
 
   const applySession = (session: SessionState) => {
     localStorage.setItem("mpos-session-id", session.session_id);
@@ -283,7 +327,15 @@ export default function App() {
       resultRef.current = session.generation;
     }
     setStatus(session.status);
-    setCurrentStage(session.status === "completed" ? stages.length - 1 : session.generation ? 3 : -1);
+    setCurrentStage(
+      session.status === "completed"
+        ? stages.length - 1
+        : session.last_error
+          ? stageIndexForError(session.last_error.stage)
+          : session.generation
+            ? 3
+            : -1,
+    );
     setErrorMessage(session.last_error?.message || "");
   };
   const restoreSession = async (sessionId: string) => {
@@ -347,6 +399,35 @@ export default function App() {
     });
     eventStream.current = stream;
   };
+  const openLibraryProject = async (
+    seed: (typeof simulationProjects)[number]["seed"],
+    remix: boolean,
+  ) => {
+    setLibraryBusy(`${seed}:${remix ? "remix" : "run"}`);
+    try {
+      const response = await fetch(`${apiUrl}/api/demo/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          idempotency_key: `library-${seed}-${crypto.randomUUID()}`,
+          seed,
+          ui_locale: isZh ? "zh-CN" : "en-US",
+        }),
+      });
+      if (!response.ok) throw new Error(tr("项目载入失败", "Could not load project"));
+      const session = await response.json() as SessionState;
+      applySession(session);
+      setContinuing(remix);
+      setActiveTab("preview");
+      refreshHistory();
+      window.setTimeout(() => document.getElementById(remix ? "builder" : "preview")?.scrollIntoView({ behavior: "smooth" }), 50);
+      setToast(remix ? tr("已载入项目，可以修改需求并生成新版本", "Project loaded. Edit the prompt to create a revision.") : tr("项目已在浏览器预览中打开", "Project opened in the browser preview."));
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : tr("项目载入失败", "Could not load project"));
+    } finally {
+      setLibraryBusy("");
+    }
+  };
 
   useEffect(() => {
     const receive = (event: MessageEvent) => {
@@ -392,6 +473,7 @@ export default function App() {
         }
         setRuntimeStatus(detail);
         setErrorMessage(detail);
+        setCurrentStage(2);
         setStatus("failed");
         setLogs((items) => [...items, `[preview] ${detail}`]);
         const savedSession = localStorage.getItem("mpos-session-id");
@@ -417,7 +499,7 @@ export default function App() {
     const appCode = result.files.find((file) => file.path === "assets/main.py" || file.path === "app.py")?.content;
     if (!appCode || lastRun.current === result.mpk_base64) return;
     lastRun.current = result.mpk_base64;
-    setCurrentStage(stages.length - 1);
+    setCurrentStage(2);
     setRuntimeStatus(tr("正在发送生成代码到 MicroPythonOS WASM…", "Sending generated code to MicroPythonOS WASM…"));
     if (executionTimer.current !== null) window.clearTimeout(executionTimer.current);
     executionTimer.current = window.setTimeout(() => {
@@ -433,6 +515,7 @@ export default function App() {
       }
       setRuntimeStatus(detail);
       setErrorMessage(detail);
+      setCurrentStage(2);
       setStatus("timeout");
       setLogs((items) => [...items, `[preview] ${detail}`]);
       const savedSession = localStorage.getItem("mpos-session-id");
@@ -463,8 +546,7 @@ export default function App() {
       && billingAccount
       && billingAccount.credits < billingAccount.generation_cost
     ) {
-      setSubscriptionOpen(true);
-      setToast(tr("点数不足，请先选择订阅套餐", "Not enough credits. Choose a subscription plan."));
+      setToast(tr("内测点数已用完，请联系项目管理员补充测试点数", "Your beta credits are depleted. Contact the project administrator."));
       return;
     }
     requestAbort.current?.abort();
@@ -589,10 +671,9 @@ export default function App() {
         const failure = await actionResponse.json().catch(() => null);
         if (actionResponse.status === 402) {
           await refreshBilling().catch(() => undefined);
-          setSubscriptionOpen(true);
           throw new Error(
             failure?.detail?.message
-            || tr("点数不足，请先订阅或充值", "Not enough credits. Subscribe or recharge first."),
+            || tr("内测点数已用完，请联系项目管理员", "Beta credits are depleted. Contact the project administrator."),
           );
         }
         throw new Error(tr("后端拒绝启动生成任务", "Backend refused to start generation"));
@@ -614,6 +695,7 @@ export default function App() {
       refreshHistory();
       if (session.status === "failed" || session.status === "blocked" || session.status === "timeout") {
         const failure = session.last_error;
+        if (failure) setCurrentStage(stageIndexForError(failure.stage));
         throw new Error(failure ? `[${failure.code}] ${failure.message}` : tr("生成失败", "Generation failed"));
       }
       if (session.status === "cancelled") throw new Error(tr("任务已取消", "Task cancelled"));
@@ -640,7 +722,7 @@ export default function App() {
       ]);
       setResult(generated);
       resultRef.current = generated;
-      setCurrentStage(stages.length - 1);
+      setCurrentStage(session.input.targets.includes("web-preview") ? 2 : stages.length - 1);
       if (session.status === "completed") setStatus("completed");
       if (session.status === "waiting_device") setStatus("waiting_device");
       setActiveTab("preview");
@@ -806,8 +888,8 @@ export default function App() {
         setSerialConnected(nextState === "connected");
         if (nextState === "connected") {
           setDeviceMessage(tr(
-            `已连接 ${detail || "USB 串口设备"}，波特率 115200。`,
-            `Connected to ${detail || "USB serial device"} at 115200 baud.`,
+            `已连接 ${detail || "USB 串口设备"}。`,
+            `Connected to ${detail || "USB serial device"}.`,
           ));
         } else if (nextState === "error") {
           setDeviceError(detail || tr("串口连接异常", "Serial connection error"));
@@ -943,24 +1025,15 @@ export default function App() {
       throw new Error(tr("请先允许本次设备写入权限，然后再次点击安装。", "Allow device write for this session, then click install again."));
     }
     setDeviceProgress(0);
-    setDeviceMessage(tr("正在上传 MPK 到 ESP32…", "Uploading MPK to the ESP32…"));
-    const safeFilename = result.mpk_filename.replace(/[^A-Za-z0-9_.-]/g, "_");
-    const remotePath = `/tmp/${safeFilename}`;
-    await client.uploadBase64(remotePath, result.mpk_base64, setDeviceProgress);
-    setDeviceMessage(tr("MPK 已上传，正在安装…", "MPK uploaded. Installing…"));
-    await client.execute([
-      "from mpos import AppManager",
-      `AppManager.install_mpk(${JSON.stringify(remotePath)}, ${JSON.stringify(`apps/${result.package_name}`)})`,
-      `assert AppManager.is_installed_by_name(${JSON.stringify(result.package_name)}), 'App was extracted but is not registered'`,
-      `print('Installed: ${result.package_name}')`,
-    ].join("\n"), 120_000);
+    setDeviceMessage(tr("正在高速传输并安装 MPK…", "Fast-streaming and installing the MPK…"));
+    await client.installMpkBase64(result.package_name, result.mpk_base64, setDeviceProgress);
     setDeviceProgress(100);
     const message = tr(
       `安装成功：${result.package_name}`,
       `Installed successfully: ${result.package_name}`,
     );
     setDeviceMessage(message);
-    await recordDeviceResult("install_success", message, remotePath);
+    await recordDeviceResult("install_success", message, `apps/${result.package_name}`);
   });
 
   const runInstalledApp = () => runDeviceAction("run", async (client) => {
@@ -1019,13 +1092,10 @@ export default function App() {
   return (
     <div className="page">
       <header>
-        <div className="brand"><span>MP</span><div><strong>MicroPythonOS AI App Builder</strong><small>{tr("用自然语言生成 App", "Build apps with natural language")}</small></div></div>
+        <div className="brand"><span>BM</span><div><strong>Blockless-Make-APP</strong><small>{tr("MicroPythonOS AI App 生成与分发平台", "MicroPythonOS AI app creation and distribution")}</small></div></div>
         <div className="header-actions">
-          <button className="credits-button" onClick={() => setSubscriptionOpen(true)}>
+          <button className="credits-button" onClick={() => setToast(tr("当前为免费内测点数，不提供在线充值", "Free beta credits; online payments are not enabled."))}>
             <span>◆</span>{billingAccount?.credits ?? 50} {tr("点", "credits")}
-          </button>
-          <button className="subscription-button" onClick={() => setSubscriptionOpen(true)}>
-            {tr("订阅", "Subscribe")}
           </button>
           <button className="language-button" onClick={() => setLanguage(isZh ? "en" : "zh")} aria-label={tr("切换为英文", "Switch to Chinese")}>
             {isZh ? "English" : "中文"}
@@ -1036,11 +1106,11 @@ export default function App() {
 
       <main>
         <section className="hero">
-          <p>{tr("不用会写代码", "No coding required")}</p>
-          <h1>{tr("说出你想要的 App，", "Describe your app. ")}<em>{tr("AI 帮你生成、测试并打包。", "AI builds, tests, and packages it.")}</em></h1>
+          <p>{tr("说出想法 → 浏览器预览 → 真机运行 → 发布分享", "Idea → Preview → Device → Share")}</p>
+          <h1>{tr("让创客 App 先跑起来，", "Make, preview, deploy, and share ")}<em>{tr("再传播出去。", "MicroPythonOS apps from the browser.")}</em></h1>
         </section>
 
-        <div className="workspace">
+        <div className="workspace" id="builder">
           <section className="card input-card">
             <label htmlFor="prompt">{tr("你想做什么 App？", "What app do you want to build?")}</label>
             <textarea id="prompt" value={prompt} disabled={status === "running"} onChange={(event) => setPrompt(event.target.value)} />
@@ -1168,7 +1238,70 @@ export default function App() {
           <div className="history-list">{history.slice(0, 5).map((item) => <button key={item.session_id} onClick={() => void restoreSession(item.session_id)}><strong>{item.input.display_name}</strong><span>{item.revision_id} · {item.status} · {item.checkpoint_id}</span><small>{item.input.prompt_original}</small></button>)}</div>
         </section>}
 
-        <section className="card result-card">
+        <section className="card library-card" id="library">
+          <div className="section-heading">
+            <div><span>{tr("无需设备也能体验", "Try without hardware")}</span><h2>{tr("仿真项目库", "Simulation Project Library")}</h2></div>
+            <p>{tr("先运行、再复刻；有设备时继续安装到 MicroPythonOS。", "Run or remix first, then deploy to MicroPythonOS when you have a device.")}</p>
+          </div>
+          <div className="project-grid">
+            {simulationProjects.map((project) => (
+              <article className="project-card" key={project.seed}>
+                <div className={`project-cover cover-${project.seed}`}><span>{isZh ? project.sceneZh : project.sceneEn}</span><b>{isZh ? project.titleZh : project.titleEn}</b></div>
+                <div className="project-body">
+                  <small>{isZh ? project.sceneZh : project.sceneEn} · Blockless Studio</small>
+                  <h3>{isZh ? project.titleZh : project.titleEn}</h3>
+                  <p>{isZh ? project.descriptionZh : project.descriptionEn}</p>
+                  <div className="project-tags">{project.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
+                  <div className="project-actions">
+                    <button
+                      className="main-button"
+                      disabled={Boolean(libraryBusy)}
+                      onClick={() => void openLibraryProject(project.seed, false)}
+                    >{libraryBusy === `${project.seed}:run` ? tr("载入中…", "Loading…") : tr("在浏览器运行", "Run in Browser")}</button>
+                    <button
+                      className="secondary-button"
+                      disabled={Boolean(libraryBusy)}
+                      onClick={() => void openLibraryProject(project.seed, true)}
+                    >{libraryBusy === `${project.seed}:remix` ? tr("载入中…", "Loading…") : tr("复刻 / 继续修改", "Remix")}</button>
+                  </div>
+                </div>
+              </article>
+            ))}
+          </div>
+        </section>
+
+        <section className="card ecosystem-card" id="devices">
+          <div className="section-heading">
+            <div><span>{tr("真实适配能力", "Verified targets")}</span><h2>{tr("硬件生态与运行目标", "Hardware Ecosystem")}</h2></div>
+            <p>{tr("15 款物理板卡 + Linux/macOS 桌面目标 + WebAssembly Web 目标。", "15 physical boards, Linux/macOS desktop, and WebAssembly Web targets.")}</p>
+          </div>
+          <div className="target-strip">
+            <article><b>15</b><span>{tr("真实适配板卡", "verified boards")}</span></article>
+            <article><b>Web</b><span>WebAssembly</span></article>
+            <article><b>Desktop</b><span>Linux / macOS</span></article>
+          </div>
+          <details className="board-details">
+            <summary>{tr("查看全部 15 款真实适配板卡", "View all 15 verified boards")}</summary>
+            <div className="board-grid">
+              {verifiedBoards.map(([brand, model, platform, screen, use]) => (
+                <article key={`${brand}-${model}`}>
+                  <div><span className="verified-dot" />{tr("已真实适配", "Verified")}</div>
+                  <strong>{brand}</strong>
+                  <h3>{model}</h3>
+                  <p>{platform} · {boardText(screen)}</p>
+                  <small>{tr("推荐：", "Best for: ")}{boardText(use)}</small>
+                </article>
+              ))}
+            </div>
+          </details>
+          <div className="planned-note">
+            <strong>Tuya / 涂鸦智能</strong>
+            <span>{tr("3 款带屏板卡为重点适配方向；当前仅作概念演示，并非真实适配。", "Three display boards are a priority direction. Concept demo only; not currently verified.")}</span>
+            <b>{tr("规划适配", "Planned")}</b>
+          </div>
+        </section>
+
+        <section className="card result-card" id="preview">
           <div className="tabs">
             <button className={activeTab === "preview" ? "active" : ""} onClick={() => setActiveTab("preview")}>{tr("App 预览", "App Preview")}</button>
             <button className={activeTab === "logs" ? "active" : ""} onClick={() => setActiveTab("logs")}>{tr("运行日志", "Runtime Logs")}</button>
@@ -1275,41 +1408,6 @@ export default function App() {
             onClick={() => { setPermissionOpen(false); void run(); }}
           >{tr("全部确认，开始运行", "Continue")}</button>
         </div>
-      </div></div>}
-      {subscriptionOpen && <div className="modal-backdrop"><div className="modal subscription-modal">
-        <button className="modal-close" onClick={() => setSubscriptionOpen(false)} aria-label={tr("关闭", "Close")}>×</button>
-        <h2>{tr("选择适合你的方案", "Choose your plan")}</h2>
-        <p>{tr(
-          `当前有 ${billingAccount?.credits ?? 50} 点，每次生成消耗 ${billingAccount?.generation_cost ?? 10} 点。`,
-          `You have ${billingAccount?.credits ?? 50} credits. Each generation costs ${billingAccount?.generation_cost ?? 10}.`,
-        )}</p>
-        <div className="plan-grid">
-          {billingPlans.map((plan) => (
-            <article className={`plan-card ${plan.featured ? "featured" : ""}`} key={plan.id}>
-              {plan.featured && <b className="popular-badge">{tr("最受欢迎", "Most popular")}</b>}
-              <h3>{plan.name}</h3>
-              <div className="plan-price"><strong>¥{plan.price_cny}</strong><span>/{tr("月", "month")}</span></div>
-              <div className="plan-credits">{plan.credits} {tr("点", "credits")}</div>
-              <ul>
-                {(isZh ? plan.benefits_zh : plan.benefits_en).map((benefit) => <li key={benefit}>✓ {benefit}</li>)}
-              </ul>
-              <button
-                className={plan.featured ? "main-button" : "secondary-button"}
-                disabled={Boolean(subscriptionBusy)}
-                onClick={() => void subscribeToPlan(plan)}
-              >
-                {subscriptionBusy === plan.id
-                  ? tr("处理中…", "Processing…")
-                  : billingAccount?.plan === plan.id
-                    ? tr("再次充值", "Recharge again")
-                    : tr(`选择 ${plan.name}`, `Choose ${plan.name}`)}
-              </button>
-            </article>
-          ))}
-        </div>
-        <small>{billingAccount?.checkout_mode === "provider_required"
-          ? tr("尚未配置支付服务商，套餐暂时不能付款激活。", "A payment provider is not configured yet.")
-          : tr("当前为本地演示订阅，不会发生真实扣款。接入微信、支付宝或 Stripe 后再切换为正式支付。", "This is a local demo subscription and no real charge occurs. Connect WeChat Pay, Alipay, or Stripe before production.")}</small>
       </div></div>}
       {toast && <div className="toast">{toast}</div>}
     </div>

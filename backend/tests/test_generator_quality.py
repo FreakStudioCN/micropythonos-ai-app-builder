@@ -130,6 +130,64 @@ class GeneratorQualityTests(unittest.TestCase):
         )
         self.assertTrue(any("set_flex_flow" in item for item in warnings))
 
+    def test_legacy_align_with_base_widget_is_converted_to_align_to(self) -> None:
+        source = (
+            "timer_label.align(card, lv.ALIGN.CENTER, 0, -20)\n"
+            "status_label.align(card, lv.ALIGN.CENTER, 0, 20)"
+        )
+        normalized, warnings = _normalize_lvgl_code(source)
+        self.assertEqual(
+            normalized,
+            "timer_label.align_to(card, lv.ALIGN.CENTER, 0, -20)\n"
+            "status_label.align_to(card, lv.ALIGN.CENTER, 0, 20)",
+        )
+        self.assertTrue(any("align_to" in item for item in warnings))
+
+    def test_unconvertible_four_argument_align_is_rejected(self) -> None:
+        bad = STYLED_APP.replace(
+            "        self.label.set_text(\"Ready\")",
+            "        self.label.set_text(\"Ready\")\n"
+            "        self.label.align(make_base(), lv.ALIGN.CENTER, 0, 0)",
+        )
+        with self.assertRaisesRegex(GenerationError, "align_to"):
+            _validate_code(bad)
+
+    def test_finite_calculator_parsing_while_is_allowed(self) -> None:
+        finite = STYLED_APP.replace(
+            "    def update_label(self, value):",
+            "    def parse_tokens(self, tokens):\n"
+            "        index = 0\n"
+            "        total = 0\n"
+            "        while index < len(tokens):\n"
+            "            total += tokens[index]\n"
+            "            index += 1\n"
+            "        return total\n\n"
+            "    def update_label(self, value):",
+        )
+        self.assertTrue(_validate_code(finite))
+
+    def test_infinite_while_is_still_rejected(self) -> None:
+        blocking = STYLED_APP.replace(
+            "    def update_label(self, value):",
+            "    def run_forever(self):\n"
+            "        while True:\n"
+            "            pass\n\n"
+            "    def update_label(self, value):",
+        )
+        with self.assertRaisesRegex(GenerationError, "阻塞式 while"):
+            _validate_code(blocking)
+
+    def test_while_inside_on_create_is_rejected(self) -> None:
+        blocking = STYLED_APP.replace(
+            "        screen = lv.obj()",
+            "        count = 0\n"
+            "        while count < 3:\n"
+            "            count += 1\n"
+            "        screen = lv.obj()",
+        )
+        with self.assertRaisesRegex(GenerationError, "阻塞式 while"):
+            _validate_code(blocking)
+
     def test_styled_app_passes_visual_contract(self) -> None:
         result = _validate_visual_contract(STYLED_APP)
         self.assertTrue(result)
@@ -208,6 +266,8 @@ class GeneratorQualityTests(unittest.TestCase):
         self.assertIn("set_style_bg_color", SYSTEM_PROMPT)
         self.assertIn("set_flex_flow(flow)", SYSTEM_PROMPT)
         self.assertIn("get_child_cnt()", SYSTEM_PROMPT)
+        self.assertIn("align_to(other, lv.ALIGN.OUT_BOTTOM_MID, x, y)", SYSTEM_PROMPT)
+        self.assertIn("纯计算逻辑允许使用", SYSTEM_PROMPT)
 
     def test_calendar_prompt_rejects_generic_styled_app(self) -> None:
         with self.assertRaisesRegex(GenerationError, "日期按钮集合"):

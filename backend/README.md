@@ -31,6 +31,7 @@ API 文档：`http://localhost:8000/docs`
 ## Session API
 
 - `GET /api/capabilities`
+- `GET /api/billing/account`
 - `POST /api/sessions`
 - `GET /api/sessions/{session_id}`
 - `GET /api/sessions/{session_id}/events`

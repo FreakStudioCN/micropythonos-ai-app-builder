@@ -1,8 +1,15 @@
-# MicroPythonOS AI App Builder
+# Blockless-Make-APP
 
-用自然语言生成、预览、测试、打包并部署 MicroPythonOS App 的浏览器工作台。
+让创客 App 先跑起来，再传播出去。
 
-用户描述 App 需求后，系统将通过长任务工作流完成：
+Blockless-Make-APP 是面向创客入门、科创教育和 STEM 课堂的 AI App
+生成与分发平台。用户在浏览器里描述想法，系统生成 MicroPythonOS App，
+支持预览、修改、打包、真机部署、uPyStore 发布准备，以及没有设备也能体验的
+仿真项目库。
+
+> Make, preview, deploy, and share MicroPythonOS apps from the browser.
+
+用户描述 App 需求后，系统通过长任务工作流完成：
 
 1. 需求分析与 App 规格生成
 2. MicroPythonOS / LVGL API 校验
@@ -12,13 +19,17 @@
 6. 可选 ESP32/ESP32-S3 真机部署
 7. 发布前检查与上传指导
 
-新浏览器用户首次获得 50 点，每次开始一个新的 App revision 消耗 10 点。
-右上角显示余额并提供 Go、Plus、Pro 套餐选择。当前仓库默认启用本地演示订阅，
-不会产生真实扣款；正式上线前必须关闭 `MPOS_BILLING_DEMO_MODE`，并由微信、
-支付宝或 Stripe 的已验证支付回调发放点数。
+当前版本不提供收费、在线充值或自动订阅。新浏览器用户获得 50 个免费内测点数，
+每个新 App revision 消耗 10 点；点数仅用于控制内测资源。前端不展示购买入口。
 
-当前浏览器 ID 只适用于本机原型。正式收费前还必须接入登录系统，并从服务端
-登录态确定用户身份，不能信任前端自行传入的用户 ID。
+## 当前产品能力
+
+- 自然语言生成、WASM 预览、版本继续修改和真实 `.mpk` 打包。
+- WebSerial 连接 ESP32/ESP32-S3，安装并运行生成的 App。
+- uPyStore 发布校验、截图、材料 ZIP 和手工上传引导。
+- 仿真项目库：倒计时器、日历和设备状态面板，可运行或 Remix。
+- 硬件生态页：15 款真实适配板卡、Desktop 和 Web 目标。
+- Tuya / 涂鸦智能相关板卡只标为规划适配/概念演示。
 
 ## Repository layout
 
