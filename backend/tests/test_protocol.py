@@ -1,9 +1,23 @@
+import base64
+import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 
-from app.models import PermissionDecisionRequest, SessionCreateRequest
+from app.generator import _build_mpk
+from app.models import (
+    DeviceResultRequest,
+    GeneratedFile,
+    GenerateResponse,
+    PermissionDecisionRequest,
+    RevisionRequest,
+    ScreenshotUploadRequest,
+    SessionCreateRequest,
+    SessionActionRequest,
+)
 from app.runner_services import STAGE_SKILLS, mpos_skill_adapter
+from app.session_index import EventLogCache
 import app.session_service as session_module
 
 
@@ -15,6 +29,24 @@ class ProtocolTests(unittest.TestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    def test_event_log_cache_reads_only_complete_appended_lines(self) -> None:
+        path = Path(self.temp.name) / "events.jsonl"
+        cache = EventLogCache()
+        first = {"seq": 1, "message": "开始"}
+        second = {"seq": 2, "message": "完成"}
+        cache.append("sess_cache", path, first)
+        self.assertEqual(cache.read("sess_cache", path), [first])
+
+        encoded = json.dumps(second, ensure_ascii=False).encode("utf-8")
+        with path.open("ab") as handle:
+            handle.write(encoded)
+        self.assertEqual(cache.read("sess_cache", path), [first])
+
+        with path.open("ab") as handle:
+            handle.write(b"\n")
+        self.assertEqual(cache.read("sess_cache", path), [first, second])
+        self.assertEqual(cache.next_seq("sess_cache", path), 3)
 
     def test_all_web_skill_contracts_are_present(self) -> None:
         for stage, expected_name in STAGE_SKILLS.items():
@@ -63,6 +95,246 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(len(state["input_hash"]), 64)
         self.assertIn("mpos_api_summary.json", state["api_summary_version"])
         self.assertNotIn(str(Path(self.temp.name)), str(state["permissions"]))
+        roles = {item["role"] for item in state["artifacts"]}
+        self.assertIn("plan_state", roles)
+        self.assertIn("artifact_manifest", roles)
+
+    def test_revision_keeps_previous_code_as_generation_input(self) -> None:
+        state = self.service.create(
+            SessionCreateRequest(
+                idempotency_key="create-test-0003",
+                prompt="做一个日历",
+                package_name="com.example.calendar",
+                targets=["package-only"],
+            )
+        )
+        state["status"] = "completed"
+        state["generation"] = {
+            "files": [
+                {
+                    "path": "assets/main.py",
+                    "content": "print('r1 calendar')\n",
+                }
+            ]
+        }
+        self.service._write_state(state)
+        revised = self.service.create_revision(
+            state["session_id"],
+            RevisionRequest(
+                idempotency_key="revision-test-0001",
+                prompt="给日历增加返回今天按钮",
+                prompt_language="zh-CN",
+            ),
+        )
+        self.assertEqual(revised["revision_id"], "r2")
+        self.assertEqual(
+            revised["pending_repair"]["previous_code"],
+            "print('r1 calendar')\n",
+        )
+        snapshot = (
+            Path(self.temp.name)
+            / state["session_id"]
+            / "revisions"
+            / "r1"
+            / "session_state.json"
+        )
+        self.assertTrue(snapshot.is_file())
+
+    def test_browser_device_result_is_persisted_as_deploy_artifact(self) -> None:
+        state = self.service.create(
+            SessionCreateRequest(
+                idempotency_key="create-test-0004",
+                prompt="做一个设备状态面板",
+                package_name="com.example.device",
+                targets=["physical-device", "package-only"],
+            )
+        )
+        recorded = self.service.record_device_result(
+            state["session_id"],
+            DeviceResultRequest(
+                idempotency_key="device-result-test-0001",
+                result="launch_success",
+                message="Started com.example.device",
+                log_excerpt="Installed\nStarted: True",
+            ),
+        )
+        self.assertTrue(recorded["hardware_verified"])
+        self.assertEqual(recorded["checkpoint_id"], "completed")
+        deploy = next(
+            item for item in recorded["artifacts"] if item["role"] == "deploy_result"
+        )
+        payload = Path(self.temp.name, state["session_id"], deploy["path"])
+        self.assertTrue(
+            json.loads(payload.read_text(encoding="utf-8"))["app_launched"]
+        )
+
+    def test_publish_screenshot_upload_validates_and_registers_png(self) -> None:
+        state = self.service.create(
+            SessionCreateRequest(
+                idempotency_key="create-test-0005",
+                prompt="做一个日历",
+                package_name="com.example.calendar",
+                targets=["package-only"],
+            )
+        )
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+            "YAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+        )
+        updated = self.service.upload_screenshot(
+            state["session_id"],
+            ScreenshotUploadRequest(
+                idempotency_key="screenshot-test-0001",
+                filename="../../calendar.png",
+                media_type="image/png",
+                data_base64=base64.b64encode(png).decode(),
+                source="manual",
+            ),
+        )
+        screenshot = next(
+            item
+            for item in updated["artifacts"]
+            if item["role"] == "publish_screenshot"
+        )
+        self.assertTrue(screenshot["path"].startswith("artifacts/screenshots/"))
+        self.assertNotIn("..", screenshot["path"])
+
+
+class PipelineTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        session_module.SESSION_ROOT = Path(self.temp.name).resolve()
+        self.service = session_module.SessionService()
+
+    def tearDown(self) -> None:
+        self.temp.cleanup()
+
+    async def test_pipeline_writes_required_protocol_artifacts(self) -> None:
+        state = self.service.create(
+            SessionCreateRequest(
+                idempotency_key="pipeline-create-0001",
+                prompt="做一个设备状态面板",
+                package_name="com.example.dashboard",
+                targets=["package-only"],
+            )
+        )
+        for permission in state["permissions"]:
+            if not permission["required"]:
+                continue
+            state = self.service.decide_permission(
+                permission["permission_id"],
+                PermissionDecisionRequest(
+                    idempotency_key=f"allow-{permission['permission_id']}",
+                    decision="allow_once",
+                ),
+            )
+        manifest = {
+            "fullname": "com.example.dashboard",
+            "name": "Dashboard",
+            "publisher": "erkou111",
+            "version": "0.1.0",
+            "activities": [
+                {
+                    "entrypoint": "assets/main.py",
+                    "classname": "GeneratedApp",
+                }
+            ],
+        }
+        app_code = "print('dashboard')\n"
+        generated = GenerateResponse(
+            package_name="com.example.dashboard",
+            summary="设备状态面板",
+            manifest=manifest,
+            files=[
+                GeneratedFile(
+                    path="MANIFEST.JSON",
+                    content=json.dumps(manifest),
+                ),
+                GeneratedFile(path="assets/main.py", content=app_code),
+                GeneratedFile(
+                    path="generation_result.json",
+                    content=json.dumps({"result": "success"}),
+                ),
+            ],
+            mpk_base64=_build_mpk(
+                "com.example.dashboard", manifest, app_code
+            ),
+            model="test-model",
+            acceptance_tests=["state updates", "controls work"],
+            mpk_filename="com.example.dashboard_r1.mpk",
+            prompt_normalized_zh="创建一个设备状态面板。",
+            prompt_normalized_en="Create a device status dashboard.",
+            store_metadata={
+                "display_name_zh": "设备面板",
+                "display_name_en": "Device Dashboard",
+                "short_description_zh": "显示设备状态",
+                "short_description_en": "Shows device status",
+                "long_description_zh": "显示设备的主要状态。",
+                "long_description_en": "Shows primary device status.",
+                "release_notes_zh": "首次发布",
+                "release_notes_en": "Initial release",
+                "category": "tools",
+            },
+        )
+        with patch.object(
+            session_module, "generate_app", new=AsyncMock(return_value=generated)
+        ):
+            self.service.start_generation(
+                state["session_id"],
+                SessionActionRequest(idempotency_key="pipeline-run-0001"),
+            )
+            await self.service._tasks[state["session_id"]]
+        completed = self.service.get(state["session_id"])
+        self.assertEqual(completed["status"], "completed")
+        roles = {item["role"] for item in completed["artifacts"]}
+        self.assertTrue(
+            {
+                "analysis_result",
+                "dependency_handoff",
+                "generation_result",
+                "app_test_result",
+                "package_result",
+                "app_index_entry",
+                "deploy_result",
+                "publish_result",
+                "artifact_manifest",
+                "session_bundle",
+            }.issubset(roles)
+        )
+        self.assertTrue(
+            any(role.startswith("phase_complete.") for role in roles)
+        )
+
+    async def test_analyze_endpoint_runs_only_analyze_stage(self) -> None:
+        state = self.service.create(
+            SessionCreateRequest(
+                idempotency_key="stage-create-0001",
+                prompt="做一个日历",
+                package_name="com.example.calendar",
+                targets=["package-only"],
+            )
+        )
+        for permission in state["permissions"]:
+            if permission["required"]:
+                state = self.service.decide_permission(
+                    permission["permission_id"],
+                    PermissionDecisionRequest(
+                        idempotency_key=f"allow-{permission['permission_id']}",
+                        decision="allow_once",
+                    ),
+                )
+        started = self.service.start_action(
+            state["session_id"],
+            "analyze",
+            SessionActionRequest(idempotency_key="stage-analyze-0001"),
+        )
+        self.assertEqual(started["current_phase"], "mpos-analyze-app-web")
+        await self.service._tasks[state["session_id"]]
+        completed = self.service.get(state["session_id"])
+        roles = {item["role"] for item in completed["artifacts"]}
+        self.assertIn("analysis_result", roles)
+        self.assertNotIn("generation_result", roles)
+        self.assertIsNone(completed["generation"])
 
 
 if __name__ == "__main__":

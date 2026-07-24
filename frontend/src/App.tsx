@@ -1,7 +1,12 @@
 import { useEffect, useRef, useState } from "react";
+import {
+  API_BASE_URL,
+  GENERATION_TIMEOUT_MS,
+  WASM_RUNTIME_URL,
+} from "./config";
 import { WebSerialDeviceClient, type DeviceConnectionState } from "./deviceSerial";
 
-type Status = "idle" | "created" | "running" | "waiting_preview" | "completed" | "failed" | "blocked" | "cancelled" | "timeout";
+type Status = "idle" | "created" | "running" | "waiting_preview" | "waiting_device" | "completed" | "failed" | "blocked" | "cancelled" | "timeout";
 type Language = "zh" | "en";
 interface GeneratedFile {
   path: string;
@@ -18,6 +23,9 @@ interface GenerationResult {
   acceptance_tests: string[];
   mpk_filename: string;
   revision: number;
+  prompt_normalized_zh?: string;
+  prompt_normalized_en?: string;
+  store_metadata?: Record<string, string>;
 }
 interface Artifact {
   id: string;
@@ -50,7 +58,7 @@ interface StructuredError {
 interface SessionState {
   session_id: string;
   revision_id: string;
-  status: "blocked" | "created" | "running" | "waiting_preview" | "completed" | "failed" | "cancelled" | "timeout";
+  status: "blocked" | "created" | "running" | "waiting_preview" | "waiting_device" | "completed" | "failed" | "cancelled" | "timeout";
   checkpoint_id: string;
   current_phase: string;
   permissions: Permission[];
@@ -65,14 +73,16 @@ interface SessionState {
     publisher: string;
     version: string;
     targets: string[];
+    prompt_normalized_zh?: string;
+    prompt_normalized_en?: string;
   };
 }
 type SessionSummary = Omit<SessionState, "generation"> & { generation?: GenerationResult | null };
 
 const defaultPrompt = "做一个极简四则运算计算器，按钮要大，适合触摸屏";
 const defaultPromptEn = "Build a minimal four-function calculator with large touch-friendly buttons";
-const wasmRuntimeUrl = "http://127.0.0.1:8000/mpos-web/index.html?embed=1&bridge=3";
-const apiUrl = "http://localhost:8000";
+const wasmRuntimeUrl = WASM_RUNTIME_URL;
+const apiUrl = API_BASE_URL;
 const stages = [
   ["analysis", "需求分析"],
   ["generation", "DeepSeek 生成代码"],
@@ -91,6 +101,7 @@ export default function App() {
   const [publisher, setPublisher] = useState("erkou111");
   const [version, setVersion] = useState("0.1.0");
   const [desktopTarget, setDesktopTarget] = useState(false);
+  const [desktopAvailable, setDesktopAvailable] = useState(false);
   const [webTarget, setWebTarget] = useState(true);
   const [physicalTarget, setPhysicalTarget] = useState(false);
   const [packageTarget, setPackageTarget] = useState(true);
@@ -113,6 +124,7 @@ export default function App() {
   const [deviceBusy, setDeviceBusy] = useState("");
   const [deviceProgress, setDeviceProgress] = useState(0);
   const [deviceError, setDeviceError] = useState("");
+  const [screenshotBusy, setScreenshotBusy] = useState(false);
   const [continuing, setContinuing] = useState(false);
   const [wasmReady, setWasmReady] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState("正在启动 MicroPythonOS WASM…");
@@ -125,6 +137,7 @@ export default function App() {
   const wasmTimer = useRef<number | null>(null);
   const resultRef = useRef<GenerationResult | null>(null);
   const serialClientRef = useRef<WebSerialDeviceClient | null>(null);
+  const deviceInfoRef = useRef<{ usbVendorId?: number; usbProductId?: number }>({});
   const repairAttempts = useRef(0);
   const repairing = useRef(false);
   const repairHandler = useRef<(detail: string) => boolean>(() => false);
@@ -173,6 +186,10 @@ export default function App() {
   };
   useEffect(() => {
     refreshHistory();
+    void fetch(`${apiUrl}/api/capabilities`)
+      .then((response) => response.ok ? response.json() : null)
+      .then((payload) => setDesktopAvailable(Boolean(payload?.capabilities?.desktop_preview)))
+      .catch(() => setDesktopAvailable(false));
   }, []);
 
   const applySession = (session: SessionState) => {
@@ -384,7 +401,10 @@ export default function App() {
     setCurrentStage(1);
     const controller = new AbortController();
     requestAbort.current = controller;
-    const requestTimer = window.setTimeout(() => controller.abort(), 180000);
+    const requestTimer = window.setTimeout(
+      () => controller.abort(),
+      GENERATION_TIMEOUT_MS,
+    );
     try {
       let sessionId = repair || continuing || sessionState?.status === "blocked" || sessionState?.status === "created"
         ? localStorage.getItem("mpos-session-id")
@@ -410,6 +430,26 @@ export default function App() {
             publisher,
             version,
             targets: selectedTargets,
+            capabilities: {
+              file_operation: true,
+              script_run: true,
+              approval_request: true,
+              permission_request: true,
+              checkpoint_resume: true,
+              cancellation: true,
+              retry: true,
+              timeout: true,
+              desktop_preview: desktopAvailable,
+              web_preview: true,
+              physical_device: "serial" in navigator,
+              browser_webserial: "serial" in navigator,
+              serial_port_scan: "serial" in navigator,
+              mpremote: false,
+              firmware_flash: false,
+              network_read: true,
+              network_upload: false,
+              upystore_publish: false,
+            },
           }),
           signal: controller.signal,
         });
@@ -441,7 +481,7 @@ export default function App() {
         setContinuing(false);
       }
       openEventStream(sessionId);
-      const actionResponse = await fetch(`${apiUrl}/api/sessions/${sessionId}/${repair ? "retry" : "actions/generate"}`, {
+      const actionResponse = await fetch(`${apiUrl}/api/sessions/${sessionId}/${repair ? "retry" : "actions/run"}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -454,7 +494,7 @@ export default function App() {
       if (!actionResponse.ok) throw new Error(tr("后端拒绝启动生成任务", "Backend refused to start generation"));
 
       let session = await actionResponse.json() as SessionState;
-      while (!["waiting_preview", "completed", "failed", "blocked", "cancelled", "timeout"].includes(session.status)) {
+      while (!["waiting_preview", "waiting_device", "completed", "failed", "blocked", "cancelled", "timeout"].includes(session.status)) {
         await new Promise((resolve) => window.setTimeout(resolve, 700));
         const poll = await fetch(`${apiUrl}/api/sessions/${sessionId}`, { signal: controller.signal });
         if (!poll.ok) throw new Error(tr("读取会话状态失败", "Could not read session state"));
@@ -471,6 +511,12 @@ export default function App() {
         throw new Error(failure ? `[${failure.code}] ${failure.message}` : tr("生成失败", "Generation failed"));
       }
       if (session.status === "cancelled") throw new Error(tr("任务已取消", "Task cancelled"));
+      if (session.status === "waiting_device") {
+        setLogs((items) => [...items, tr(
+          "[deploy] 生成与打包完成，等待你连接 ESP32 并安装生成的 MPK。",
+          "[deploy] Build and packaging are complete. Connect the ESP32 and install the generated MPK.",
+        )]);
+      }
       const generated = session.generation;
       if (!generated) throw new Error(tr("会话完成但没有生成产物", "Session finished without generated artifacts"));
       setCurrentStage(2);
@@ -490,13 +536,17 @@ export default function App() {
       resultRef.current = generated;
       setCurrentStage(stages.length - 1);
       if (session.status === "completed") setStatus("completed");
+      if (session.status === "waiting_device") setStatus("waiting_device");
       setActiveTab("preview");
     } catch (error) {
       if (error instanceof DOMException && error.name === "AbortError" && requestAbort.current !== controller) {
         return;
       }
       const message = error instanceof DOMException && error.name === "AbortError"
-        ? tr("DeepSeek 生成超过 3 分钟，已停止等待。请重试。", "DeepSeek took over 3 minutes. Please retry.")
+        ? tr(
+            `DeepSeek 生成超过 ${Math.round(GENERATION_TIMEOUT_MS / 60000)} 分钟，已停止等待。请重试。`,
+            `DeepSeek took over ${Math.round(GENERATION_TIMEOUT_MS / 60000)} minutes. Please retry.`,
+          )
         : error instanceof Error ? error.message : tr("未知错误", "Unknown error");
       setErrorMessage(message);
       setStatus(error instanceof DOMException && error.name === "AbortError" ? "timeout" : "failed");
@@ -586,6 +636,53 @@ export default function App() {
     setToast(tr(`已下载 ${artifact.display_name}`, `Downloaded ${artifact.display_name}`));
   };
 
+  const uploadScreenshot = async (file: File) => {
+    const sessionId = sessionState?.session_id;
+    if (!sessionId) {
+      setToast(tr("请先生成 App", "Generate an app first"));
+      return;
+    }
+    if (!["image/png", "image/jpeg", "image/webp"].includes(file.type)) {
+      setToast(tr("只支持 PNG、JPEG 或 WebP", "Only PNG, JPEG, or WebP is supported"));
+      return;
+    }
+    if (file.size > 10 * 1024 * 1024) {
+      setToast(tr("截图不能超过 10 MB", "Screenshot must be 10 MB or smaller"));
+      return;
+    }
+    setScreenshotBusy(true);
+    try {
+      const dataUrl = await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => resolve(String(reader.result || ""));
+        reader.onerror = () => reject(reader.error || new Error("File read failed"));
+        reader.readAsDataURL(file);
+      });
+      const response = await fetch(`${apiUrl}/api/sessions/${sessionId}/screenshots`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          idempotency_key: `screenshot-${crypto.randomUUID()}`,
+          filename: file.name,
+          media_type: file.type,
+          data_base64: dataUrl.split(",", 2)[1] || "",
+          source: "manual",
+        }),
+      });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail.detail || tr("截图上传失败", "Screenshot upload failed"));
+      }
+      const updated = await response.json() as SessionState;
+      setSessionState(updated);
+      setToast(tr("截图已加入发布材料", "Screenshot added to publishing materials"));
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : tr("截图上传失败", "Screenshot upload failed"));
+    } finally {
+      setScreenshotBusy(false);
+    }
+  };
+
   const scanDevices = async () => {
     if (!WebSerialDeviceClient.isSupported()) {
       setDeviceMessage(tr(
@@ -613,9 +710,10 @@ export default function App() {
     });
     try {
       serialClientRef.current = client;
-      await client.connect();
+      deviceInfoRef.current = await client.connect();
     } catch (error) {
       serialClientRef.current = null;
+      deviceInfoRef.current = {};
       setDeviceState("error");
       setSerialConnected(false);
       const reason = error instanceof Error ? error.message : String(error);
@@ -646,6 +744,41 @@ export default function App() {
     }
   };
 
+  const recordDeviceResult = async (
+    deviceResult: "probe_success" | "install_success" | "launch_success" | "failed",
+    message: string,
+    installedPath?: string,
+  ) => {
+    const sessionId = localStorage.getItem("mpos-session-id");
+    if (!sessionId) return;
+    try {
+      const response = await fetch(`${apiUrl}/api/sessions/${sessionId}/devices/result`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          idempotency_key: `device-result-${deviceResult}-${crypto.randomUUID()}`,
+          result: deviceResult,
+          board: "Waveshare ESP32-S3-Touch-LCD-2",
+          usb_vendor_id: deviceInfoRef.current.usbVendorId,
+          usb_product_id: deviceInfoRef.current.usbProductId,
+          installed_path: installedPath,
+          transport: "webserial",
+          message,
+          log_excerpt: deviceLogs.slice(-20_000),
+        }),
+      });
+      if (response.ok) {
+        setSessionState(await response.json() as SessionState);
+        refreshHistory();
+      }
+    } catch {
+      setLogs((items) => [...items, tr(
+        "[device] 真机结果暂时无法写入后端审计日志",
+        "[device] Could not persist the device result to the backend audit log",
+      )]);
+    }
+  };
+
   const runDeviceAction = async (label: string, action: (client: WebSerialDeviceClient) => Promise<void>) => {
     const client = serialClientRef.current;
     if (!client?.connected) {
@@ -660,6 +793,9 @@ export default function App() {
       const reason = error instanceof Error ? error.message : String(error);
       setDeviceError(reason);
       setDeviceLogs((previous) => `${previous}\n[ERROR] ${reason}\n`.slice(-100_000));
+      if (["probe", "install", "run", "restart"].includes(label)) {
+        await recordDeviceResult("failed", reason);
+      }
     } finally {
       setDeviceBusy("");
     }
@@ -673,7 +809,9 @@ export default function App() {
       "print('MicroPython:', sys.version)",
       "print('MicroPythonOS: ready')",
     ].join("\n"));
-    setDeviceMessage(tr("MicroPythonOS 已就绪，可以安装和运行 App。", "MicroPythonOS is ready for app install and launch."));
+    const message = tr("MicroPythonOS 已就绪，可以安装和运行 App。", "MicroPythonOS is ready for app install and launch.");
+    setDeviceMessage(message);
+    await recordDeviceResult("probe_success", message);
   });
 
   const sendDeviceCommand = () => {
@@ -705,17 +843,18 @@ export default function App() {
     await client.uploadBase64(remotePath, result.mpk_base64, setDeviceProgress);
     setDeviceMessage(tr("MPK 已上传，正在安装…", "MPK uploaded. Installing…"));
     await client.execute([
-      "from mpos.content.app_manager import AppManager",
+      "from mpos import AppManager",
       `AppManager.install_mpk(${JSON.stringify(remotePath)}, ${JSON.stringify(`apps/${result.package_name}`)})`,
-      "AppManager.refresh_apps()",
       `assert AppManager.is_installed_by_name(${JSON.stringify(result.package_name)}), 'App was extracted but is not registered'`,
       `print('Installed: ${result.package_name}')`,
     ].join("\n"), 120_000);
     setDeviceProgress(100);
-    setDeviceMessage(tr(
+    const message = tr(
       `安装成功：${result.package_name}`,
       `Installed successfully: ${result.package_name}`,
-    ));
+    );
+    setDeviceMessage(message);
+    await recordDeviceResult("install_success", message, remotePath);
   });
 
   const runInstalledApp = () => runDeviceAction("run", async (client) => {
@@ -728,7 +867,9 @@ export default function App() {
       "assert started, 'MicroPythonOS could not start the installed App'",
       "print('Started:', started)",
     ].join("\n"), 45_000);
-    setDeviceMessage(tr(`已启动 ${appName}`, `Started ${appName}`));
+    const message = tr(`已启动 ${appName}`, `Started ${appName}`);
+    setDeviceMessage(message);
+    await recordDeviceResult("launch_success", message);
   });
 
   const stopInstalledApp = () => runDeviceAction("stop", async (client) => {
@@ -777,7 +918,7 @@ export default function App() {
           <button className="language-button" onClick={() => setLanguage(isZh ? "en" : "zh")} aria-label={tr("切换为英文", "Switch to Chinese")}>
             {isZh ? "English" : "中文"}
           </button>
-          <div className={`run-state ${status}`}><i />{status === "running" ? tr("生成中", "Generating") : status === "blocked" ? tr("等待授权", "Permission required") : status === "cancelled" ? tr("已取消", "Cancelled") : status === "timeout" ? tr("已超时", "Timed out") : status === "failed" ? tr("生成失败", "Failed") : status === "completed" ? tr("已完成", "Completed") : tr("系统就绪", "Ready")}</div>
+          <div className={`run-state ${status}`}><i />{status === "running" ? tr("生成中", "Generating") : status === "waiting_device" ? tr("等待设备安装", "Waiting for device") : status === "blocked" ? tr("等待授权", "Permission required") : status === "cancelled" ? tr("已取消", "Cancelled") : status === "timeout" ? tr("已超时", "Timed out") : status === "failed" ? tr("生成失败", "Failed") : status === "completed" ? tr("已完成", "Completed") : tr("系统就绪", "Ready")}</div>
         </div>
       </header>
 
@@ -931,7 +1072,13 @@ export default function App() {
                   <i />{runtimeStatus}
                 </div>
                 {sessionState?.artifacts.find((item) => item.role === "desktop_screenshot") && <img className="desktop-screenshot" src={`${apiUrl}/api/artifacts/${sessionState.artifacts.find((item) => item.role === "desktop_screenshot")!.id}`} alt={tr("桌面测试截图", "Desktop smoke screenshot")} />}
-                {result && <small className="preview-summary">{result.summary} · {result.model}</small>}
+                {result && <>
+                  <small className="preview-summary">{result.summary} · {result.model}</small>
+                  <small className="preview-summary">{tr(
+                    `AI 规范化需求：${result.prompt_normalized_zh || sessionState?.input.prompt_normalized_zh || prompt}`,
+                    `Normalized requirement: ${result.prompt_normalized_en || sessionState?.input.prompt_normalized_en || prompt}`,
+                  )}</small>
+                </>}
               </div>
               <div className="device wasm-device">
                 <div className="device-status"><span>10:24</span><span>● WiFi　87%</span></div>
@@ -969,6 +1116,20 @@ export default function App() {
                   <div className="publish-guide">
                     <strong>{tr("uPyStore 发布检查", "uPyStore checklist")}</strong>
                     <span>{tr("✓ Manifest　✓ _rN.mpk　△ Web/真机验证　△ PNG/JPEG/WebP 截图。发布材料 ZIP 已进入上方产物列表；这里只提供手工上传引导。", "✓ Manifest  ✓ _rN.mpk  △ Web/device validation  △ PNG/JPEG/WebP screenshot. The publishing ZIP is listed above; upload remains manual.")}</span>
+                    <label className="secondary-button">
+                      {screenshotBusy ? tr("正在上传截图…", "Uploading screenshot…") : tr("添加发布截图", "Add publishing screenshot")}
+                      <input
+                        type="file"
+                        accept="image/png,image/jpeg,image/webp"
+                        disabled={screenshotBusy}
+                        hidden
+                        onChange={(event) => {
+                          const file = event.target.files?.[0];
+                          event.currentTarget.value = "";
+                          if (file) void uploadScreenshot(file);
+                        }}
+                      />
+                    </label>
                     <a href="https://upystore.io/developer" target="_blank" rel="noreferrer">{tr("打开 uPyStore 开发者入口", "Open uPyStore Developer")}</a>
                   </div>
                 </div>

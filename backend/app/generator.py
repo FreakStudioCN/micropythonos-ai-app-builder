@@ -73,6 +73,19 @@ SYSTEM_PROMPT = """
 JSON 格式必须严格为：
 {
   "summary": "一句话说明生成了什么",
+  "prompt_normalized_zh": "规范化后的中文技术需求",
+  "prompt_normalized_en": "Normalized English technical requirement",
+  "store_metadata": {
+    "display_name_zh": "中文显示名",
+    "display_name_en": "English display name",
+    "short_description_zh": "中文短描述",
+    "short_description_en": "English short description",
+    "long_description_zh": "中文长描述",
+    "long_description_en": "English long description",
+    "release_notes_zh": "中文发布说明",
+    "release_notes_en": "English release notes",
+    "category": "tools 或 games 等分类"
+  },
   "entrypoint": "app.py",
   "classname": "GeneratedApp",
   "app_code": "完整 Python 源码字符串",
@@ -188,11 +201,11 @@ async def _call_deepseek(
             "不得为了通过检查而删除用户要求的功能；不得用 pass 或假按钮代替交互。\n"
             f"检查失败原因：\n{correction}"
         )
-    if request.runtime_error and request.previous_code:
+    if request.previous_code:
         user_prompt += (
-            "\n\n下面是上一次代码在真实 MicroPythonOS WASM 中运行时的错误。"
-            "请保留用户要求的功能，完整重写并修复所有不兼容 API，不要只解释。\n"
-            f"运行错误：\n{request.runtime_error}\n\n"
+            "\n\n这是已有 App 的连续修改，不是从零生成。"
+            "必须保留未被用户要求删除的功能，基于下面的上一版代码修改。\n"
+            f"运行错误（如果为空则表示功能修改）：\n{request.runtime_error or '无'}\n\n"
             f"上一次 app.py：\n{request.previous_code}"
         )
     payload = {
@@ -370,6 +383,39 @@ def _validate_interaction_contract(code: str, prompt: str) -> list[str]:
             "射击游戏缺少可实际操作的功能：" + "、".join(missing)
         )
     return ["已通过射击游戏 LEFT / RIGHT / FIRE 交互检查"]
+
+
+def _validate_product_contract(code: str, prompt: str) -> list[str]:
+    """Reject styled code that does not implement the requested product."""
+
+    lowered_prompt = prompt.casefold()
+    lowered_code = code.casefold()
+    missing: list[str] = []
+    if any(token in lowered_prompt for token in ("日历", "calendar")):
+        if "month" not in lowered_code:
+            missing.append("月份状态和切换逻辑")
+        if "day_buttons" not in lowered_code and "range(1, 32)" not in lowered_code:
+            missing.append("日期按钮集合")
+        if lowered_code.count("add_event_cb") < 2:
+            missing.append("上月/下月或返回今天的真实交互")
+    if any(token in lowered_prompt for token in ("计算器", "calculator")):
+        if not any(token in lowered_code for token in ("calculate", "compute", "equals")):
+            missing.append("计算执行逻辑")
+        if not all(token in code for token in ("+", "-", "*", "/")):
+            missing.append("四则运算符")
+        if lowered_code.count("add_event_cb") < 2:
+            missing.append("数字和运算按钮交互")
+    if any(token in lowered_prompt for token in ("番茄", "pomodoro", "计时器", "timer")):
+        if "lv.timer_create" not in code:
+            missing.append("非阻塞计时器")
+        if lowered_code.count("add_event_cb") < 2:
+            missing.append("开始/暂停/重置交互")
+    if missing:
+        raise GenerationError(
+            "生成代码虽然可显示，但没有完整实现用户要求的产品功能："
+            + "、".join(missing)
+        )
+    return [f"产品语义验收通过：{prompt[:80]}"]
 
 
 def _validate_visual_contract(code: str) -> list[str]:
@@ -748,12 +794,14 @@ async def generate_app(request: GenerateRequest) -> GenerateResponse:
             interaction_warnings = _validate_interaction_contract(
                 candidate, request.prompt
             )
+            product_warnings = _validate_product_contract(candidate, request.prompt)
             visual_warnings = _validate_visual_contract(candidate)
             api_warnings, api_usage = _validate_api_summaries(candidate)
             warnings = (
                 compatibility_warnings
                 + code_warnings
                 + interaction_warnings
+                + product_warnings
                 + visual_warnings
                 + api_warnings
             )
@@ -771,6 +819,37 @@ async def generate_app(request: GenerateRequest) -> GenerateResponse:
     manifest = _manifest(request)
     manifest["activities"][0]["entrypoint"] = "assets/main.py"
     summary = str(generated.get("summary") or f"已生成 {request.display_name}")
+    prompt_normalized_zh = str(
+        generated.get("prompt_normalized_zh") or request.prompt
+    ).strip()
+    prompt_normalized_en = str(
+        generated.get("prompt_normalized_en") or request.prompt
+    ).strip()
+    raw_store_metadata = generated.get("store_metadata")
+    store_metadata = raw_store_metadata if isinstance(raw_store_metadata, dict) else {}
+    metadata_defaults = {
+        "display_name_zh": request.display_name,
+        "display_name_en": request.display_name,
+        "short_description_zh": prompt_normalized_zh[:100],
+        "short_description_en": prompt_normalized_en[:100],
+        "long_description_zh": prompt_normalized_zh,
+        "long_description_en": prompt_normalized_en,
+        "release_notes_zh": f"首次生成 {request.display_name}",
+        "release_notes_en": f"Initial generated release of {request.display_name}",
+        "category": "generated",
+    }
+    store_metadata = {
+        key: str(store_metadata.get(key) or default).strip()
+        for key, default in metadata_defaults.items()
+    }
+    manifest.update(
+        {
+            "name": store_metadata["display_name_en"] or request.display_name,
+            "short_description": store_metadata["short_description_en"],
+            "long_description": store_metadata["long_description_en"],
+            "category": store_metadata["category"],
+        }
+    )
     mpk = _build_mpk(request.package_name, manifest, code)
     mpk_filename = f"{request.package_name}_r{request.revision}.mpk"
     generation_result = {
@@ -780,6 +859,12 @@ async def generate_app(request: GenerateRequest) -> GenerateResponse:
         "mode": "create" if not request.previous_code else "repair",
         "summary": summary,
         "model": model,
+        "language": {
+            "prompt_original": request.prompt,
+            "prompt_normalized_zh": prompt_normalized_zh,
+            "prompt_normalized_en": prompt_normalized_en,
+        },
+        "store_metadata": store_metadata,
         "app": {
             "fullname": request.package_name,
             "publisher": request.publisher,
@@ -815,4 +900,7 @@ async def generate_app(request: GenerateRequest) -> GenerateResponse:
         acceptance_tests=acceptance_tests,
         mpk_filename=mpk_filename,
         revision=request.revision,
+        prompt_normalized_zh=prompt_normalized_zh,
+        prompt_normalized_en=prompt_normalized_en,
+        store_metadata=store_metadata,
     )

@@ -1,3 +1,5 @@
+import { UPLOAD_CHUNK_SIZE } from "./config";
+
 export type DeviceConnectionState = "disconnected" | "connecting" | "connected" | "error";
 
 interface SerialReader {
@@ -204,17 +206,69 @@ export class WebSerialDeviceClient {
       "f.close()",
     ].join("\n"));
 
-    const chunkSize = 512;
+    const chunkSize = UPLOAD_CHUNK_SIZE;
     for (let offset = 0; offset < base64.length; offset += chunkSize) {
       const chunk = base64.slice(offset, offset + chunkSize);
-      await this.execute([
-        "import ubinascii",
-        `f = open(${pythonString(remotePath)}, 'ab')`,
-        `f.write(ubinascii.a2b_base64(${pythonString(chunk)}))`,
-        "f.close()",
-      ].join("\n"), 30_000);
+      const before = WebSerialDeviceClient.decodedLength(base64, offset);
+      const after = WebSerialDeviceClient.decodedLength(
+        base64,
+        offset + chunk.length,
+      );
+      const snippet = [
+        "import os, ubinascii",
+        "try:",
+        ` _n = os.stat(${pythonString(remotePath)})[6]`,
+        "except OSError:",
+        " _n = 0",
+        `if _n == ${before}:`,
+        ` _f = open(${pythonString(remotePath)}, 'ab')`,
+        ` _f.write(ubinascii.a2b_base64(${pythonString(chunk)}))`,
+        " _f.close()",
+        `elif _n != ${after}:`,
+        ` raise ValueError('upload out of sync at %d; expected ${before} or ${after}' % _n)`,
+      ].join("\n");
+      let lastError: unknown;
+      for (let attempt = 1; attempt <= 3; attempt += 1) {
+        try {
+          await this.execute(snippet, 30_000);
+          lastError = undefined;
+          break;
+        } catch (error) {
+          lastError = error;
+          if (attempt === 3) throw error;
+        }
+      }
+      if (lastError) throw lastError;
       onProgress(Math.min(100, Math.round(((offset + chunk.length) / base64.length) * 100)));
     }
+    const marker = `__MPOS_UPLOAD_SIZE_${crypto.randomUUID().replace(/-/g, "")}__`;
+    const output = await this.execute([
+      "import os",
+      `print(${pythonString(marker)}, os.stat(${pythonString(remotePath)})[6])`,
+    ].join("\n"), 15_000);
+    const match = output.match(new RegExp(`${marker}\\s+(\\d+)`));
+    const actual = Number(match?.[1]);
+    const expected = WebSerialDeviceClient.decodedLength(
+      base64,
+      base64.length,
+    );
+    if (!Number.isFinite(actual) || actual !== expected) {
+      throw new Error(
+        `Upload verification failed: device has ${actual} bytes, expected ${expected}`,
+      );
+    }
+  }
+
+  private static decodedLength(base64: string, chars: number) {
+    if (chars >= base64.length) {
+      const padding = base64.endsWith("==")
+        ? 2
+        : base64.endsWith("=")
+          ? 1
+          : 0;
+      return (base64.length / 4) * 3 - padding;
+    }
+    return (chars / 4) * 3;
   }
 
   private waitForOutput(needle: string, start: number, timeoutMs: number) {

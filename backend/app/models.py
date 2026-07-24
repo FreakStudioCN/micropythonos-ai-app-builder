@@ -40,6 +40,9 @@ class GenerateResponse(BaseModel):
     acceptance_tests: list[str] = []
     mpk_filename: str
     revision: int = 1
+    prompt_normalized_zh: str = ""
+    prompt_normalized_en: str = ""
+    store_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
 class Capabilities(BaseModel):
@@ -54,6 +57,7 @@ class Capabilities(BaseModel):
     desktop_preview: bool = False
     web_preview: bool = True
     physical_device: bool = False
+    browser_webserial: bool = False
     serial_port_scan: bool = False
     mpremote: bool = False
     firmware_flash: bool = False
@@ -70,6 +74,15 @@ class SessionCreateRequest(BaseModel):
     ui_locale: Literal["zh-CN", "en-US"] = "zh-CN"
     package_name: str = "com.example.myapp"
     display_name: str = "我的 App"
+    display_name_zh: str = ""
+    display_name_en: str = ""
+    short_description_zh: str = ""
+    short_description_en: str = ""
+    long_description_zh: str = ""
+    long_description_en: str = ""
+    release_notes_zh: str = ""
+    release_notes_en: str = ""
+    category: str = "generated"
     publisher: str = "erkou111"
     version: str = "0.1.0"
     targets: list[
@@ -119,3 +132,23 @@ class ResumeRequest(BaseModel):
 
 class DeviceScanRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=200)
+
+
+class DeviceResultRequest(BaseModel):
+    idempotency_key: str = Field(min_length=8, max_length=200)
+    result: Literal["probe_success", "install_success", "launch_success", "failed"]
+    board: str = Field(default="Waveshare ESP32-S3-Touch-LCD-2", max_length=200)
+    usb_vendor_id: int | None = Field(default=None, ge=0, le=0xFFFF)
+    usb_product_id: int | None = Field(default=None, ge=0, le=0xFFFF)
+    installed_path: str | None = Field(default=None, max_length=500)
+    transport: Literal["webserial", "mpremote", "device-copy", "mpk-install"] = "webserial"
+    message: str = Field(default="", max_length=8000)
+    log_excerpt: str = Field(default="", max_length=20_000)
+
+
+class ScreenshotUploadRequest(BaseModel):
+    idempotency_key: str = Field(min_length=8, max_length=200)
+    filename: str = Field(min_length=1, max_length=200)
+    media_type: Literal["image/png", "image/jpeg", "image/webp"]
+    data_base64: str = Field(min_length=16, max_length=14_000_000)
+    source: Literal["desktop", "web", "device", "manual"] = "manual"

@@ -1,5 +1,7 @@
 import asyncio
 import base64
+import binascii
+import difflib
 import hashlib
 import json
 import mimetypes
@@ -18,10 +20,12 @@ from fastapi.encoders import jsonable_encoder
 from .generator import GenerationError, generate_app
 from .models import (
     PROTOCOL_VERSION,
+    DeviceResultRequest,
     GenerateRequest,
     PermissionDecisionRequest,
     PreviewResultRequest,
     RevisionRequest,
+    ScreenshotUploadRequest,
     SessionActionRequest,
     SessionCreateRequest,
 )
@@ -32,6 +36,7 @@ from .runner_services import (
     mpos_skill_adapter,
     script_dispatcher,
 )
+from .session_index import EventLogCache, SessionIndex
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -101,8 +106,11 @@ class SessionService:
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._action_by_session: dict[str, str] = {}
+        self._event_cache = EventLogCache()
+        self._index = SessionIndex(SESSION_ROOT)
 
     def capabilities(self) -> dict[str, Any]:
+        desktop_capability = script_dispatcher.desktop_smoke_capability()
         return {
             "protocol_version": PROTOCOL_VERSION,
             "capabilities": {
@@ -114,8 +122,9 @@ class SessionService:
                 "cancellation": True,
                 "retry": True,
                 "timeout": True,
-                "desktop_preview": False,
+                "desktop_preview": desktop_capability["available"],
                 "web_preview": True,
+                "browser_webserial": False,
                 **device_service.capabilities(),
                 "firmware_flash": False,
                 "network_read": True,
@@ -130,6 +139,7 @@ class SessionService:
                 "Web preview is a quick browser compatibility preview. It does not "
                 "replace real hardware deployment."
             ),
+            "desktop_preview_details": desktop_capability,
         }
 
     def _root(self, session_id: str) -> Path:
@@ -171,21 +181,14 @@ class SessionService:
 
     def events(self, session_id: str) -> list[dict[str, Any]]:
         path = self._root(session_id) / "activity_log.jsonl"
-        if not path.exists():
-            return []
-        result: list[dict[str, Any]] = []
-        for line in path.read_text(encoding="utf-8").splitlines():
-            try:
-                result.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
-        return result
+        return self._event_cache.read(session_id, path)
 
     def _write_state(self, state: dict[str, Any]) -> None:
         state = dict(state)
         state.pop("events", None)
         state["updated_at"] = _now()
         _json_dump(self._state_path(state["session_id"]), state)
+        self._index.register_state(state)
 
     def _event(
         self,
@@ -195,10 +198,10 @@ class SessionService:
         payload: dict[str, Any],
     ) -> None:
         root = self._root(state["session_id"])
-        events = self.events(state["session_id"])
+        log_path = root / "activity_log.jsonl"
         event = {
             "protocol_version": PROTOCOL_VERSION,
-            "seq": len(events) + 1,
+            "seq": self._event_cache.next_seq(state["session_id"], log_path),
             "ts": _now(),
             "type": event_type,
             "stage": phase.removeprefix("mpos-").removesuffix("-app-web"),
@@ -207,8 +210,7 @@ class SessionService:
             "checkpoint_id": state.get("checkpoint_id"),
             "payload": payload,
         }
-        with (root / "activity_log.jsonl").open("a", encoding="utf-8") as handle:
-            handle.write(json.dumps(event, ensure_ascii=False) + "\n")
+        self._event_cache.append(state["session_id"], log_path, event)
 
     def create(self, request: SessionCreateRequest) -> dict[str, Any]:
         for existing in self.list_sessions():
@@ -253,6 +255,15 @@ class SessionService:
                 "ui_locale": request.ui_locale,
                 "package_name": request.package_name,
                 "display_name": request.display_name,
+                "display_name_zh": request.display_name_zh or request.display_name,
+                "display_name_en": request.display_name_en or request.display_name,
+                "short_description_zh": request.short_description_zh,
+                "short_description_en": request.short_description_en,
+                "long_description_zh": request.long_description_zh,
+                "long_description_en": request.long_description_en,
+                "release_notes_zh": request.release_notes_zh,
+                "release_notes_en": request.release_notes_en,
+                "category": request.category,
                 "publisher": request.publisher,
                 "version": request.version,
                 "targets": request.targets,
@@ -357,7 +368,23 @@ class SessionService:
             "generation": None,
         }
         self._write_state(state)
+        self._write_artifact_json(
+            state,
+            "plan_state",
+            "mpos-plan-app-web",
+            {
+                "schema_version": "mpos-plan-app-web-v1",
+                "protocol_version": PROTOCOL_VERSION,
+                "session_id": session_id,
+                "checkpoint_id": "session_created",
+                "result": "success",
+                "next_phase": "mpos-analyze-app-web",
+                "targets": request.targets,
+                "capabilities": request.capabilities.model_dump(),
+            },
+        )
         state["checkpoint_history"].append(self._checkpoint_record(state, "session_created", "mpos-analyze-app-web"))
+        self._write_manifest(state)
         self._write_state(state)
         self._event(
             state,
@@ -382,16 +409,18 @@ class SessionService:
     def decide_permission(
         self, permission_id: str, request: PermissionDecisionRequest
     ) -> dict[str, Any]:
-        for session in self.list_sessions():
-            for permission in session.get("permissions", []):
-                if permission.get("permission_id") != permission_id:
-                    continue
-                state = self._read(session["session_id"])
-                target = next(
+        session_id = self._index.session_for_permission(permission_id)
+        if session_id:
+            state = self._read(session_id)
+            target = next(
+                (
                     item
                     for item in state["permissions"]
                     if item["permission_id"] == permission_id
-                )
+                ),
+                None,
+            )
+            if target:
                 if target.get("decision_idempotency_key") == request.idempotency_key:
                     return state
                 if target["decision"] != "pending":
@@ -440,7 +469,7 @@ class SessionService:
             return state
         if state.get("last_action_idempotency_key") == request.idempotency_key and state[
             "status"
-        ] in {"waiting_preview", "completed"}:
+        ] in {"waiting_preview", "waiting_device", "completed"}:
             return state
         allowed_types = {
             item["permission_type"]
@@ -496,13 +525,371 @@ class SessionService:
         if action not in STAGE_SKILLS:
             raise ValueError(f"Unsupported action: {action}")
         state = self._read(session_id)
+        task = self._tasks.get(session_id)
+        if task and not task.done():
+            return state
+        action_key = f"stage:{action}:{request.idempotency_key}"
+        if state.get("last_stage_action_key") == action_key:
+            return state
+        required_types = {
+            item["permission_type"]
+            for item in state["permissions"]
+            if item.get("required")
+        }
+        allowed_types = {
+            item["permission_type"]
+            for item in state["permissions"]
+            if item["decision"] == "allow_once"
+        }
+        if not required_types.issubset(allowed_types):
+            return state
         self._action_by_session[session_id] = action
         state["requested_action"] = action
         state["last_requested_skill"] = mpos_skill_adapter.describe(action)
+        state["last_stage_action_key"] = action_key
+        state["status"] = "running"
+        state["current_phase"] = STAGE_SKILLS[action]
+        state["last_error"] = None
         self._write_state(state)
-        # The controlled runner remains a single in-flight pipeline. Action
-        # endpoints are explicit protocol entry points and resume at checkpoints.
-        return self.start_generation(session_id, request)
+        self._tasks[session_id] = asyncio.create_task(
+            self._run_single_stage(session_id, action, request)
+        )
+        return self.get(session_id)
+
+    def _require_generation(self, state: dict[str, Any], action: str) -> dict[str, Any]:
+        generation = state.get("generation")
+        if not generation:
+            raise ValueError(
+                f"STAGE_PREREQUISITE_MISSING: {action} requires generation output"
+            )
+        return generation
+
+    async def _run_single_stage(
+        self,
+        session_id: str,
+        action: str,
+        request: SessionActionRequest,
+    ) -> None:
+        async with self._locks.setdefault(session_id, asyncio.Lock()):
+            state = self._read(session_id)
+            phase = STAGE_SKILLS[action]
+            try:
+                user_input = state["input"]
+                self._event(
+                    state,
+                    "start_phase",
+                    phase,
+                    {
+                        "message": f"独立执行阶段：{action}",
+                        **mpos_skill_adapter.describe(action),
+                    },
+                )
+                if action == "analyze":
+                    payload = {
+                        "schema_version": "mpos-analyze-app-web-v1",
+                        "phase": phase,
+                        "result": "success",
+                        "app": {
+                            "fullname": user_input["package_name"],
+                            "name": user_input["display_name"],
+                            "publisher": user_input["publisher"],
+                            "version": user_input["version"],
+                        },
+                        "language": {
+                            "ui_locale": user_input["ui_locale"],
+                            "prompt_language": user_input["prompt_language"],
+                            "prompt_original": user_input["prompt_original"],
+                            "prompt_normalized_zh": user_input["prompt_normalized_zh"],
+                            "prompt_normalized_en": user_input["prompt_normalized_en"],
+                        },
+                        "requirements": {"prompt": user_input["prompt_original"]},
+                        "api_plan": {
+                            "mpos_summary": state["api_summary_version"].get(
+                                "mpos_api_summary.json"
+                            ),
+                            "lvgl_summary": state["api_summary_version"].get(
+                                "lvgl_api_summary.json"
+                            ),
+                        },
+                        "dependency_plan": {
+                            "required": False,
+                            "classification": "builtin-mpos-and-app-local-only",
+                        },
+                        "test_plan": {"targets": user_input["targets"]},
+                        "warnings": [],
+                        "structured_errors": [],
+                        "handoff": {"next_phase": "mpos-prepare-deps-web"},
+                    }
+                    self._write_artifact_json(state, "analysis_result", phase, payload)
+                    self._checkpoint(
+                        state, phase, "requirements_analyzed", "mpos-prepare-deps-web"
+                    )
+                elif action == "prepare-deps":
+                    payload = {
+                        "schema_version": "mpos-prepare-deps-web-v1",
+                        "phase": phase,
+                        "result": "success",
+                        "imports": ["lvgl", "mpos.Activity"],
+                        "runtime_files": [],
+                        "adapter_requirements": [],
+                        "sync_needs_adapter": False,
+                        "async_compatible": True,
+                        "warnings": [],
+                        "structured_errors": [],
+                        "handoff": {"next_phase": "mpos-gen-app-web"},
+                    }
+                    self._write_artifact_json(
+                        state, "dependency_handoff", phase, payload
+                    )
+                    self._checkpoint(
+                        state, phase, "dependencies_prepared", "mpos-gen-app-web"
+                    )
+                elif action == "generate":
+                    previous_code = request.previous_code or state.get(
+                        "pending_repair", {}
+                    ).get("previous_code")
+                    generated = await generate_app(
+                        GenerateRequest(
+                            prompt=user_input["prompt_original"],
+                            package_name=user_input["package_name"],
+                            display_name=user_input["display_name"],
+                            publisher=user_input["publisher"],
+                            version=user_input["version"],
+                            revision=int(state["revision_id"].removeprefix("r")),
+                            previous_code=previous_code,
+                            runtime_error=request.runtime_error,
+                        )
+                    )
+                    state["generation"] = generated.model_dump()
+                    state["input"]["prompt_normalized_zh"] = (
+                        generated.prompt_normalized_zh
+                        or user_input["prompt_original"]
+                    )
+                    state["input"]["prompt_normalized_en"] = (
+                        generated.prompt_normalized_en
+                        or user_input["prompt_original"]
+                    )
+                    state["input"].update(generated.store_metadata)
+                    app_root = (
+                        self._root(session_id)
+                        / "project"
+                        / "internal_filesystem"
+                        / "apps"
+                        / generated.package_name
+                    )
+                    for generated_file in generated.files:
+                        target = (
+                            self._root(session_id)
+                            / "artifacts"
+                            / generated_file.path
+                            if generated_file.path == "generation_result.json"
+                            else app_root / generated_file.path
+                        )
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text(generated_file.content, encoding="utf-8")
+                        role = {
+                            "MANIFEST.JSON": "app_manifest",
+                            "assets/main.py": "app_source",
+                            "generation_result.json": "generation_result",
+                        }[generated_file.path]
+                        self._register_artifact(
+                            state,
+                            target,
+                            phase,
+                            "result" if role == "generation_result" else "source",
+                            role,
+                        )
+                    self._checkpoint(
+                        state, phase, "code_generated", "mpos-test-app-web"
+                    )
+                elif action == "test":
+                    generation = self._require_generation(state, action)
+                    app_root = (
+                        self._root(session_id)
+                        / "project"
+                        / "internal_filesystem"
+                        / "apps"
+                        / generation["package_name"]
+                    )
+                    syntax_result = script_dispatcher.run(
+                        "python_syntax", app_root / "assets" / "main.py"
+                    )
+                    desktop_requested = "desktop-preview" in user_input["targets"]
+                    desktop_result: dict[str, Any] = {
+                        "status": "skipped",
+                        "reason": "desktop target not selected",
+                    }
+                    if desktop_requested:
+                        smoke_dir = self._root(session_id) / "artifacts" / "desktop-smoke"
+                        smoke = script_dispatcher.run_desktop_smoke(
+                            PROJECT_ROOT / "vendor" / "MicroPythonOS",
+                            generation["package_name"],
+                            app_root,
+                            self._root(session_id)
+                            / "artifacts"
+                            / "generation_result.json",
+                            smoke_dir,
+                        )
+                        desktop_result = {
+                            "status": (
+                                "passed"
+                                if smoke.get("ok")
+                                else "skipped"
+                                if smoke.get("skipped")
+                                else "blocked"
+                            ),
+                            "runner": smoke,
+                        }
+                        for screenshot in smoke_dir.glob("*.png"):
+                            self._register_artifact(
+                                state,
+                                screenshot,
+                                phase,
+                                "screenshot",
+                                "desktop_screenshot",
+                            )
+                    payload = {
+                        "schema_version": "mpos-test-app-web-v1",
+                        "phase": phase,
+                        "result": (
+                            "success"
+                            if syntax_result.get("ok")
+                            and desktop_result["status"] in {"passed", "skipped"}
+                            else "blocked"
+                        ),
+                        "desktop": desktop_result,
+                        "web_preview": {
+                            "status": (
+                                "awaiting_browser"
+                                if "web-preview" in user_input["targets"]
+                                else "skipped"
+                            )
+                        },
+                        "acceptance_tests": generation.get("acceptance_tests", []),
+                        "controlled_checks": {"python_syntax": syntax_result},
+                        "warnings": [],
+                        "structured_errors": [],
+                        "handoff": {"next_phase": "mpos-package-app-web"},
+                    }
+                    self._write_artifact_json(state, "app_test_result", phase, payload)
+                    self._checkpoint(
+                        state, phase, "desktop_test_done", "mpos-package-app-web"
+                    )
+                elif action == "package":
+                    generation = self._require_generation(state, action)
+                    mpk_path = (
+                        self._root(session_id)
+                        / "artifacts"
+                        / generation["mpk_filename"]
+                    )
+                    mpk_path.write_bytes(base64.b64decode(generation["mpk_base64"]))
+                    self._register_artifact(state, mpk_path, phase, "package", "mpk")
+                    payload = {
+                        "schema_version": "mpos-package-app-web-v1",
+                        "phase": phase,
+                        "result": "success",
+                        "package": {
+                            "revision": generation["revision"],
+                            "mpk_path": f"artifacts/{generation['mpk_filename']}",
+                            "filename_policy": "<fullname>_rN.mpk",
+                        },
+                        "checks": [
+                            {"name": "manifest.publisher", "status": "passed"},
+                            {"name": "mpk_release_filename", "status": "passed"},
+                        ],
+                        "warnings": [],
+                        "structured_errors": [],
+                        "handoff": {"next_phase": "mpos-deploy-app-web"},
+                    }
+                    self._write_artifact_json(state, "package_result", phase, payload)
+                    self._checkpoint(
+                        state, phase, "package_done", "mpos-deploy-app-web"
+                    )
+                elif action == "deploy":
+                    payload = {
+                        "schema_version": "mpos-deploy-app-web-v1",
+                        "phase": phase,
+                        "result": "blocked",
+                        "mode": "browser-device-handoff",
+                        "hardware_available": False,
+                        "install_url": "https://install.micropythonos.com/",
+                        "warnings": ["等待浏览器 WebSerial 或 mpremote 回传真实设备结果。"],
+                        "structured_errors": [],
+                        "handoff": {"next_phase": "mpos-publish-app-web"},
+                    }
+                    self._write_artifact_json(state, "deploy_result", phase, payload)
+                    self._checkpoint(
+                        state, phase, "device_deploy_pending", "mpos-publish-app-web"
+                    )
+                else:
+                    generation = self._require_generation(state, action)
+                    screenshots = [
+                        item
+                        for item in state["artifacts"]
+                        if item["role"] in {"desktop_screenshot", "publish_screenshot"}
+                    ]
+                    payload = {
+                        "schema_version": "mpos-publish-app-web-v1",
+                        "phase": phase,
+                        "result": "success" if screenshots else "partial",
+                        "status": (
+                            "ready_for_manual_upload"
+                            if screenshots
+                            else "needs_preview_and_screenshot"
+                        ),
+                        "app_metadata": generation.get("store_metadata", {}),
+                        "mpk": {
+                            "filename": generation["mpk_filename"],
+                            "revision": generation["revision"],
+                        },
+                        "screenshots": screenshots,
+                        "checks": [
+                            {
+                                "name": "publish_screenshot",
+                                "status": "passed" if screenshots else "pending",
+                            }
+                        ],
+                        "blockers": [] if screenshots else ["publish_screenshot"],
+                        "warnings": (
+                            []
+                            if screenshots
+                            else ["请上传 PNG、JPEG 或 WebP 截图后再发布。"]
+                        ),
+                        "structured_errors": [],
+                        "handoff": {"next_phase": None},
+                    }
+                    self._write_artifact_json(state, "publish_result", phase, payload)
+                    self._write_publish_bundle(state)
+                    self._checkpoint(state, phase, "publish_check_done", None)
+                state = self._read(session_id)
+                state["status"] = "completed"
+                state["current_phase"] = phase
+                state["next_phase"] = None
+                self._write_state(state)
+            except (GenerationError, OSError, ValueError) as exc:
+                state = self._read(session_id)
+                message = str(exc)
+                error = {
+                    "code": (
+                        message.split(":", 1)[0]
+                        if re.match(r"^[A-Z][A-Z0-9_]+:", message)
+                        else "STAGE_EXECUTION_FAILED"
+                    ),
+                    "message": message.split(":", 1)[-1].strip(),
+                    "stage": action,
+                    "phase": phase,
+                    "owner": "app",
+                    "retryable": True,
+                    "details": {},
+                    "logs": ["activity_log.jsonl"],
+                }
+                state["status"] = "failed"
+                state["checkpoint_id"] = "failed"
+                state["next_phase"] = phase
+                state["last_error"] = error
+                state["structured_errors"].append(error)
+                self._write_state(state)
+                self._event(state, "structured_error", phase, error)
 
     def resume(
         self, session_id: str, idempotency_key: str
@@ -571,6 +958,15 @@ class SessionService:
             return state
 
         current_revision = int(state["revision_id"].removeprefix("r"))
+        previous_generation = state.get("generation") or {}
+        previous_code = next(
+            (
+                item.get("content")
+                for item in previous_generation.get("files", [])
+                if item.get("path") in {"assets/main.py", "app.py"}
+            ),
+            None,
+        )
         snapshot_root = self._root(session_id) / "revisions" / f"r{current_revision}"
         snapshot_root.mkdir(parents=True, exist_ok=True)
         for name in ("project", "artifacts"):
@@ -578,6 +974,11 @@ class SessionService:
             target = snapshot_root / name
             if source.exists() and not target.exists():
                 shutil.copytree(source, target)
+        for name in ("session_state.json", "activity_log.jsonl", "artifact_manifest.json"):
+            source = self._root(session_id) / name
+            target = snapshot_root / name
+            if source.is_file() and not target.exists():
+                shutil.copy2(source, target)
 
         state["revision_id"] = f"r{current_revision + 1}"
         state["revision_idempotency_key"] = request.idempotency_key
@@ -593,7 +994,13 @@ class SessionService:
         state["artifacts"] = []
         state["last_error"] = None
         state["structured_errors"] = []
-        state["pending_repair"] = {"previous_code": None, "runtime_error": None}
+        state["pending_repair"] = {
+            "previous_code": previous_code,
+            "runtime_error": (
+                f"用户正在基于 r{current_revision} 连续修改到 "
+                f"r{current_revision + 1}，必须保留未要求删除的功能。"
+            ),
+        }
         state["completed_phases"] = ["mpos-plan-app-web"]
         for name in ("project", "artifacts"):
             path = self._root(session_id) / name
@@ -636,6 +1043,13 @@ class SessionService:
                         "publisher": user_input["publisher"],
                         "version": user_input["version"],
                     },
+                    "manifest_draft": {
+                        "fullname": user_input["package_name"],
+                        "name": user_input["display_name"],
+                        "publisher": user_input["publisher"],
+                        "version": user_input["version"],
+                        "category": user_input.get("category", "generated"),
+                    },
                     "language": {
                         "ui_locale": user_input["ui_locale"],
                         "prompt_language": user_input["prompt_language"],
@@ -643,8 +1057,31 @@ class SessionService:
                         "prompt_normalized_zh": user_input["prompt_normalized_zh"],
                         "prompt_normalized_en": user_input["prompt_normalized_en"],
                     },
-                    "requirements": {"prompt": user_input["prompt_original"]},
+                    "requirements": {
+                        "prompt": user_input["prompt_original"],
+                        "continuous_modification": bool(
+                            state.get("pending_repair", {}).get("previous_code")
+                        ),
+                    },
+                    "api_plan": {
+                        "mpos_summary": state["api_summary_version"].get(
+                            "mpos_api_summary.json"
+                        ),
+                        "lvgl_summary": state["api_summary_version"].get(
+                            "lvgl_api_summary.json"
+                        ),
+                        "full_read_required": True,
+                    },
+                    "dependency_plan": {
+                        "required": False,
+                        "classification": "builtin-mpos-and-app-local-only",
+                    },
                     "test_plan": {"targets": user_input["targets"]},
+                    "deploy_plan": {
+                        "physical_requested": "physical-device"
+                        in user_input["targets"],
+                        "install_url": "https://install.micropythonos.com/",
+                    },
                     "warnings": [],
                     "structured_errors": [],
                     "handoff": {"next_phase": "mpos-gen-app-web"},
@@ -656,6 +1093,31 @@ class SessionService:
                     state,
                     "mpos-analyze-app-web",
                     "requirements_analyzed",
+                    "mpos-prepare-deps-web",
+                )
+                dependency_handoff = {
+                    "schema_version": "mpos-prepare-deps-web-v1",
+                    "phase": "mpos-prepare-deps-web",
+                    "result": "success",
+                    "imports": ["lvgl", "mpos.Activity"],
+                    "runtime_files": [],
+                    "adapter_requirements": [],
+                    "sync_needs_adapter": False,
+                    "async_compatible": True,
+                    "warnings": [],
+                    "structured_errors": [],
+                    "handoff": {"next_phase": "mpos-gen-app-web"},
+                }
+                self._write_artifact_json(
+                    state,
+                    "dependency_handoff",
+                    "mpos-prepare-deps-web",
+                    dependency_handoff,
+                )
+                self._checkpoint(
+                    state,
+                    "mpos-prepare-deps-web",
+                    "dependencies_prepared",
                     "mpos-gen-app-web",
                 )
 
@@ -684,6 +1146,13 @@ class SessionService:
                 )
                 generation_data = generated.model_dump()
                 state["generation"] = generation_data
+                state["input"]["prompt_normalized_zh"] = (
+                    generated.prompt_normalized_zh or user_input["prompt_original"]
+                )
+                state["input"]["prompt_normalized_en"] = (
+                    generated.prompt_normalized_en or user_input["prompt_original"]
+                )
+                state["input"].update(generated.store_metadata)
                 self._checkpoint(
                     state,
                     "mpos-gen-app-web",
@@ -716,6 +1185,39 @@ class SessionService:
                         "source" if role != "generation_result" else "result",
                         role,
                     )
+                previous_code = state.get("pending_repair", {}).get("previous_code")
+                generated_code = next(
+                    (
+                        item.content
+                        for item in generated.files
+                        if item.path == "assets/main.py"
+                    ),
+                    "",
+                )
+                if previous_code and generated_code:
+                    diff_text = "".join(
+                        difflib.unified_diff(
+                            previous_code.splitlines(keepends=True),
+                            generated_code.splitlines(keepends=True),
+                            fromfile=f"{state['revision_id']}-previous/assets/main.py",
+                            tofile=f"{state['revision_id']}/assets/main.py",
+                        )
+                    )
+                    diff_path = (
+                        self._root(session_id)
+                        / "artifacts"
+                        / f"{state['revision_id']}_changes.patch"
+                    )
+                    diff_path.write_text(
+                        diff_text or "# No textual changes\n", encoding="utf-8"
+                    )
+                    self._register_artifact(
+                        state,
+                        diff_path,
+                        "mpos-gen-app-web",
+                        "diff",
+                        "revision_diff",
+                    )
                 self._checkpoint(
                     state,
                     "mpos-gen-app-web",
@@ -725,17 +1227,56 @@ class SessionService:
 
                 state["current_phase"] = "mpos-test-app-web"
                 web_requested = "web-preview" in user_input["targets"]
+                desktop_requested = "desktop-preview" in user_input["targets"]
                 syntax_result = script_dispatcher.run(
                     "python_syntax", app_root / "assets" / "main.py"
                 )
+                desktop_result: dict[str, Any] = {
+                    "status": "skipped",
+                    "reason": (
+                        "desktop target not selected"
+                        if not desktop_requested
+                        else "desktop_preview capability is unavailable on this host"
+                    ),
+                }
+                if desktop_requested and state["capabilities"].get(
+                    "desktop_preview"
+                ):
+                    smoke_dir = (
+                        self._root(session_id) / "artifacts" / "desktop-smoke"
+                    )
+                    smoke = script_dispatcher.run_desktop_smoke(
+                        PROJECT_ROOT / "vendor" / "MicroPythonOS",
+                        generated.package_name,
+                        app_root,
+                        self._root(session_id)
+                        / "artifacts"
+                        / "generation_result.json",
+                        smoke_dir,
+                    )
+                    desktop_result = {
+                        "status": (
+                            "passed"
+                            if smoke.get("ok")
+                            else "skipped"
+                            if smoke.get("skipped")
+                            else "blocked"
+                        ),
+                        "runner": smoke,
+                    }
+                    for screenshot in smoke_dir.glob("*.png"):
+                        self._register_artifact(
+                            state,
+                            screenshot,
+                            "mpos-test-app-web",
+                            "screenshot",
+                            "desktop_screenshot",
+                        )
                 test_result = {
                     "schema_version": "mpos-test-app-web-v1",
                     "phase": "mpos-test-app-web",
                     "result": "partial",
-                    "desktop": {
-                        "status": "skipped",
-                        "reason": "desktop_preview capability is unavailable on this host",
-                    },
+                    "desktop": desktop_result,
                     "web_preview": {
                         "status": "awaiting_browser" if web_requested else "skipped",
                         "reason": None if web_requested else "target not selected",
@@ -788,13 +1329,49 @@ class SessionService:
                     "checks": [
                         {"name": "manifest.publisher", "status": "passed"},
                         {"name": "mpk_release_filename", "status": "passed"},
+                        {
+                            "name": "icon_64x64.png",
+                            "status": (
+                                "passed"
+                                if any(
+                                    item["path"].endswith("icon_64x64.png")
+                                    for item in state["artifacts"]
+                                )
+                                else "warning"
+                            ),
+                        },
                     ],
-                    "warnings": [],
+                    "warnings": (
+                        []
+                        if any(
+                            item["path"].endswith("icon_64x64.png")
+                            for item in state["artifacts"]
+                        )
+                        else ["当前 App 尚未生成 icon_64x64.png。"]
+                    ),
                     "structured_errors": [],
                     "handoff": {"next_phase": "mpos-deploy-app-web"},
                 }
                 self._write_artifact_json(
                     state, "package_result", "mpos-package-app-web", package_result
+                )
+                self._write_artifact_json(
+                    state,
+                    "app_index_entry",
+                    "mpos-package-app-web",
+                    {
+                        "fullname": generated.package_name,
+                        "name": generated.store_metadata.get(
+                            "display_name_en", user_input["display_name"]
+                        ),
+                        "publisher": user_input["publisher"],
+                        "version": user_input["version"],
+                        "release": generated.revision,
+                        "mpk": generated.mpk_filename,
+                        "category": generated.store_metadata.get(
+                            "category", "generated"
+                        ),
+                    },
                 )
                 self._checkpoint(
                     state,
@@ -860,9 +1437,31 @@ class SessionService:
                         "home_url": "https://upystore.io/",
                         "developer_url": "https://upystore.io/developer",
                         "mode": "manual_guidance",
+                        "version_status": "unknown_unverified",
+                    },
+                    "app_metadata": generated.store_metadata,
+                    "mpk": {
+                        "filename": generated.mpk_filename,
+                        "revision": generated.revision,
                     },
                     "checks": package_result["checks"]
-                    + [{"name": "publish_screenshot", "status": "pending"}],
+                    + [
+                        {"name": "publish_screenshot", "status": "pending"},
+                        {
+                            "name": "bilingual_descriptions",
+                            "status": (
+                                "passed"
+                                if generated.store_metadata.get(
+                                    "short_description_zh"
+                                )
+                                and generated.store_metadata.get(
+                                    "short_description_en"
+                                )
+                                else "pending"
+                            ),
+                        },
+                    ],
+                    "blockers": ["publish_screenshot"],
                     "warnings": deploy_result["warnings"] + [
                         "完成 Web/设备验证并准备 PNG、JPEG 或 WebP 截图后再手工上传。"
                     ],
@@ -872,26 +1471,7 @@ class SessionService:
                 self._write_artifact_json(
                     state, "publish_result", "mpos-publish-app-web", publish_result
                 )
-                bundle_path = (
-                    self._root(session_id)
-                    / "artifacts"
-                    / f"{generated.package_name}_{state['revision_id']}_publish-materials.zip"
-                )
-                with zipfile.ZipFile(bundle_path, "w", zipfile.ZIP_DEFLATED) as archive:
-                    for artifact in state["artifacts"]:
-                        source = self._root(session_id) / artifact["path"]
-                        if source.is_file() and (
-                            artifact["role"].endswith("_result")
-                            or artifact["role"] in {"app_manifest", "mpk"}
-                        ):
-                            archive.write(source, source.name)
-                self._register_artifact(
-                    state,
-                    bundle_path,
-                    "mpos-publish-app-web",
-                    "bundle",
-                    "publish_materials_bundle",
-                )
+                self._write_publish_bundle(state)
                 self._checkpoint(
                     state,
                     "mpos-publish-app-web",
@@ -901,7 +1481,7 @@ class SessionService:
                 state["status"] = (
                     "waiting_preview"
                     if web_requested
-                    else "blocked"
+                    else "waiting_device"
                     if physical_requested
                     else "completed"
                 )
@@ -1033,19 +1613,40 @@ class SessionService:
         state.setdefault("checkpoint_history", []).append(
             self._checkpoint_record(state, checkpoint, next_phase, phase)
         )
+        phase_payload = {
+            "protocol_version": PROTOCOL_VERSION,
+            "session_id": state["session_id"],
+            "stage": phase.removeprefix("mpos-").removesuffix("-app-web"),
+            "phase": phase,
+            "result": "success",
+            "checkpoint_id": checkpoint,
+            "next_phase": next_phase,
+            "result_path": next(
+                (
+                    item["path"]
+                    for item in reversed(state.get("artifacts", []))
+                    if item["phase"] == phase and item["kind"] == "result"
+                ),
+                None,
+            ),
+            "artifact_manifest_path": "artifact_manifest.json",
+            "warnings": state.get("warnings", []),
+            "structured_errors": [],
+        }
+        phase_name = phase.replace("-", "_")
+        self._write_artifact_json(
+            state,
+            f"phase_complete.{phase_name}",
+            phase,
+            phase_payload,
+        )
+        self._write_manifest(state)
         self._write_state(state)
         self._event(
             state,
             "phase_complete",
             phase,
-            {
-                "result": "success",
-                "checkpoint_id": checkpoint,
-                "next_phase": next_phase,
-                "artifacts": state["artifacts"],
-                "warnings": [],
-                "structured_errors": [],
-            },
+            {**phase_payload, "artifacts": state["artifacts"]},
         )
 
     def _write_artifact_json(
@@ -1122,7 +1723,11 @@ class SessionService:
                     archive.write(source, relative)
             for artifact in state["artifacts"]:
                 source = root / artifact["path"]
-                if source.is_file() and source != bundle:
+                if (
+                    source.is_file()
+                    and source != bundle
+                    and artifact["role"] != "artifact_manifest"
+                ):
                     archive.write(source, artifact["path"])
         self._register_artifact(
             state,
@@ -1130,6 +1735,43 @@ class SessionService:
             "mpos-publish-app-web",
             "bundle",
             "session_bundle",
+        )
+
+    def _write_publish_bundle(self, state: dict[str, Any]) -> None:
+        root = self._root(state["session_id"])
+        bundle = (
+            root
+            / "artifacts"
+            / (
+                f"{state['input']['package_name']}_"
+                f"{state['revision_id']}_publish-materials.zip"
+            )
+        )
+        with zipfile.ZipFile(bundle, "w", zipfile.ZIP_DEFLATED) as archive:
+            for artifact in state["artifacts"]:
+                source = root / artifact["path"]
+                if (
+                    source.is_file()
+                    and source != bundle
+                    and (
+                        artifact["role"].endswith("_result")
+                        or artifact["role"]
+                        in {
+                            "app_manifest",
+                            "mpk",
+                            "app_index_entry",
+                            "desktop_screenshot",
+                            "publish_screenshot",
+                        }
+                    )
+                ):
+                    archive.write(source, source.name)
+        self._register_artifact(
+            state,
+            bundle,
+            "mpos-publish-app-web",
+            "bundle",
+            "publish_materials_bundle",
         )
 
     def preview_result(
@@ -1186,6 +1828,239 @@ class SessionService:
         self._event(state, "phase_complete", "mpos-test-app-web", payload)
         return self.get(session_id)
 
+    def record_device_result(
+        self, session_id: str, request: DeviceResultRequest
+    ) -> dict[str, Any]:
+        state = self._read(session_id)
+        if state.get("device_result_idempotency_key") == request.idempotency_key:
+            return state
+        state["device_result_idempotency_key"] = request.idempotency_key
+        success = request.result != "failed"
+        installed = request.result in {"install_success", "launch_success"}
+        launched = request.result == "launch_success"
+        structured_errors = []
+        if not success:
+            structured_errors.append(
+                {
+                    "code": "DEVICE_DEPLOY_FAILED",
+                    "message": request.message or "浏览器设备操作失败",
+                    "stage": "deploy",
+                    "phase": "mpos-deploy-app-web",
+                    "owner": "device",
+                    "retryable": True,
+                    "details": {
+                        "transport": request.transport,
+                        "board": request.board,
+                        "usb_vendor_id": request.usb_vendor_id,
+                        "usb_product_id": request.usb_product_id,
+                    },
+                    "logs": ["activity_log.jsonl"],
+                }
+            )
+        deploy_result = {
+            "schema_version": "mpos-deploy-app-web-v1",
+            "phase": "mpos-deploy-app-web",
+            "result": "success" if installed else "partial" if success else "failed",
+            "mode": "mpk-install" if installed else request.transport,
+            "hardware_available": True,
+            "board": request.board,
+            "usb_vendor_id": request.usb_vendor_id,
+            "usb_product_id": request.usb_product_id,
+            "serial_port": "browser-selected",
+            "micropythonos_installed": True,
+            "app_installed": installed,
+            "app_launched": launched,
+            "installed_path": request.installed_path,
+            "permissions": [
+                {
+                    "type": "device_write",
+                    "decision": "allow_once",
+                }
+            ],
+            "commands": [
+                {
+                    "transport": request.transport,
+                    "summary": request.result,
+                }
+            ],
+            "logs": [request.log_excerpt[-4000:]] if request.log_excerpt else [],
+            "warnings": (
+                []
+                if launched
+                else ["设备已连接，但尚未记录 App 在真机成功启动。"]
+            ),
+            "structured_errors": structured_errors,
+            "handoff": {"next_phase": "mpos-publish-app-web"},
+        }
+        self._write_artifact_json(
+            state, "deploy_result", "mpos-deploy-app-web", deploy_result
+        )
+        if success:
+            state["hardware_verified"] = launched
+            state["last_device_result"] = request.result
+            if installed:
+                self._checkpoint(
+                    state,
+                    "mpos-deploy-app-web",
+                    "device_deploy_done",
+                    "mpos-publish-app-web",
+                )
+            if launched:
+                publish_path = self._root(session_id) / "artifacts" / "publish_result.json"
+                if publish_path.is_file():
+                    publish_result = _json_load(publish_path)
+                    checks = [
+                        item
+                        for item in publish_result.get("checks", [])
+                        if item.get("name") != "physical_device_launch"
+                    ]
+                    checks.append(
+                        {"name": "physical_device_launch", "status": "passed"}
+                    )
+                    publish_result["checks"] = checks
+                    publish_result["hardware_validation"] = {
+                        "status": "passed",
+                        "board": request.board,
+                        "transport": request.transport,
+                    }
+                    publish_result["warnings"] = [
+                        item
+                        for item in publish_result.get("warnings", [])
+                        if "真实硬件" not in item and "设备" not in item
+                    ]
+                    self._write_artifact_json(
+                        state,
+                        "publish_result",
+                        "mpos-publish-app-web",
+                        publish_result,
+                    )
+                state["status"] = "completed"
+                state["checkpoint_id"] = "completed"
+                state["current_phase"] = "mpos-publish-app-web"
+                state["next_phase"] = None
+        else:
+            state["structured_errors"].extend(structured_errors)
+            state["last_error"] = structured_errors[0]
+            self._event(
+                state,
+                "structured_error",
+                "mpos-deploy-app-web",
+                structured_errors[0],
+            )
+        self._write_state(state)
+        self._event(
+            state,
+            "status_update",
+            "mpos-deploy-app-web",
+            {
+                "status": request.result,
+                "message": request.message,
+                "board": request.board,
+                "transport": request.transport,
+            },
+        )
+        return self.get(session_id)
+
+    def upload_screenshot(
+        self, session_id: str, request: ScreenshotUploadRequest
+    ) -> dict[str, Any]:
+        state = self._read(session_id)
+        upload_keys = state.setdefault("screenshot_upload_keys", {})
+        if request.idempotency_key in upload_keys:
+            return self.get(session_id)
+        try:
+            image = base64.b64decode(request.data_base64, validate=True)
+        except (ValueError, binascii.Error) as exc:
+            raise ValueError("SCREENSHOT_INVALID_BASE64: 截图不是有效的 Base64") from exc
+        if len(image) > 10 * 1024 * 1024:
+            raise ValueError("SCREENSHOT_TOO_LARGE: 截图不能超过 10 MB")
+        signatures = {
+            "image/png": image.startswith(b"\x89PNG\r\n\x1a\n"),
+            "image/jpeg": image.startswith(b"\xff\xd8\xff"),
+            "image/webp": image.startswith(b"RIFF")
+            and len(image) >= 12
+            and image[8:12] == b"WEBP",
+        }
+        if not signatures[request.media_type]:
+            raise ValueError(
+                "SCREENSHOT_FORMAT_MISMATCH: 文件内容与声明的图片格式不一致"
+            )
+        expected_suffix = {
+            "image/png": ".png",
+            "image/jpeg": ".jpg",
+            "image/webp": ".webp",
+        }[request.media_type]
+        safe_stem = re.sub(
+            r"[^a-zA-Z0-9_.-]+", "-", Path(request.filename).stem
+        ).strip(".-") or "screenshot"
+        filename = f"{safe_stem}-{uuid.uuid4().hex[:8]}{expected_suffix}"
+        path = self._root(session_id) / "artifacts" / "screenshots" / filename
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(image)
+        role = (
+            "desktop_screenshot"
+            if request.source == "desktop"
+            else "publish_screenshot"
+        )
+        self._register_artifact(
+            state, path, "mpos-publish-app-web", "screenshot", role
+        )
+        upload_keys[request.idempotency_key] = filename
+        state["screenshot_upload_keys"] = upload_keys
+        publish_path = self._root(session_id) / "artifacts" / "publish_result.json"
+        if publish_path.is_file():
+            publish_result = _json_load(publish_path)
+            screenshot_items = [
+                {
+                    "path": item["path"],
+                    "mime": item["mime"],
+                    "size": item["size"],
+                    "publish_format_ok": True,
+                }
+                for item in state["artifacts"]
+                if item["role"] in {"desktop_screenshot", "publish_screenshot"}
+            ]
+            publish_result["screenshots"] = screenshot_items
+            publish_result["blockers"] = [
+                blocker
+                for blocker in publish_result.get("blockers", [])
+                if blocker != "publish_screenshot"
+            ]
+            checks = [
+                check
+                for check in publish_result.get("checks", [])
+                if check.get("name") != "publish_screenshot"
+            ]
+            checks.append({"name": "publish_screenshot", "status": "passed"})
+            publish_result["checks"] = checks
+            publish_result["status"] = (
+                "ready_for_manual_upload"
+                if not publish_result["blockers"]
+                else publish_result.get("status", "partial")
+            )
+            self._write_artifact_json(
+                state,
+                "publish_result",
+                "mpos-publish-app-web",
+                publish_result,
+            )
+        self._write_publish_bundle(state)
+        self._write_session_bundle(state)
+        self._write_manifest(state)
+        self._write_state(state)
+        self._event(
+            state,
+            "status_update",
+            "mpos-publish-app-web",
+            {
+                "status": "screenshot_uploaded",
+                "filename": filename,
+                "source": request.source,
+                "media_type": request.media_type,
+            },
+        )
+        return self.get(session_id)
+
     async def cancel(self, session_id: str, idempotency_key: str) -> dict[str, Any]:
         current = self._read(session_id)
         if current.get("cancel_idempotency_key") == idempotency_key:
@@ -1210,12 +2085,19 @@ class SessionService:
     def artifact(self, artifact_id: str) -> tuple[Path, dict[str, Any]]:
         if not ARTIFACT_ID_RE.fullmatch(artifact_id):
             raise SessionNotFound(artifact_id)
-        for session in self.list_sessions():
-            state = self._read(session["session_id"])
-            for artifact in state.get("artifacts", []):
-                if artifact["id"] != artifact_id:
-                    continue
-                root = self._root(state["session_id"])
+        session_id = self._index.session_for_artifact(artifact_id)
+        if session_id:
+            state = _json_load(self._state_path(session_id))
+            artifact = next(
+                (
+                    item
+                    for item in state.get("artifacts", [])
+                    if item["id"] == artifact_id
+                ),
+                None,
+            )
+            if artifact:
+                root = self._root(session_id)
                 path = (root / artifact["path"]).resolve()
                 if root not in path.parents or not path.is_file():
                     raise SessionNotFound(artifact_id)

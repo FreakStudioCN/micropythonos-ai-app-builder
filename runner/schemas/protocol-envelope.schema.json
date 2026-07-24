@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mpos-ai-app-v1-envelope",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "session_id",
+    "checkpoint_id",
+    "idempotency_key",
+    "operation",
+    "status",
+    "capabilities",
+    "input"
+  ],
+  "properties": {
+    "protocol_version": {"const": "mpos-ai-app/v1"},
+    "session_id": {"type": "string", "pattern": "^sess_[a-f0-9]{16}$"},
+    "checkpoint_id": {"type": "string", "minLength": 1},
+    "idempotency_key": {"type": "string", "minLength": 8},
+    "operation": {"type": "string", "minLength": 1},
+    "status": {
+      "enum": [
+        "created",
+        "running",
+        "blocked",
+        "waiting_preview",
+        "completed",
+        "failed",
+        "cancelled",
+        "timeout"
+      ]
+    },
+    "capabilities": {"type": "object"},
+    "input": {"type": "object"}
+  },
+  "additionalProperties": true
+}

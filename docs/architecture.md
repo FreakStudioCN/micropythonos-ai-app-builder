@@ -32,11 +32,15 @@ React Workbench
   -> FastAPI session API
   -> per-permission approval host
   -> MposSkillAdapter validates mpos-*-web contracts
-  -> single in-flight controlled runner
+  -> /actions/run orchestrates the complete controlled pipeline
+  -> /actions/{stage} can execute analyze/prepare-deps/generate/test/package/deploy/publish-check independently
   -> persisted session_state.json + activity_log.jsonl
-  -> DeepSeek generation and static gates
+  -> analysis_result + dependency_handoff
+  -> DeepSeek generation, bilingual normalization and product/static gates
   -> MicroPythonOS WASM self_test
-  -> artifact download + manual uPyStore guidance
+  -> browser WebSerial result audit + deploy_result
+  -> validated PNG/JPEG/WebP screenshot upload
+  -> artifact/session/publish bundle + manual uPyStore guidance
 ```
 
 会话工作目录位于 `backend/sessions/<session_id>/`，已由 `.gitignore`
@@ -44,12 +48,15 @@ React Workbench
 
 连续修改沿用同一个 `session_id`，递增 `revision_id`。开始新 revision
 前先把上一成功版本的 project 和 artifacts 保存到 `revisions/rN/`，
+并把上一版 `assets/main.py` 作为模型修改输入，同时生成 unified diff，
 因此失败修改不会覆盖最后一个可用版本。
 
 ## Runtime boundaries
 
 - Skill 文件定义阶段契约，不能向后端注入 shell。
 - `ScriptDispatcher` 只执行服务器预定义的白名单操作。
+- Desktop smoke 仅在 Linux SDL binary、controller 和 runner 同时存在时执行；
+  否则以 `TOOLCHAIN_MISSING`/skipped 记录，不伪造测试通过。
 - `DeviceService` 单独维护设备能力与锁；没有串口/`mpremote` 时返回 blocked，
   不把 Web preview 说成真机成功。
 - 每条活动事件同时包含 `seq`、`ts`、`session_id`、`stage` 和 `phase`。

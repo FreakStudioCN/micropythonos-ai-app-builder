@@ -32,6 +32,8 @@ header {
 .run-state.failed i, .run-state.timeout i, .run-state.cancelled i { background: #ef4444; }
 .run-state.blocked { color: #92400e; background: #fffbeb; border-color: #fde68a; }
 .run-state.blocked i { background: #f59e0b; }
+.run-state.waiting_device { color: #1d4ed8; background: #eff6ff; border-color: #bfdbfe; }
+.run-state.waiting_device i { background: #3b82f6; animation: pulse 1.5s infinite; }
 
 main { max-width: 1180px; margin: auto; padding: 48px 24px 80px; }
 .hero { text-align: center; margin-bottom: 34px; }

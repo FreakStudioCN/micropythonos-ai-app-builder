@@ -12,6 +12,7 @@ from app.generator import (
     _normalize_lvgl_code,
     _validate_api_summaries,
     _validate_code,
+    _validate_product_contract,
     _validate_visual_contract,
 )
 
@@ -141,6 +142,14 @@ class GeneratorQualityTests(unittest.TestCase):
         self.assertIn("set_style_bg_color", SYSTEM_PROMPT)
         self.assertIn("set_flex_flow(flow)", SYSTEM_PROMPT)
         self.assertIn("get_child_cnt()", SYSTEM_PROMPT)
+
+    def test_calendar_prompt_rejects_generic_styled_app(self) -> None:
+        with self.assertRaisesRegex(GenerationError, "日期按钮集合"):
+            _validate_product_contract(STYLED_APP, "做一个日历")
+
+    def test_calculator_prompt_requires_real_arithmetic_controls(self) -> None:
+        with self.assertRaisesRegex(GenerationError, "计算执行逻辑"):
+            _validate_product_contract(STYLED_APP, "做一个四则运算计算器")
 
 
 if __name__ == "__main__":

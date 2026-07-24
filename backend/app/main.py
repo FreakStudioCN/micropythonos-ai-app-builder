@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -14,10 +15,12 @@ from .models import (
     GenerateRequest,
     GenerateResponse,
     DeviceScanRequest,
+    DeviceResultRequest,
     PermissionDecisionRequest,
     PreviewResultRequest,
     RevisionRequest,
     ResumeRequest,
+    ScreenshotUploadRequest,
     SessionActionRequest,
     SessionCreateRequest,
 )
@@ -52,9 +55,18 @@ app.mount("/mpos-web", StaticFiles(directory=wasm_web_root, html=True), name="mp
 
 
 @app.get("/api/health")
-def health() -> dict[str, str | bool]:
-    configured = bool(os.getenv("DEEPSEEK_API_KEY", "").strip())
-    return {"status": "ok", "deepseek_configured": configured}
+def health() -> dict[str, str | bool | None]:
+    key = os.getenv("DEEPSEEK_API_KEY", "").strip()
+    configured = bool(key)
+    return {
+        "status": "ok",
+        "deepseek_configured": configured,
+        "deepseek_key_fingerprint": (
+            hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
+            if configured
+            else None
+        ),
+    }
 
 
 @app.get("/api/capabilities")
@@ -103,7 +115,14 @@ async def session_events(
                 )
                 idle_ticks = 0
             state = session_service.get(session_id)
-            if state["status"] in {"completed", "failed", "cancelled", "blocked", "timeout"} and cursor >= len(
+            if state["status"] in {
+                "completed",
+                "failed",
+                "cancelled",
+                "blocked",
+                "timeout",
+                "waiting_device",
+            } and cursor >= len(
                 events
             ):
                 yield (
@@ -126,10 +145,22 @@ async def session_events(
 
 @app.post("/api/sessions/{session_id}/actions/generate", status_code=202)
 async def generate_session(session_id: str, request: SessionActionRequest) -> dict:
+    return _start_action(session_id, "generate", request)
+
+
+@app.post("/api/sessions/{session_id}/actions/run", status_code=202)
+async def run_session(session_id: str, request: SessionActionRequest) -> dict:
     try:
-        return session_service.start_action(session_id, "generate", request)
+        return session_service.start_generation(session_id, request)
     except SessionNotFound as exc:
         raise HTTPException(status_code=404, detail="Session 不存在") from exc
+
+
+@app.post("/api/sessions/{session_id}/actions/prepare-deps", status_code=202)
+async def prepare_deps_session(
+    session_id: str, request: SessionActionRequest
+) -> dict:
+    return _start_action(session_id, "prepare-deps", request)
 
 
 def _start_action(session_id: str, action: str, request: SessionActionRequest) -> dict:
@@ -251,6 +282,24 @@ def scan_devices(session_id: str, request: DeviceScanRequest) -> dict:
         return session_service.scan_devices(session_id, request.idempotency_key)
     except SessionNotFound as exc:
         raise HTTPException(status_code=404, detail="Session 不存在") from exc
+
+
+@app.post("/api/sessions/{session_id}/devices/result")
+def record_device_result(session_id: str, request: DeviceResultRequest) -> dict:
+    try:
+        return session_service.record_device_result(session_id, request)
+    except SessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="Session 不存在") from exc
+
+
+@app.post("/api/sessions/{session_id}/screenshots", status_code=201)
+def upload_screenshot(session_id: str, request: ScreenshotUploadRequest) -> dict:
+    try:
+        return session_service.upload_screenshot(session_id, request)
+    except SessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="Session 不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/generate", response_model=GenerateResponse)
