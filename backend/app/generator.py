@@ -116,7 +116,7 @@ class GeneratedApp(Activity):
 VISUAL_REQUIREMENTS = """
 本次 App 必须达到可直接展示的视觉质量：
 1. 使用统一深色调色板和高对比文字，不允许默认白底灰按钮。
-2. 必须设置 screen 背景色、至少一个表面/控件背景色、文本色、圆角和内边距。
+2. 必须设置 screen 背景色、至少一个表面/控件背景色、文本色和圆角；主要内容卡片必须有内边距。
 3. 信息需要有标题层、内容层和操作层，不能把控件随意堆在一起。
 4. 游戏必须有 HUD、明确的玩家/敌人/子弹颜色和整齐的底部触控按钮。
 5. 只能调用系统提示中列出的稳定 API；位置只从 Python 数字状态读取。
@@ -134,7 +134,7 @@ GENERAL_UI_BLUEPRINT = """
 - 中间使用一个或多个有圆角、内边距和细边框的内容卡片。
 - 底部或卡片内放主要操作区；同组按钮等高、等宽、间距一致。
 - 标题文字明亮，说明文字使用次要颜色，关键数字或状态使用强调色。
-- 至少对 screen、内容卡片和主要按钮分别设置背景、文字、圆角和内边距。
+- screen 设置页面背景；内容卡片设置背景、圆角、内边距和边框；主要按钮设置强调色、圆角和一致尺寸。
 - 只使用系统提示列出的稳定 LVGL API，不使用主题、字体、grid、style 对象或坐标读取。
 """
 
@@ -158,6 +158,68 @@ class ApiValidationError(GenerationError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
+
+
+def _message_text(value: Any) -> str:
+    """Normalize OpenAI-compatible string and multipart message content."""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, list):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, str):
+                parts.append(item)
+            elif isinstance(item, dict):
+                text = item.get("text")
+                if isinstance(text, str):
+                    parts.append(text)
+        return "\n".join(parts).strip()
+    return ""
+
+
+def _parse_model_json(message: dict[str, Any]) -> dict[str, Any]:
+    """Parse JSON even when a compatible provider wraps it in prose/fences."""
+    candidates = [
+        _message_text(message.get("content")),
+        _message_text(message.get("reasoning_content")),
+    ]
+    tool_calls = message.get("tool_calls")
+    if isinstance(tool_calls, list):
+        for call in tool_calls:
+            if not isinstance(call, dict):
+                continue
+            function = call.get("function")
+            if isinstance(function, dict):
+                arguments = function.get("arguments")
+                if isinstance(arguments, str):
+                    candidates.append(arguments.strip())
+
+    decoder = json.JSONDecoder()
+    for raw in candidates:
+        if not raw:
+            continue
+        cleaned = raw.strip().lstrip("\ufeff")
+        fenced = re.fullmatch(
+            r"```(?:json)?\s*(.*?)\s*```",
+            cleaned,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if fenced:
+            cleaned = fenced.group(1).strip()
+        try:
+            parsed = json.loads(cleaned)
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+        for match in re.finditer(r"\{", cleaned):
+            try:
+                parsed, _end = decoder.raw_decode(cleaned[match.start() :])
+            except json.JSONDecodeError:
+                continue
+            if isinstance(parsed, dict):
+                return parsed
+    raise GenerationError("DeepSeek 没有返回可解析的生成结果")
 
 
 def _settings() -> tuple[str, str, str]:
@@ -234,8 +296,11 @@ async def _call_deepseek(
 
     try:
         body = response.json()
-        content = body["choices"][0]["message"]["content"]
-        generated = json.loads(content)
+        choice = body["choices"][0]
+        message = choice["message"]
+        if not isinstance(message, dict):
+            raise TypeError("message is not an object")
+        generated = _parse_model_json(message)
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
         raise GenerationError("DeepSeek 没有返回可解析的生成结果") from exc
     return generated, body.get("model", model)
@@ -467,8 +532,8 @@ def _validate_visual_contract(code: str) -> list[str]:
             "set_style_pad_right",
         )
     )
-    if padding_calls < 2:
-        missing.append("页面与内容控件的两级内边距")
+    if padding_calls < 1:
+        missing.append("主要内容卡片的明确内边距")
     layout_calls = sum(
         attributes.count(name)
         for name in (
@@ -713,7 +778,8 @@ def _build_correction(error: GenerationError, candidate: str = "") -> str:
     if "界面仍像未设计的原型" in message:
         suggestions.append(
             "按照三层设计系统完整重做界面：screen、内容卡片和主要按钮分别设置背景；"
-            "至少两处圆角、两处内边距、三个明确尺寸/布局设置，并增加细边框或轻阴影。"
+            "至少两处圆角、内容卡片的一处明确内边距、三个明确尺寸/布局设置，"
+            "并增加细边框或轻阴影。"
             "颜色统一使用 4-6 个协调的 lv.color_hex。"
         )
     if "API summary" in message:
@@ -773,7 +839,16 @@ async def generate_app(request: GenerateRequest) -> GenerateResponse:
     last_error: GenerationError | None = None
     max_attempts = 5
     for _attempt in range(max_attempts):
-        generated, model = await _call_deepseek(request, correction)
+        try:
+            generated, model = await _call_deepseek(request, correction)
+        except GenerationError as exc:
+            last_error = exc
+            correction = (
+                "上一轮模型响应不是可解析的 JSON 对象。"
+                "请只返回一个完整 JSON 对象，不要 Markdown、代码围栏或解释；"
+                "app_code 必须是 JSON 字符串。"
+            )
+            continue
         candidate = generated.get("app_code")
         candidate_tests = generated.get("acceptance_tests")
         if not isinstance(candidate, str) or not candidate.strip():

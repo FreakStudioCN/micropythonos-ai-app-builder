@@ -10,6 +10,7 @@ from app.generator import (
     _build_mpk,
     _build_correction,
     _normalize_lvgl_code,
+    _parse_model_json,
     _validate_api_summaries,
     _validate_code,
     _validate_product_contract,
@@ -57,6 +58,54 @@ class GeneratedApp(Activity):
 
 
 class GeneratorQualityTests(unittest.TestCase):
+    def test_model_json_parser_accepts_markdown_fence(self) -> None:
+        parsed = _parse_model_json(
+            {
+                "content": (
+                    "```json\n"
+                    '{"summary":"番茄钟","app_code":"print(1)",'
+                    '"acceptance_tests":["a","b"]}\n'
+                    "```"
+                )
+            }
+        )
+        self.assertEqual(parsed["summary"], "番茄钟")
+
+    def test_model_json_parser_accepts_prose_and_multipart_content(self) -> None:
+        parsed = _parse_model_json(
+            {
+                "content": [
+                    {"type": "text", "text": "生成结果如下：\n"},
+                    {
+                        "type": "text",
+                        "text": (
+                            '{"summary":"Timer","app_code":"print(1)",'
+                            '"acceptance_tests":["a","b"]}'
+                        ),
+                    },
+                ]
+            }
+        )
+        self.assertEqual(parsed["summary"], "Timer")
+
+    def test_model_json_parser_falls_back_to_tool_arguments(self) -> None:
+        parsed = _parse_model_json(
+            {
+                "content": "",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "arguments": (
+                                '{"summary":"Timer","app_code":"print(1)",'
+                                '"acceptance_tests":["a","b"]}'
+                            )
+                        }
+                    }
+                ],
+            }
+        )
+        self.assertEqual(parsed["summary"], "Timer")
+
     def test_mpk_starts_with_explicit_package_directory(self) -> None:
         package_name = "com.example.calendar"
         encoded = _build_mpk(
@@ -84,6 +133,23 @@ class GeneratorQualityTests(unittest.TestCase):
     def test_styled_app_passes_visual_contract(self) -> None:
         result = _validate_visual_contract(STYLED_APP)
         self.assertTrue(result)
+
+    def test_reusable_single_padding_rule_is_not_rejected(self) -> None:
+        reusable_style = STYLED_APP.replace(
+            "        screen.set_style_pad_all(10, 0)\n",
+            "",
+        )
+        result = _validate_visual_contract(reusable_style)
+        self.assertTrue(result)
+
+    def test_styled_app_without_any_padding_is_rejected(self) -> None:
+        no_padding = "\n".join(
+            line
+            for line in STYLED_APP.splitlines()
+            if "set_style_pad_" not in line
+        )
+        with self.assertRaisesRegex(GenerationError, "明确内边距"):
+            _validate_visual_contract(no_padding)
 
     def test_default_looking_app_is_rejected(self) -> None:
         plain = "\n".join(
