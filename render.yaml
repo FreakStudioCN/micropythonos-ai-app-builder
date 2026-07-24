@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: blockless-make-app
+    runtime: docker
+    plan: free
+    region: singapore
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    autoDeployTrigger: commit
+    envVars:
+      - key: DEEPSEEK_API_KEY
+        sync: false
+      - key: DEEPSEEK_BASE_URL
+        value: https://api.deepseek.com
+      - key: DEEPSEEK_MODEL
+        value: deepseek-v4-flash
+      - key: MPOS_BILLING_DEMO_MODE
+        value: "false"
+      - key: MPOS_DEMO_ERROR_INJECTION
+        value: "false"

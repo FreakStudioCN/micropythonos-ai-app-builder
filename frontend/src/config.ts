@@ -2,8 +2,12 @@ const env = import.meta.env as Record<string, string | undefined>;
 
 const stripTrailingSlash = (value: string) => value.replace(/\/+$/, "");
 
+const defaultApiBase = import.meta.env.PROD
+  ? window.location.origin
+  : "http://localhost:8000";
+
 export const API_BASE_URL = stripTrailingSlash(
-  env.VITE_API_BASE?.trim() || "http://localhost:8000",
+  env.VITE_API_BASE?.trim() || defaultApiBase,
 );
 
 const wasmBaseUrl = stripTrailingSlash(

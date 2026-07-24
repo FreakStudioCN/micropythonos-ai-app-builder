@@ -53,7 +53,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
-wasm_web_root = Path(__file__).resolve().parents[2] / "frontend" / "public" / "mpos-web"
+project_root = Path(__file__).resolve().parents[2]
+frontend_dist_root = project_root / "frontend" / "dist"
+wasm_web_root = (
+    frontend_dist_root / "mpos-web"
+    if (frontend_dist_root / "mpos-web").is_dir()
+    else project_root / "frontend" / "public" / "mpos-web"
+)
 app.mount("/mpos-web", StaticFiles(directory=wasm_web_root, html=True), name="mpos-web")
 
 
@@ -401,3 +407,9 @@ async def generate(request: GenerateRequest) -> GenerateResponse:
         return await generate_app(request)
     except GenerationError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+
+# In production the Vite build is served by the same FastAPI process. Register
+# this mount last so every /api route and /mpos-web keep priority.
+if frontend_dist_root.is_dir():
+    app.mount("/", StaticFiles(directory=frontend_dist_root, html=True), name="frontend")
