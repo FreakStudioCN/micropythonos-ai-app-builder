@@ -9,6 +9,7 @@ from app.generator import (
     SYSTEM_PROMPT,
     _build_mpk,
     _build_correction,
+    _normalize_generation_payload,
     _normalize_lvgl_code,
     _parse_model_json,
     _validate_api_summaries,
@@ -105,6 +106,51 @@ class GeneratorQualityTests(unittest.TestCase):
             }
         )
         self.assertEqual(parsed["summary"], "Timer")
+
+    def test_generation_payload_accepts_code_alias_and_nested_tests(self) -> None:
+        normalized = _normalize_generation_payload(
+            {
+                "result": {
+                    "code": "print('timer')",
+                    "tests": ["starts", "stops"],
+                    "summary": "Timer",
+                }
+            }
+        )
+        self.assertEqual(normalized["app_code"], "print('timer')")
+        self.assertEqual(normalized["acceptance_tests"], ["starts", "stops"])
+        self.assertEqual(normalized["summary"], "Timer")
+
+    def test_generation_payload_accepts_files_dictionary(self) -> None:
+        normalized = _normalize_generation_payload(
+            {
+                "files": {
+                    "assets/main.py": {"content": "print('calendar')"},
+                    "README.md": "calendar",
+                },
+                "acceptance_criteria": ["changes month", "selects date"],
+            }
+        )
+        self.assertEqual(normalized["app_code"], "print('calendar')")
+        self.assertEqual(
+            normalized["acceptance_tests"],
+            ["changes month", "selects date"],
+        )
+
+    def test_generation_payload_accepts_files_list(self) -> None:
+        normalized = _normalize_generation_payload(
+            {
+                "data": {
+                    "files": [
+                        {"path": "README.md", "content": "ignore"},
+                        {"path": "app.py", "content": "print('ready')"},
+                    ],
+                    "test_cases": ["opens", "responds"],
+                }
+            }
+        )
+        self.assertEqual(normalized["app_code"], "print('ready')")
+        self.assertEqual(normalized["acceptance_tests"], ["opens", "responds"])
 
     def test_mpk_starts_with_explicit_package_directory(self) -> None:
         package_name = "com.example.calendar"
@@ -286,6 +332,28 @@ class GeneratorQualityTests(unittest.TestCase):
     def test_calculator_prompt_requires_real_arithmetic_controls(self) -> None:
         with self.assertRaisesRegex(GenerationError, "计算执行逻辑"):
             _validate_product_contract(STYLED_APP, "做一个四则运算计算器")
+
+    def test_calculator_button_factory_is_not_mistaken_for_one_button(self) -> None:
+        calculator = STYLED_APP.replace(
+            "        self.setContentView(screen)\n",
+            "        button.add_event_cb(self.on_key, lv.EVENT.CLICKED, None)\n"
+            "        self.operator = '+'\n"
+            "        self.result = 0\n"
+            "        self.setContentView(screen)\n",
+        ).replace(
+            "    def update_label(self, value):\n",
+            "    def on_key(self, event):\n"
+            "        if self.operator == '+': self.result = 8 + 2\n"
+            "        elif self.operator == '-': self.result = 8 - 2\n"
+            "        elif self.operator == '*': self.result = 8 * 2\n"
+            "        elif self.operator == '/': self.result = 8 / 2\n\n"
+            "    def update_label(self, value):\n",
+        )
+        result = _validate_product_contract(
+            calculator,
+            "做一个极简四则运算计算器，按钮要大，适合触摸屏",
+        )
+        self.assertTrue(result)
 
 
 if __name__ == "__main__":

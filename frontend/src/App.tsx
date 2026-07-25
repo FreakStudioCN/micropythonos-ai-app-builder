@@ -86,6 +86,18 @@ interface BillingAccount {
   generation_cost: number;
   initial_credits: number;
 }
+interface RequirementMessage {
+  role: "user" | "assistant";
+  content: string;
+}
+interface RequirementChatResult {
+  assistant_message: string;
+  ready: boolean;
+  refined_prompt: string;
+  missing_fields: string[];
+  brief: Record<string, unknown>;
+  model: string;
+}
 interface SaveFileHandle {
   createWritable(): Promise<{
     write(data: Blob): Promise<void>;
@@ -173,6 +185,39 @@ const verifiedBoards = [
   ["unPhone", "unPhone 9", "ESP32-S3", "触摸屏", "移动创作"],
   ["Waveshare", "ESP32-S3-Touch-LCD-2", "ESP32-S3", "2\" 触摸屏", "新手与展示"],
 ] as const;
+const subscriptionPlans = [
+  {
+    id: "go",
+    name: "Go",
+    price: 19,
+    credits: 100,
+    generations: 10,
+    featured: false,
+    benefitsZh: ["每月 100 点", "最多生成 10 次", "Web 预览与 MPK 打包"],
+    benefitsEn: ["100 credits/month", "Up to 10 generations", "Web preview and MPK packaging"],
+  },
+  {
+    id: "plus",
+    name: "Plus",
+    price: 49,
+    credits: 300,
+    generations: 30,
+    featured: true,
+    benefitsZh: ["每月 300 点", "最多生成 30 次", "优先生成与连续修改", "ESP32 真机部署"],
+    benefitsEn: ["300 credits/month", "Up to 30 generations", "Priority generation and revisions", "ESP32 deployment"],
+  },
+  {
+    id: "pro",
+    name: "Pro",
+    price: 129,
+    credits: 1000,
+    generations: 100,
+    featured: false,
+    benefitsZh: ["每月 1000 点", "最多生成 100 次", "最高优先级", "真机部署与发布检查"],
+    benefitsEn: ["1,000 credits/month", "Up to 100 generations", "Highest priority", "Device deployment and publish checks"],
+  },
+] as const;
+type SubscriptionPlan = (typeof subscriptionPlans)[number];
 const getBillingUserId = () => {
   const saved = localStorage.getItem("mpos-billing-user-id");
   if (saved) return saved;
@@ -248,7 +293,18 @@ export default function App() {
   const [continuing, setContinuing] = useState(false);
   const [billingUserId] = useState(getBillingUserId);
   const [billingAccount, setBillingAccount] = useState<BillingAccount | null>(null);
+  const [subscriptionOpen, setSubscriptionOpen] = useState(false);
+  const [selectedPlan, setSelectedPlan] = useState<SubscriptionPlan | null>(null);
+  const [subscriptionUsername, setSubscriptionUsername] = useState(
+    () => localStorage.getItem("blockless-subscription-username") || "",
+  );
   const [libraryBusy, setLibraryBusy] = useState("");
+  const [requirementOpen, setRequirementOpen] = useState(false);
+  const [requirementMessages, setRequirementMessages] = useState<RequirementMessage[]>([]);
+  const [requirementInput, setRequirementInput] = useState("");
+  const [requirementBusy, setRequirementBusy] = useState(false);
+  const [requirementError, setRequirementError] = useState("");
+  const [requirementResult, setRequirementResult] = useState<RequirementChatResult | null>(null);
   const [wasmReady, setWasmReady] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState("正在启动 MicroPythonOS WASM…");
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -649,7 +705,7 @@ export default function App() {
         if (created.permissions.some((item) => item.required && item.decision === "pending")) {
           setStatus("blocked");
           setPermissionOpen(true);
-          setLogs((items) => [...items, tr("[permission] 等待你逐项确认操作权限", "[permission] Waiting for individual approvals")]);
+          setLogs((items) => [...items, tr("[permission] 等待权限确认，可使用一键确认", "[permission] Waiting for approval; approve all is available")]);
           return;
         }
       } else if (continuing && !repair) {
@@ -747,8 +803,8 @@ export default function App() {
       }
       const message = error instanceof DOMException && error.name === "AbortError"
         ? tr(
-            `DeepSeek 生成超过 ${Math.round(GENERATION_TIMEOUT_MS / 60000)} 分钟，已停止等待。请重试。`,
-            `DeepSeek took over ${Math.round(GENERATION_TIMEOUT_MS / 60000)} minutes. Please retry.`,
+            `生成超过 ${Math.round(GENERATION_TIMEOUT_MS / 1000)} 秒，已停止等待。请重试。`,
+            `Generation took over ${Math.round(GENERATION_TIMEOUT_MS / 1000)} seconds. Please retry.`,
           )
         : error instanceof Error ? error.message : tr("未知错误", "Unknown error");
       setErrorMessage(message);
@@ -781,6 +837,47 @@ export default function App() {
       }
     } catch (error) {
       setToast(error instanceof Error ? error.message : tr("权限操作失败", "Permission action failed"));
+    } finally {
+      setPermissionBusy("");
+    }
+  };
+
+  const allowAllPermissions = async () => {
+    if (permissionBusy || !sessionState) return;
+    const pending = sessionState.permissions.filter(
+      (item) => item.required && item.decision === "pending",
+    );
+    if (!pending.length) {
+      setPermissionOpen(false);
+      void run();
+      return;
+    }
+    setPermissionBusy("__all__");
+    try {
+      const response = await fetch(
+        `${apiUrl}/api/sessions/${sessionState.session_id}/permissions/allow-all`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            idempotency_key: `permission-all-${crypto.randomUUID()}`,
+          }),
+        },
+      );
+      const payload = await response.json().catch(() => null);
+      if (!response.ok) {
+        throw new Error(
+          typeof payload?.detail === "string"
+            ? payload.detail
+            : tr("一键确认权限失败", "Could not approve all permissions"),
+        );
+      }
+      applySession(payload as SessionState);
+      setPermissionOpen(false);
+      setToast(tr(`已一次确认 ${pending.length} 项权限`, `Approved ${pending.length} permissions`));
+      window.setTimeout(() => void run(), 0);
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : tr("一键确认权限失败", "Could not approve all permissions"));
     } finally {
       setPermissionBusy("");
     }
@@ -1143,13 +1240,101 @@ export default function App() {
     setToast(tr(`已下载真实 ${result.mpk_filename}`, `Downloaded ${result.mpk_filename}`));
   };
 
+  const requestRequirementHelp = async (
+    messages: RequirementMessage[],
+    finalize = false,
+  ) => {
+    setRequirementBusy(true);
+    setRequirementError("");
+    try {
+      const response = await fetch(`${apiUrl}/api/requirements/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          locale: isZh ? "zh-CN" : "en-US",
+          draft_prompt: prompt.trim(),
+          messages,
+          finalize,
+        }),
+      });
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(
+          typeof payload?.detail === "string"
+            ? payload.detail
+            : tr("AI 需求助手暂时不可用", "The AI requirement assistant is unavailable"),
+        );
+      }
+      const resultPayload = payload as RequirementChatResult;
+      setRequirementResult(resultPayload);
+      const lastMessage = messages[messages.length - 1];
+      const repeatsLastAssistant =
+        lastMessage?.role === "assistant"
+        && lastMessage.content.trim() === resultPayload.assistant_message.trim();
+      setRequirementMessages(
+        finalize && resultPayload.ready || repeatsLastAssistant
+          ? messages
+          : [
+              ...messages,
+              { role: "assistant", content: resultPayload.assistant_message },
+            ],
+      );
+    } catch (error) {
+      setRequirementError(
+        error instanceof Error
+          ? error.message
+          : tr("需求对话失败，请重试", "Requirement chat failed. Please retry."),
+      );
+    } finally {
+      setRequirementBusy(false);
+    }
+  };
+
+  const startRequirementChat = () => {
+    if (prompt.trim().length < 3) {
+      setToast(tr("先写一句你想做什么 App", "First describe the app you want to build"));
+      return;
+    }
+    const initialMessages: RequirementMessage[] = [
+      { role: "user", content: prompt.trim() },
+    ];
+    setRequirementMessages(initialMessages);
+    setRequirementResult(null);
+    setRequirementInput("");
+    setRequirementError("");
+    setRequirementOpen(true);
+    void requestRequirementHelp(initialMessages);
+  };
+
+  const sendRequirementAnswer = () => {
+    const answer = requirementInput.trim();
+    if (!answer || requirementBusy) return;
+    const nextMessages: RequirementMessage[] = [
+      ...requirementMessages,
+      { role: "user", content: answer },
+    ];
+    setRequirementMessages(nextMessages);
+    setRequirementInput("");
+    void requestRequirementHelp(nextMessages);
+  };
+
+  const applyRefinedRequirement = () => {
+    if (!requirementResult?.refined_prompt) return;
+    setPrompt(requirementResult.refined_prompt);
+    setRequirementOpen(false);
+    setToast(tr("已把 AI 整理的完整需求填入输入框", "The refined requirement was added to the prompt"));
+  };
+
   return (
     <div className="page">
       <header>
         <div className="brand"><span>BM</span><div><strong>Blockless-Make-APP</strong><small>{tr("MicroPythonOS AI App 生成与分发平台", "MicroPythonOS AI app creation and distribution")}</small></div></div>
         <div className="header-actions">
-          <button className="credits-button" onClick={() => setToast(tr("当前为免费内测点数，不提供在线充值", "Free beta credits; online payments are not enabled."))}>
+          <button className="credits-button" onClick={() => { setSelectedPlan(null); setSubscriptionOpen(true); }}>
             <span>◆</span>{billingAccount?.credits ?? 50} {tr("点", "credits")}
+          </button>
+          <button className="subscription-button" onClick={() => { setSelectedPlan(null); setSubscriptionOpen(true); }}>
+            {tr("订阅", "Subscribe")}
           </button>
           <button className="language-button" onClick={() => setLanguage(isZh ? "en" : "zh")} aria-label={tr("切换为英文", "Switch to Chinese")}>
             {isZh ? "English" : "中文"}
@@ -1168,6 +1353,12 @@ export default function App() {
           <section className="card input-card">
             <label htmlFor="prompt">{tr("你想做什么 App？", "What app do you want to build?")}</label>
             <textarea id="prompt" value={prompt} disabled={status === "running"} onChange={(event) => setPrompt(event.target.value)} />
+            <div className="requirement-entry">
+              <button type="button" disabled={status === "running" || requirementBusy} onClick={startRequirementChat}>
+                <span>✦</span>{tr("和 AI 聊聊，帮我完善需求", "Chat with AI to refine the idea")}
+              </button>
+              <small>{tr("AI 会一次问一个关键问题，整理好后再生成 App", "AI asks one key question at a time before generation")}</small>
+            </div>
             <div className="chips">
               {(isZh ? [
                 ["极简计算器", defaultPrompt],
@@ -1281,7 +1472,10 @@ export default function App() {
               <strong>{status === "timeout" ? tr("运行超时", "Timed out") : status === "cancelled" ? tr("任务已取消", "Cancelled") : status === "blocked" ? tr("等待处理", "Blocked") : tr("真实生成失败", "Generation failed")}</strong>
               {sessionState?.last_error && <code>{sessionState.last_error.code} · {sessionState.last_error.stage} · owner: {sessionState.last_error.owner}</code>}
               <span>{errorMessage}</span>
-              <div>{status === "blocked" && sessionState?.permissions.some((item) => item.required && item.decision === "pending") && <button onClick={() => setPermissionOpen(true)}>{tr("处理权限", "Review permissions")}</button>}<button onClick={() => { void navigator.clipboard.writeText(`${sessionState?.last_error?.code || "ERROR"}\n${errorMessage}\nSession: ${sessionState?.session_id || "unknown"}`); setToast(tr("错误已复制，可以发给 AI", "Error copied for AI")); }}>{tr("复制给 AI 修复", "Copy for AI")}</button><button onClick={retry}>{tr("从失败检查点重试", "Retry from checkpoint")}</button></div>
+              <div>
+                {status === "blocked" && sessionState?.permissions.some((item) => item.required && item.decision === "pending") && <button onClick={() => setPermissionOpen(true)}>{tr("处理权限", "Review permissions")}</button>}
+                <button onClick={retry}>{tr("从失败检查点重试", "Retry from checkpoint")}</button>
+              </div>
             </div>}
             {sessionState?.warnings.length ? <div className="warning-box"><strong>{tr("警告（不等于失败）", "Warnings (not failures)")}</strong>{sessionState.warnings.map((warning) => <span key={warning}>⚠ {warning}</span>)}</div> : null}
           </section>
@@ -1437,9 +1631,133 @@ export default function App() {
         </section>
       </main>
 
+      {subscriptionOpen && <div className="modal-backdrop"><div className="modal subscription-modal">
+        <button className="modal-close" aria-label={tr("关闭", "Close")} onClick={() => { setSubscriptionOpen(false); setSelectedPlan(null); }}>×</button>
+        {!selectedPlan
+          ? <>
+              <h2>{tr("选择订阅套餐", "Choose a subscription")}</h2>
+              <p>{tr("每次生成消耗 10 点。选择套餐后，扫码进群联系群主人工开通。", "Each generation costs 10 credits. Choose a plan, then join the group and contact the owner for manual activation.")}</p>
+              <div className="plan-grid">
+                {subscriptionPlans.map((plan) => (
+                  <article className={`plan-card ${plan.featured ? "featured" : ""}`} key={plan.id}>
+                    {plan.featured && <span className="popular-badge">{tr("推荐", "Popular")}</span>}
+                    <h3>{plan.name}</h3>
+                    <div className="plan-price"><strong>¥{plan.price}</strong><span>{tr("/ 月", "/ month")}</span></div>
+                    <div className="plan-credits">{plan.credits} {tr("点", "credits")} · {plan.generations} {tr("次生成", "generations")}</div>
+                    <ul>{(isZh ? plan.benefitsZh : plan.benefitsEn).map((benefit) => <li key={benefit}>✓ {benefit}</li>)}</ul>
+                    <button className={plan.featured ? "main-button" : "secondary-button"} onClick={() => setSelectedPlan(plan)}>{tr(`选择 ${plan.name}`, `Choose ${plan.name}`)}</button>
+                  </article>
+                ))}
+              </div>
+              <small>{tr("当前采用人工收款和人工开通。用户付款后不会自动到账，必须由群主确认。", "Payments and activation are handled manually. Credits are added only after the group owner confirms payment.")}</small>
+            </>
+          : <div className="manual-checkout">
+              <div className="checkout-heading">
+                <button className="secondary-button" onClick={() => setSelectedPlan(null)}>← {tr("返回套餐", "Back to plans")}</button>
+                <div><span>{tr("当前选择", "Selected plan")}</span><strong>{selectedPlan.name} · ¥{selectedPlan.price}{tr("/月", "/month")}</strong></div>
+              </div>
+              <div className="checkout-layout">
+                <div className="group-qr">
+                  <img src="/subscription/blockless-ai-group.webp" alt={tr("Blockless AI 硬件交流群二维码", "Blockless AI hardware group QR code")} />
+                  <strong>{tr("微信扫码加入 Blockless AI 硬件交流群", "Scan with WeChat to join the Blockless AI hardware group")}</strong>
+                  <small>{tr("群二维码会定期更新；如已失效，请联系工作人员获取新二维码。", "The group QR code is updated periodically. Contact the team if it has expired.")}</small>
+                </div>
+                <div className="checkout-instructions">
+                  <h3>{tr("人工开通步骤", "Manual activation steps")}</h3>
+                  <ol>
+                    <li>{tr("使用微信扫描左侧二维码并加入群聊。", "Scan the QR code with WeChat and join the group.")}</li>
+                    <li>{tr(`向群主说明购买 ${selectedPlan.name} 套餐，并支付 ¥${selectedPlan.price}。`, `Tell the group owner you want the ${selectedPlan.name} plan and pay ¥${selectedPlan.price}.`)}</li>
+                    <li>{tr("填写用户名，并把付款信息完整发送给群主。", "Enter your username and send the complete payment information to the group owner.")}</li>
+                    <li>{tr("群主确认收款后人工开通服务并增加点数。", "The group owner confirms payment, activates the plan, and adds credits.")}</li>
+                  </ol>
+                  <label htmlFor="subscription-username">{tr("你的用户名（必填）", "Your username (required)")}</label>
+                  <input
+                    id="subscription-username"
+                    value={subscriptionUsername}
+                    placeholder={tr("填写你在群里使用的用户名", "Enter the username you will use in the group")}
+                    onChange={(event) => {
+                      const nextUsername = event.target.value;
+                      setSubscriptionUsername(nextUsername);
+                      localStorage.setItem("blockless-subscription-username", nextUsername);
+                    }}
+                  />
+                  <label>{tr("你的账户标识", "Your account ID")}</label>
+                  <div className="account-id-row">
+                    <code>{billingUserId}</code>
+                    <button
+                      className="secondary-button"
+                      onClick={() => {
+                        const username = subscriptionUsername.trim();
+                        if (!username) {
+                          setToast(tr("请先填写用户名", "Please enter your username first"));
+                          return;
+                        }
+                        const paymentMessage = tr(
+                          `订阅套餐：${selectedPlan.name}\n支付金额：¥${selectedPlan.price}\n用户名：${username}\n账户标识：${billingUserId}`,
+                          `Plan: ${selectedPlan.name}\nAmount: ¥${selectedPlan.price}\nUsername: ${username}\nAccount ID: ${billingUserId}`,
+                        );
+                        void navigator.clipboard.writeText(paymentMessage);
+                        setToast(tr("付款信息已复制，请发送给群主", "Payment information copied. Send it to the group owner."));
+                      }}
+                    >
+                      {tr("复制付款信息", "Copy payment info")}
+                    </button>
+                  </div>
+                  <div className="payment-warning"><strong>{tr("请注意", "Important")}</strong><span>{tr("不要只发送付款截图，一定要同时发送用户名和账户标识。只有群主确认后点数才会到账。", "Send your username and account ID together with payment information. Credits are added only after the group owner confirms payment.")}</span></div>
+                </div>
+              </div>
+              <div className="checkout-actions">
+                <button className="main-button" onClick={() => { setSubscriptionOpen(false); setSelectedPlan(null); }}>{tr("我已了解", "Got it")}</button>
+              </div>
+            </div>}
+      </div></div>}
+
+      {requirementOpen && <div className="modal-backdrop"><div className="modal requirement-modal">
+        <section className="requirement-modal-title">
+          <div><span>AI</span><div><h2>{tr("需求刻画助手", "Requirement assistant")}</h2><p>{tr("先把想法聊清楚，再交给生成器", "Clarify the idea before sending it to the generator")}</p></div></div>
+          <button aria-label={tr("关闭", "Close")} onClick={() => setRequirementOpen(false)}>×</button>
+        </section>
+        <div className="requirement-chat">
+          {requirementMessages.map((message, index) => (
+            <article className={message.role} key={`${message.role}-${index}`}>
+              <b>{message.role === "user" ? tr("你", "You") : tr("AI 助手", "AI assistant")}</b>
+              <p>{message.content}</p>
+            </article>
+          ))}
+          {requirementBusy && <article className="assistant thinking"><b>{tr("AI 助手", "AI assistant")}</b><p>{tr("正在理解你的想法…", "Understanding your idea…")}</p></article>}
+        </div>
+        {requirementError && <div className="requirement-chat-error">{requirementError}</div>}
+        {requirementResult?.ready && requirementResult.refined_prompt
+          ? <div className="requirement-ready">
+              <strong>✓ {tr("需求已经整理好", "Requirement ready")}</strong>
+              <p>{requirementResult.refined_prompt}</p>
+            </div>
+          : <div className="requirement-compose">
+              <textarea
+                value={requirementInput}
+                disabled={requirementBusy}
+                placeholder={tr("回答这个问题，也可以直接说“按你的建议”", "Answer the question, or say “use your recommendation”")}
+                onChange={(event) => setRequirementInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    sendRequirementAnswer();
+                  }
+                }}
+              />
+              <button className="main-button" disabled={!requirementInput.trim() || requirementBusy} onClick={sendRequirementAnswer}>{tr("发送", "Send")}</button>
+            </div>}
+        <div className="requirement-actions">
+          <button className="secondary-button" disabled={requirementBusy} onClick={() => setRequirementOpen(false)}>{tr("稍后再说", "Later")}</button>
+          {!requirementResult?.ready && <button className="secondary-button" disabled={requirementBusy} onClick={() => void requestRequirementHelp(requirementMessages, true)}>{tr("现在整理成完整需求", "Finish requirement now")}</button>}
+          {requirementResult?.ready && <button className="main-button" onClick={applyRefinedRequirement}>{tr("采用这份需求", "Use this requirement")}</button>}
+        </div>
+        <small className="requirement-note">{tr("这里只整理产品需求，不会生成代码或扣除生成点数。", "This step only refines requirements. It does not generate code or consume generation credits.")}</small>
+      </div></div>}
+
       {permissionOpen && sessionState && <div className="modal-backdrop"><div className="modal permission-host">
         <h2>{tr("确认操作权限", "Review permissions")}</h2>
-        <p>{tr("每项操作都必须单独确认。同一个 permission_id 只能回答一次。", "Each operation requires a separate decision. A permission_id can only be answered once.")}</p>
+        <p>{tr("你可以逐项决定，也可以在下方一键允许全部必需权限。所有授权只对本次会话生效。", "Review permissions individually or allow all required permissions below. Approvals apply only to this session.")}</p>
         <div className="permission-list">
           {sessionState.permissions.filter((item) => item.required).map((permission) => (
             <article className={`permission-card risk-${permission.risk} decision-${permission.decision}`} key={permission.permission_id}>
@@ -1458,9 +1776,9 @@ export default function App() {
           <button className="secondary-button" onClick={() => setPermissionOpen(false)}>{tr("稍后处理", "Later")}</button>
           <button
             className="main-button"
-            disabled={sessionState.permissions.some((item) => item.required && item.decision === "pending") || sessionState.permissions.some((item) => item.required && item.decision === "deny")}
-            onClick={() => { setPermissionOpen(false); void run(); }}
-          >{tr("全部确认，开始运行", "Continue")}</button>
+            disabled={Boolean(permissionBusy) || sessionState.permissions.some((item) => item.required && item.decision === "deny")}
+            onClick={() => void allowAllPermissions()}
+          >{permissionBusy === "__all__" ? tr("正在一键确认…", "Approving…") : tr("一键确认并开始运行", "Approve all and run")}</button>
         </div>
       </div></div>}
       {toast && <div className="toast">{toast}</div>}

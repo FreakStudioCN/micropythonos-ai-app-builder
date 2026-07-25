@@ -25,6 +25,6 @@ export const UPLOAD_CHUNK_SIZE = (() => {
 
 export const GENERATION_TIMEOUT_MS = (() => {
   const raw = Number(env.VITE_GENERATION_TIMEOUT_MS);
-  if (!Number.isFinite(raw) || raw < 30_000) return 600_000;
+  if (!Number.isFinite(raw) || raw < 20_000) return 30_000;
   return raw;
 })();
