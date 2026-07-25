@@ -1,4 +1,0 @@
-{"file":".trellis/spec/backend/security/index.md","reason":"Entry point for owner-scoped private session artifacts and durable storage checks"}
-{"file":".trellis/spec/backend/auth-and-durable-beta.md","reason":"Contract for private object storage, session ownership, and durable artifacts"}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Generation attempt data crosses generator, session persistence, archive, and storage boundaries"}
-{"file":".trellis/tasks/07-25-generation-retry-debug/research/generation-retry-debug.md","reason":"Root-cause evidence, relevant code anchors, and rejected automatic-rewrite approach"}

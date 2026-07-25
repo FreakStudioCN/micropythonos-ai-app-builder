@@ -1,5 +1,0 @@
-{"file":".trellis/spec/backend/security/index.md","reason":"Backend auth, ownership, credits, and durable deployment quality entry point"}
-{"file":".trellis/spec/backend/auth-and-durable-beta.md","reason":"Executable contract for database users, owner isolation, billing, and production storage"}
-{"file":".trellis/spec/frontend/client/index.md","reason":"Authenticated frontend account and credits behavior"}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Role and unlimited-credit data cross database, middleware, API, and frontend boundaries"}
-{"file":".trellis/tasks/07-25-superadmin-role/research/role-and-environment.md","reason":"Current schema/code anchors and local/production environment facts"}

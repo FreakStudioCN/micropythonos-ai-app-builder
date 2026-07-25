@@ -25,3 +25,8 @@ sessions/
 Thumbs.db
 .idea/
 .vscode/
+
+# Local AI/Trellis workflow metadata.
+.agents/
+.codex/
+.trellis/

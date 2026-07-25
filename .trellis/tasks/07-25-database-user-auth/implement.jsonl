@@ -1,9 +1,0 @@
-{"file": "backend/app/auth.py", "reason": "Username/password auth and DB sessions"}
-{"file": "backend/app/database.py", "reason": "Shared SQLite/PostgreSQL engine"}
-{"file": "backend/app/billing.py", "reason": "Database-backed beta credits"}
-{"file": "backend/app/object_storage.py", "reason": "S3-compatible session persistence"}
-{"file": "backend/app/main.py", "reason": "Auth middleware, APIs and ownership enforcement"}
-{"file": "backend/app/session_service.py", "reason": "Owner binding and object-store synchronization"}
-{"file": "frontend/src/App.tsx", "reason": "Login gate and credentialed API client"}
-{"file": "render.yaml", "reason": "Render durable deployment environment"}
-{"file": "Dockerfile", "reason": "Same-origin production image using China mirrors"}
