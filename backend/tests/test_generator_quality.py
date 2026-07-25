@@ -233,12 +233,21 @@ class GeneratorQualityTests(unittest.TestCase):
         with self.assertRaisesRegex(GenerationError, "阻塞式 while"):
             _validate_code(blocking)
 
-    def test_while_inside_on_create_is_rejected(self) -> None:
-        blocking = STYLED_APP.replace(
+    def test_finite_while_inside_on_create_is_allowed(self) -> None:
+        finite = STYLED_APP.replace(
             "        screen = lv.obj()",
             "        count = 0\n"
             "        while count < 3:\n"
             "            count += 1\n"
+            "        screen = lv.obj()",
+        )
+        self.assertTrue(_validate_code(finite))
+
+    def test_infinite_while_in_on_create_is_rejected(self) -> None:
+        blocking = STYLED_APP.replace(
+            "        screen = lv.obj()",
+            "        while True:\n"
+            "            pass\n"
             "        screen = lv.obj()",
         )
         with self.assertRaisesRegex(GenerationError, "阻塞式 while"):
