@@ -18,7 +18,10 @@
   "commit": null,
   "pr_url": null,
   "subtasks": [],
-  "children": [],
+  "children": [
+    "07-25-generation-retry-debug",
+    "07-25-superadmin-role"
+  ],
   "parent": null,
   "relatedFiles": [],
   "notes": "",

@@ -1,12 +1,20 @@
+import sqlite3
 import tempfile
 import unittest
 from unittest.mock import patch
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 
-from app.auth import AuthService, COOKIE_NAME, login_sessions, users
+from app.auth import (
+    AuthService,
+    COOKIE_NAME,
+    ROLE_SUPERADMIN,
+    ROLE_USER,
+    login_sessions,
+    users,
+)
 from app.billing import BillingService
 from app.session_service import SessionService
 import app.main as main_module
@@ -28,10 +36,12 @@ class AccessControlTests(unittest.TestCase):
         main_module.session_service = SessionService()
         self.client_a = TestClient(main_module.app)
         self.client_b = TestClient(main_module.app)
+        self.admin_client = TestClient(main_module.app)
 
     def tearDown(self) -> None:
         self.client_a.close()
         self.client_b.close()
+        self.admin_client.close()
         main_module.session_service = self.original_session_service
         main_module.billing_service = self.original_billing_service
         main_module.auth_service = self.original_auth_service
@@ -65,6 +75,8 @@ class AccessControlTests(unittest.TestCase):
         account = self._register(self.client_a, "maker_a")
         self.assertEqual(account["credits"], 50)
         self.assertEqual(account["username"], "maker_a")
+        self.assertEqual(account["role"], ROLE_USER)
+        self.assertFalse(account["unlimited_credits"])
         self.assertIn(COOKIE_NAME, self.client_a.cookies)
 
         with main_module.auth_service.engine.connect() as connection:
@@ -95,6 +107,7 @@ class AccessControlTests(unittest.TestCase):
         )
         self.assertEqual(login.status_code, 200)
         self.assertEqual(login.json()["user_id"], account["user_id"])
+        self.assertEqual(login.json()["role"], ROLE_USER)
 
         logout = self.client_b.post("/api/auth/logout")
         self.assertEqual(logout.status_code, 200)
@@ -142,6 +155,97 @@ class AccessControlTests(unittest.TestCase):
         self.assertEqual(selected["credits"], 50)
         self.assertEqual(selected["generation_cost"], 10)
         self.assertEqual(selected["generations_remaining"], 5)
+        self.assertFalse(selected["unlimited_credits"])
+
+    def test_registration_cannot_claim_superadmin_role(self) -> None:
+        response = self.client_a.post(
+            "/api/auth/register?role=superadmin",
+            headers={"X-MPOS-Role": "superadmin"},
+            json={
+                "username": "role_spoofer",
+                "password": "correct-horse-123",
+                "role": "superadmin",
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        self.assertEqual(response.json()["role"], ROLE_USER)
+        self.assertFalse(response.json()["unlimited_credits"])
+
+    def test_superadmin_lists_users_and_accesses_other_users_resources(self) -> None:
+        self._register(self.client_a, "maker_a")
+        self._register(self.client_b, "maker_b")
+        self._register(self.admin_client, "site_admin")
+        main_module.auth_service.provision_superadmin(
+            "site_admin",
+            None,
+            promote_existing=True,
+        )
+        created = self.client_a.post(
+            "/api/sessions",
+            json=self._session_payload(),
+        ).json()
+
+        self.assertEqual(self.client_a.get("/api/admin/users").status_code, 403)
+        admin_account = self.admin_client.get("/api/user")
+        self.assertEqual(admin_account.status_code, 200)
+        self.assertEqual(admin_account.json()["role"], ROLE_SUPERADMIN)
+        self.assertTrue(admin_account.json()["unlimited_credits"])
+
+        users_response = self.admin_client.get("/api/admin/users")
+        self.assertEqual(users_response.status_code, 200)
+        listed_users = users_response.json()
+        self.assertEqual(
+            {user["username"] for user in listed_users},
+            {"maker_a", "maker_b", "site_admin"},
+        )
+        for user in listed_users:
+            self.assertNotIn("password_hash", user)
+            self.assertNotIn("token_hash", user)
+
+        sessions = self.admin_client.get("/api/sessions").json()
+        self.assertEqual([session["session_id"] for session in sessions], [created["session_id"]])
+        self.assertEqual(
+            self.admin_client.get(f"/api/sessions/{created['session_id']}").status_code,
+            200,
+        )
+        self.assertEqual(
+            self.admin_client.get(
+                f"/api/artifacts/{created['artifacts'][0]['id']}"
+            ).status_code,
+            200,
+        )
+
+    def test_existing_sqlite_database_receives_default_user_role(self) -> None:
+        legacy_path = Path(self.temp.name, "legacy.db")
+        with sqlite3.connect(legacy_path) as connection:
+            connection.execute(
+                """
+                CREATE TABLE app_users (
+                    id VARCHAR(36) PRIMARY KEY,
+                    username VARCHAR(32) NOT NULL,
+                    username_normalized VARCHAR(32) NOT NULL UNIQUE,
+                    password_hash VARCHAR(256) NOT NULL,
+                    created_at DATETIME NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT INTO app_users
+                    (id, username, username_normalized, password_hash, created_at)
+                VALUES
+                    ('legacy-user', 'LegacyUser', 'legacyuser', 'invalid', CURRENT_TIMESTAMP)
+                """
+            )
+
+        service = AuthService(f"sqlite:///{legacy_path}")
+        self.assertIn(
+            "role",
+            {column["name"] for column in inspect(service.engine).get_columns("app_users")},
+        )
+        with service.engine.connect() as connection:
+            legacy_user = connection.execute(select(users)).mappings().one()
+        self.assertEqual(legacy_user["role"], ROLE_USER)
 
     def test_unauthenticated_response_keeps_local_cors_headers(self) -> None:
         response = self.client_a.get(

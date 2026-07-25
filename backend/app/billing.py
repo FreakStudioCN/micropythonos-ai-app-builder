@@ -77,19 +77,31 @@ class BillingService:
         metadata.create_all(self.engine)
         self._lock = threading.RLock()
 
-    def account(self, user_id: str) -> dict[str, Any]:
+    def account(
+        self,
+        user_id: str,
+        *,
+        unlimited: bool = False,
+    ) -> dict[str, Any]:
         with self._lock, self.engine.begin() as connection:
-            return self._public(self._load_or_create(connection, user_id))
+            return self._public(
+                self._load_or_create(connection, user_id),
+                unlimited=unlimited,
+            )
 
     def consume_generation(
         self,
         user_id: str,
         idempotency_key: str,
+        *,
+        unlimited: bool = False,
     ) -> dict[str, Any]:
         with self._lock, self.engine.begin() as connection:
             account = self._load_or_create(connection, user_id, for_update=True)
+            if unlimited:
+                return self._public(account, unlimited=True)
             if self._has_transaction(connection, user_id, idempotency_key):
-                return self._public(account)
+                return self._public(account, unlimited=False)
             if account["credits"] < GENERATION_COST:
                 raise InsufficientCredits(account["credits"], GENERATION_COST)
             updated_at = _now()
@@ -112,7 +124,8 @@ class BillingService:
                     **dict(account),
                     "credits": next_credits,
                     "updated_at": updated_at,
-                }
+                },
+                unlimited=False,
             )
 
     def _load_or_create(
@@ -183,11 +196,17 @@ class BillingService:
             )
         )
 
-    def _public(self, account: Any) -> dict[str, Any]:
+    def _public(
+        self,
+        account: Any,
+        *,
+        unlimited: bool,
+    ) -> dict[str, Any]:
         updated_at = account["updated_at"]
         return {
             "user_id": account["user_id"],
             "credits": account["credits"],
+            "unlimited_credits": unlimited,
             "generations_remaining": account["credits"] // GENERATION_COST,
             "generation_limit": GENERATION_LIMIT,
             "generation_cost": GENERATION_COST,

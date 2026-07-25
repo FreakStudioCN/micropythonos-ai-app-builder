@@ -17,8 +17,10 @@ from sqlalchemy import (
     String,
     Table,
     delete,
+    inspect,
     insert,
     select,
+    text,
     update,
 )
 from sqlalchemy.engine import Connection, Engine
@@ -33,6 +35,8 @@ PASSWORD_N = 2**14
 PASSWORD_R = 8
 PASSWORD_P = 1
 PASSWORD_DKLEN = 32
+ROLE_USER = "user"
+ROLE_SUPERADMIN = "superadmin"
 
 metadata = MetaData()
 users = Table(
@@ -42,6 +46,7 @@ users = Table(
     Column("username", String(32), nullable=False),
     Column("username_normalized", String(32), nullable=False, unique=True, index=True),
     Column("password_hash", String(256), nullable=False),
+    Column("role", String(32), nullable=False, server_default=ROLE_USER),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 login_sessions = Table(
@@ -69,6 +74,10 @@ class UsernameTaken(RuntimeError):
     pass
 
 
+class PromotionRequired(RuntimeError):
+    pass
+
+
 def _now() -> datetime:
     return datetime.now(UTC)
 
@@ -85,6 +94,7 @@ class AuthService:
             else database_engine
         )
         metadata.create_all(self.engine)
+        self._ensure_role_column()
 
     def register(self, username: str, password: str) -> tuple[dict[str, Any], str]:
         display_name, normalized = self._validate_username(username)
@@ -100,6 +110,7 @@ class AuthService:
                         username=display_name,
                         username_normalized=normalized,
                         password_hash=password_hash,
+                        role=ROLE_USER,
                         created_at=created_at,
                     )
                 )
@@ -109,6 +120,7 @@ class AuthService:
         return {
             "id": user_id,
             "username": display_name,
+            "role": ROLE_USER,
             "created_at": created_at.isoformat(),
         }, token
 
@@ -138,6 +150,7 @@ class AuthService:
                 select(
                     users.c.id,
                     users.c.username,
+                    users.c.role,
                     users.c.created_at,
                     login_sessions.c.expires_at,
                 )
@@ -165,6 +178,89 @@ class AuthService:
                     login_sessions.c.token_hash == self._token_hash(token)
                 )
             )
+
+    def list_users(self) -> list[dict[str, Any]]:
+        with self.engine.connect() as connection:
+            rows = connection.execute(
+                select(users).order_by(users.c.created_at, users.c.username_normalized)
+            ).mappings()
+            return [self._public_user(row) for row in rows]
+
+    def provision_superadmin(
+        self,
+        username: str,
+        password: str | None,
+        *,
+        promote_existing: bool = False,
+        reset_password: bool = False,
+    ) -> dict[str, Any]:
+        display_name, normalized = self._validate_username(username)
+        if password is not None:
+            self._validate_password(password)
+        if reset_password and password is None:
+            raise ValueError("重置密码时必须提供新密码")
+
+        with self.engine.begin() as connection:
+            row = connection.execute(
+                select(users).where(users.c.username_normalized == normalized)
+            ).mappings().first()
+            if row is None:
+                if password is None:
+                    raise ValueError("创建超级管理员时必须提供密码")
+                created_at = _now()
+                values = {
+                    "id": str(uuid.uuid4()),
+                    "username": display_name,
+                    "username_normalized": normalized,
+                    "password_hash": self._hash_password(password),
+                    "role": ROLE_SUPERADMIN,
+                    "created_at": created_at,
+                }
+                connection.execute(insert(users).values(**values))
+                return self._public_user(values)
+
+            if row["role"] != ROLE_SUPERADMIN and not promote_existing:
+                raise PromotionRequired("现有普通用户需要显式提权")
+
+            updates: dict[str, Any] = {}
+            if row["role"] != ROLE_SUPERADMIN:
+                updates["role"] = ROLE_SUPERADMIN
+            if reset_password:
+                updates["password_hash"] = self._hash_password(password)
+                connection.execute(
+                    delete(login_sessions).where(login_sessions.c.user_id == row["id"])
+                )
+            if updates:
+                connection.execute(
+                    update(users).where(users.c.id == row["id"]).values(**updates)
+                )
+            public_row = dict(row)
+            public_row.update(updates)
+            return self._public_user(public_row)
+
+    def _ensure_role_column(self) -> None:
+        if self.engine.dialect.name == "postgresql":
+            with self.engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "ALTER TABLE app_users "
+                        "ADD COLUMN IF NOT EXISTS role VARCHAR(32) "
+                        "NOT NULL DEFAULT 'user'"
+                    )
+                )
+            return
+
+        column_names = {
+            column["name"] for column in inspect(self.engine).get_columns("app_users")
+        }
+        if "role" not in column_names:
+            with self.engine.begin() as connection:
+                connection.execute(
+                    text(
+                        "ALTER TABLE app_users "
+                        "ADD COLUMN role VARCHAR(32) NOT NULL DEFAULT 'user'"
+                    )
+                )
 
     @staticmethod
     def _validate_username(username: str) -> tuple[str, str]:
@@ -240,6 +336,7 @@ class AuthService:
         return {
             "id": row["id"],
             "username": row["username"],
+            "role": row["role"],
             "created_at": (
                 created_at.isoformat()
                 if hasattr(created_at, "isoformat")

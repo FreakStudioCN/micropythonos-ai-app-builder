@@ -10,7 +10,7 @@ import zipfile
 import zlib
 from functools import lru_cache
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 import httpx
 
@@ -170,6 +170,42 @@ class ApiValidationError(GenerationError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
+
+
+GenerationAttemptSink = Callable[[dict[str, Any]], None]
+
+
+def _build_user_prompt(request: GenerateRequest, correction: str = "") -> str:
+    user_prompt = (
+        "请生成 JSON。用户需求：\n"
+        f"{request.prompt}\n\n"
+        f"显示名：{request.display_name}\n"
+        f"包名：{request.package_name}\n"
+        "入口文件固定为 app.py，入口类固定为 GeneratedApp。\n\n"
+        f"{VISUAL_REQUIREMENTS}\n{GENERAL_UI_BLUEPRINT}"
+    )
+    if _is_shooter_prompt(request.prompt):
+        user_prompt += (
+            "\n\n这是射击游戏，属于强交互任务。验收条件："
+            "\n1. 屏幕底部必须有可见的 LEFT、RIGHT、FIRE 三个 lv.button。"
+            "\n2. 三个按钮都必须通过 add_event_cb 连接到真实回调，不能只是显示文字。"
+            "\n3. LEFT/RIGHT 每次点击都要改变玩家数字坐标并调用 set_pos。"
+            "\n4. FIRE 必须创建或激活子弹，lv.timer_create 回调必须让子弹移动并处理越界或碰撞。"
+            "\n5. 不得依赖键盘、硬件摇杆、外接手柄或隐藏控件。"
+            f"\n\n{SHOOTER_UI_BLUEPRINT}"
+        )
+    if request.previous_code:
+        user_prompt += (
+            "\n\n<PREVIOUS_CODE_REFERENCE>\n"
+            "这是已有 App 的连续修改参考，不是正确答案。"
+            "必须保留未被用户要求删除的功能，同时修复后续 correction 指出的全部问题。\n"
+            f"运行错误（如果为空则表示功能修改）：\n{request.runtime_error or '无'}\n\n"
+            f"上一次 app.py：\n{request.previous_code}\n"
+            "</PREVIOUS_CODE_REFERENCE>"
+        )
+    if correction:
+        user_prompt += f"\n\n{correction}"
+    return user_prompt
 
 
 def _message_text(value: Any) -> str:
@@ -357,41 +393,9 @@ async def _call_deepseek(
     request: GenerateRequest,
     correction: str = "",
     timeout_seconds: float | None = None,
-) -> tuple[dict[str, Any], str]:
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
     key, base_url, model = _settings()
-    user_prompt = (
-        "请生成 JSON。用户需求：\n"
-        f"{request.prompt}\n\n"
-        f"显示名：{request.display_name}\n"
-        f"包名：{request.package_name}\n"
-        "入口文件固定为 app.py，入口类固定为 GeneratedApp。\n\n"
-        f"{VISUAL_REQUIREMENTS}\n{GENERAL_UI_BLUEPRINT}"
-    )
-    if _is_shooter_prompt(request.prompt):
-        user_prompt += (
-            "\n\n这是射击游戏，属于强交互任务。验收条件："
-            "\n1. 屏幕底部必须有可见的 LEFT、RIGHT、FIRE 三个 lv.button。"
-            "\n2. 三个按钮都必须通过 add_event_cb 连接到真实回调，不能只是显示文字。"
-            "\n3. LEFT/RIGHT 每次点击都要改变玩家数字坐标并调用 set_pos。"
-            "\n4. FIRE 必须创建或激活子弹，lv.timer_create 回调必须让子弹移动并处理越界或碰撞。"
-            "\n5. 不得依赖键盘、硬件摇杆、外接手柄或隐藏控件。"
-            f"\n\n{SHOOTER_UI_BLUEPRINT}"
-        )
-    if correction:
-        user_prompt += (
-            "\n\n上一次生成被安全检查拒绝。请完整重写代码并修复下面的问题，"
-            "不要解释，只返回新的 JSON。\n"
-            "输出前必须逐字检查 app_code：不得仍然包含被指出的调用；"
-            "不得为了通过检查而删除用户要求的功能；不得用 pass 或假按钮代替交互。\n"
-            f"检查失败原因：\n{correction}"
-        )
-    if request.previous_code:
-        user_prompt += (
-            "\n\n这是已有 App 的连续修改，不是从零生成。"
-            "必须保留未被用户要求删除的功能，基于下面的上一版代码修改。\n"
-            f"运行错误（如果为空则表示功能修改）：\n{request.runtime_error or '无'}\n\n"
-            f"上一次 app.py：\n{request.previous_code}"
-        )
+    user_prompt = _build_user_prompt(request, correction)
     max_tokens = max(2200, min(6000, int(os.getenv("DEEPSEEK_MAX_TOKENS", "3200"))))
     payload = {
         "model": model,
@@ -438,7 +442,22 @@ async def _call_deepseek(
         generated = _parse_model_json(message)
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
         raise GenerationError("DeepSeek 没有返回可解析的生成结果") from exc
-    return generated, body.get("model", model)
+    selected_model = str(body.get("model") or model)
+    model_meta: dict[str, Any] = {"model": selected_model}
+    request_id = body.get("id")
+    if isinstance(request_id, str) and request_id:
+        model_meta["request_id"] = request_id[:200]
+    usage = body.get("usage")
+    if isinstance(usage, dict):
+        safe_usage = {
+            key: int(value)
+            for key in ("prompt_tokens", "completion_tokens", "total_tokens")
+            if isinstance((value := usage.get(key)), (int, float))
+            and not isinstance(value, bool)
+        }
+        if safe_usage:
+            model_meta["usage"] = safe_usage
+    return generated, selected_model, model_meta
 
 
 def _validate_code(code: str) -> list[str]:
@@ -454,7 +473,7 @@ def _validate_code(code: str) -> list[str]:
         raise GenerationError(f"生成结果缺少必要结构：{', '.join(missing)}")
     hits: list[str] = []
     forbidden_calls = {"eval", "exec", "compile", "open"}
-    blocking_while_nodes: set[int] = set()
+    blocking_while_nodes: dict[int, int] = {}
 
     def _extract_assigned_names(node: ast.AST) -> set[str]:
         names: set[str] = set()
@@ -525,7 +544,7 @@ def _validate_code(code: str) -> list[str]:
                 function.name == "onCreate" and not _is_finite_while_in_on_create(child)
             )
             if is_blocking_on_create or condition_is_always_true:
-                blocking_while_nodes.add(id(child))
+                blocking_while_nodes[id(child)] = int(getattr(child, "lineno", 0))
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             if isinstance(node.func, ast.Name) and node.func.id in forbidden_calls:
@@ -556,8 +575,10 @@ def _validate_code(code: str) -> list[str]:
                     "align(base, align, x, y)（请改用 align_to(base, align, x, y)）"
                 )
         elif isinstance(node, ast.While) and id(node) in blocking_while_nodes:
+            line_number = blocking_while_nodes[id(node)]
             hits.append(
-                "阻塞式 while 循环（有限计算循环可以保留；界面更新请使用 lv.timer_create）"
+                f"第 {line_number} 行阻塞式 while 循环"
+                "（有限计算循环可以保留；界面更新请使用 lv.timer_create）"
             )
         elif isinstance(node, (ast.Import, ast.ImportFrom)):
             modules = [alias.name for alias in node.names]
@@ -1030,7 +1051,9 @@ def _normalize_lvgl_code(code: str) -> tuple[str, list[str]]:
     return normalized, applied
 
 
-def _build_correction(error: GenerationError, candidate: str = "") -> str:
+def _build_correction(
+    error: GenerationError, candidate: str = "", attempt: int | None = None
+) -> str:
     message = str(error)
     suggestions: list[str] = []
     if "get_pos" in message or "get_coords" in message:
@@ -1078,11 +1101,78 @@ def _build_correction(error: GenerationError, candidate: str = "") -> str:
     context = ""
     if candidate:
         context = (
-            "\n\n这是刚才未通过检查的完整 app.py。请在保留用户功能的前提下完整重写，"
-            "逐项删除或替换不兼容调用：\n"
-            f"{candidate[:24_000]}"
+            "<FAILED_CANDIDATE_REFERENCE>\n"
+            "这是刚才未通过检查的 app.py，仅供定位问题，不是正确示例：\n"
+            f"{candidate[:24_000]}\n"
+            "</FAILED_CANDIDATE_REFERENCE>\n\n"
         )
-    return "\n".join([message, *suggestions]) + context
+    attempt_text = f"第 {attempt} 次生成" if attempt is not None else "本轮生成"
+    correction_lines = "\n".join([message, *suggestions])
+    return (
+        f"{context}<FINAL_CORRECTION>\n"
+        f"{attempt_text}被安全检查拒绝。请完整重写代码并修复下面的问题，"
+        "不要解释，只返回新的 JSON。\n"
+        "输出前必须逐字检查 app_code：不得仍然包含被指出的调用；"
+        "不得为了通过检查而删除用户要求的功能；不得用 pass 或假按钮代替交互。\n"
+        f"检查失败原因与强制修复规则：\n{correction_lines}\n"
+        "返回完整、可解析且已经修复的 app_code。\n"
+        "</FINAL_CORRECTION>"
+    )
+
+
+def _safe_attempt_message(error: GenerationError) -> str:
+    message = str(error)[:2000]
+    for pattern in (
+        r"Bearer\s+[A-Za-z0-9._~+/=-]+",
+        r"\b(?:sk|sbp)_[A-Za-z0-9_-]+\b",
+        r"(?i)(authorization|cookie|api[-_ ]?key)\s*[:=]\s*\S+",
+    ):
+        message = re.sub(pattern, "[REDACTED]", message)
+    return message
+
+
+def _emit_generation_attempt(
+    sink: GenerationAttemptSink | None,
+    *,
+    attempt: int,
+    status: str,
+    candidate: str = "",
+    error: GenerationError | None = None,
+    model_meta: dict[str, Any] | None = None,
+) -> None:
+    if sink is None:
+        return
+    validation: dict[str, Any] = {
+        "status": "passed" if status == "passed" else "failed"
+    }
+    if error is not None:
+        message = _safe_attempt_message(error)
+        code = (
+            error.code
+            if isinstance(error, ApiValidationError)
+            else "GENERATION_VALIDATION_FAILED"
+        )
+        line_match = re.search(r"第\s*(\d+)\s*行", message)
+        validation.update(
+            {
+                "code": code,
+                "message": message,
+                "line": int(line_match.group(1)) if line_match else None,
+            }
+        )
+    record: dict[str, Any] = {
+        "attempt": attempt,
+        "status": status,
+        "validation": validation,
+        "model_meta": model_meta or {},
+    }
+    if candidate:
+        record["candidate"] = candidate
+    try:
+        sink(record)
+    except Exception:
+        # Private diagnostics are best-effort and must not mask generation results.
+        pass
 
 
 def _manifest(request: GenerateRequest) -> dict[str, Any]:
@@ -1165,7 +1255,11 @@ def _build_mpk(package_name: str, manifest: dict[str, Any], app_code: str) -> st
     return base64.b64encode(stream.getvalue()).decode("ascii")
 
 
-async def generate_app(request: GenerateRequest) -> GenerateResponse:
+async def generate_app(
+    request: GenerateRequest,
+    *,
+    attempt_sink: GenerationAttemptSink | None = None,
+) -> GenerateResponse:
     budget_seconds = max(
         8.0,
         min(60.0, float(os.getenv("DEEPSEEK_GENERATION_BUDGET_SECONDS", "20"))),
@@ -1188,32 +1282,41 @@ async def generate_app(request: GenerateRequest) -> GenerateResponse:
     api_usage: dict[str, Any] = {"checked": False, "planned": [], "missing": []}
     last_error: GenerationError | None = None
     attempts_used = 0
-    for attempt in range(max_attempts):
+    for attempt in range(1, max_attempts + 1):
         remaining = deadline - time.monotonic()
         if remaining < 2.0:
             last_error = GenerationError(
                 f"生成已达到 {budget_seconds:.0f} 秒时间预算"
             )
             break
-        attempts_used = attempt + 1
+        attempts_used = attempt
         attempts_after_this = max_attempts - attempts_used
         reserved_for_retry = 3.0 if attempts_after_this else 0.0
         call_timeout = min(
             request_timeout_seconds,
             max(2.0, remaining - reserved_for_retry),
         )
+        model_meta: dict[str, Any] = {}
         try:
-            generated, model = await _call_deepseek(
+            generated, model, model_meta = await _call_deepseek(
                 request,
                 correction,
                 timeout_seconds=call_timeout,
             )
         except GenerationError as exc:
             last_error = exc
-            correction = (
-                "上一轮模型响应不是可解析的 JSON 对象。"
-                "请只返回一个完整 JSON 对象，不要 Markdown、代码围栏或解释；"
-                "app_code 必须是 JSON 字符串。"
+            _emit_generation_attempt(
+                attempt_sink,
+                attempt=attempt,
+                status="model_error",
+                error=exc,
+            )
+            correction = _build_correction(
+                GenerationError(
+                    "上一轮模型响应不可用。请只返回一个完整 JSON 对象，"
+                    "不要 Markdown、代码围栏或解释；app_code 必须是 JSON 字符串。"
+                ),
+                attempt=attempt,
             )
             continue
         generated = _normalize_generation_payload(generated)
@@ -1225,7 +1328,14 @@ async def generate_app(request: GenerateRequest) -> GenerateResponse:
             last_error = GenerationError(
                 f"DeepSeek 返回结果中缺少可识别的 App 源码{field_hint}"
             )
-            correction = _build_correction(last_error)
+            _emit_generation_attempt(
+                attempt_sink,
+                attempt=attempt,
+                status="validation_failed",
+                error=last_error,
+                model_meta=model_meta,
+            )
+            correction = _build_correction(last_error, attempt=attempt)
             continue
         if (
             not isinstance(candidate_tests, list)
@@ -1233,7 +1343,15 @@ async def generate_app(request: GenerateRequest) -> GenerateResponse:
             or not all(isinstance(item, str) and item.strip() for item in candidate_tests)
         ):
             last_error = GenerationError("DeepSeek 返回结果中缺少至少两个 acceptance_tests")
-            correction = _build_correction(last_error, candidate)
+            _emit_generation_attempt(
+                attempt_sink,
+                attempt=attempt,
+                status="validation_failed",
+                candidate=candidate,
+                error=last_error,
+                model_meta=model_meta,
+            )
+            correction = _build_correction(last_error, candidate, attempt)
             continue
         candidate, compatibility_warnings = _normalize_lvgl_code(candidate)
         try:
@@ -1255,10 +1373,25 @@ async def generate_app(request: GenerateRequest) -> GenerateResponse:
             code = candidate
             acceptance_tests = [str(item) for item in candidate_tests]
             last_error = None
+            _emit_generation_attempt(
+                attempt_sink,
+                attempt=attempt,
+                status="passed",
+                candidate=candidate,
+                model_meta=model_meta,
+            )
             break
         except GenerationError as exc:
             last_error = exc
-            correction = _build_correction(exc, candidate)
+            _emit_generation_attempt(
+                attempt_sink,
+                attempt=attempt,
+                status="validation_failed",
+                candidate=candidate,
+                error=exc,
+                model_meta=model_meta,
+            )
+            correction = _build_correction(exc, candidate, attempt)
     if last_error is not None or not code:
         raise GenerationError(
             f"DeepSeek 在 {budget_seconds:.0f} 秒预算内经过 "
