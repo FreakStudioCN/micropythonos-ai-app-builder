@@ -62,6 +62,12 @@ const decodeBase64 = (value: string) => {
   return bytes;
 };
 
+export const buildFastPathExtractorLine = (
+  destination: string,
+  packageName: string,
+) =>
+  ` _extractor = StreamingUnzip(${pythonString(destination)}, expected_app_name=${pythonString(packageName)}, free_space_limit=lambda req: AppManager._check_free_space('.', req))`;
+
 export class DeviceDisconnectedError extends Error {
   constructor(message = "The ESP32 connection was lost") {
     super(message);
@@ -482,7 +488,7 @@ export class WebSerialDeviceClient {
       `   os.remove(${pythonString(destination)})`,
       " except OSError:",
       "  pass",
-      `_extractor = StreamingUnzip(${pythonString(destination)}, expected_app_name=${pythonString(packageName)}, free_space_limit=lambda req: AppManager._check_free_space('.', req))`,
+      buildFastPathExtractorLine(destination, packageName),
       " for _offset in range(0, len(_archive), 32768):",
       "  _extractor.feed(_archive[_offset:_offset + 32768])",
       " _extractor.finish()",
