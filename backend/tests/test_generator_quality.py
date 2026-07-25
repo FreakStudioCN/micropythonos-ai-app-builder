@@ -441,7 +441,11 @@ class GeneratorRetryDiagnosticTests(unittest.IsolatedAsyncioTestCase):
             "app.generator._call_deepseek",
             new=AsyncMock(side_effect=responses),
         ):
-            result = await generate_app(request, attempt_sink=records.append)
+            with patch.dict(
+                "app.generator.os.environ",
+                {"DEEPSEEK_MAX_ATTEMPTS": "2"},
+            ):
+                result = await generate_app(request, attempt_sink=records.append)
         self.assertEqual(result.model, "test-model")
         self.assertEqual([item["status"] for item in records], [
             "validation_failed",
