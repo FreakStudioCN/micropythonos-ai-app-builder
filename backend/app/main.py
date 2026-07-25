@@ -3,17 +3,31 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
-from fastapi import FastAPI, Header, HTTPException, Query
-from fastapi.responses import FileResponse, StreamingResponse
+
+load_dotenv(Path(__file__).resolve().parents[1] / ".env")
+
+from fastapi import FastAPI, HTTPException, Query, Request
+from fastapi import Response
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 
+from .auth import (
+    COOKIE_MAX_AGE,
+    COOKIE_NAME,
+    InvalidCredentials,
+    UsernameTaken,
+    auth_service,
+)
 from .billing import InsufficientCredits, billing_service
+from .database import database_engine
 from .generator import GenerationError, generate_app
 from .requirements_chat import RequirementChatError, clarify_requirements
 from .models import (
+    AuthCredentials,
     DemoErrorInjectionRequest,
     DemoSessionRequest,
     GenerateRequest,
@@ -33,7 +47,21 @@ from .models import (
 )
 from .session_service import SessionNotFound, session_service
 
-load_dotenv()
+
+def _enabled(name: str) -> bool:
+    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+if _enabled("MPOS_REQUIRE_DURABLE_STORAGE"):
+    missing: list[str] = []
+    if database_engine.dialect.name == "sqlite":
+        missing.append("DATABASE_URL")
+    if not session_service.object_storage_enabled:
+        missing.append("MPOS_STORAGE_*")
+    if missing:
+        raise RuntimeError(
+            "Durable deployment requires: " + ", ".join(missing)
+        )
 
 app = FastAPI(title="Blockless-Make-APP API", version="0.1.0")
 local_frontend_origins = [
@@ -50,13 +78,6 @@ frontend_origins = list(dict.fromkeys(
     local_frontend_origins
     + [origin.strip() for origin in configured_frontend_origins.split(",") if origin.strip()]
 ))
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=frontend_origins,
-    allow_credentials=False,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 project_root = Path(__file__).resolve().parents[2]
 frontend_dist_root = project_root / "frontend" / "dist"
 wasm_web_root = (
@@ -67,8 +88,113 @@ wasm_web_root = (
 app.mount("/mpos-web", StaticFiles(directory=wasm_web_root, html=True), name="mpos-web")
 
 
+def _current_user_id(request: Request) -> str:
+    user_id = getattr(request.state, "user_id", None)
+    if not user_id:
+        raise HTTPException(status_code=401, detail="请先登录")
+    return user_id
+
+
+def _current_user(request: Request) -> dict:
+    user = getattr(request.state, "user", None)
+    if not user:
+        raise HTTPException(status_code=401, detail="请先登录")
+    return user
+
+
+def _cookie_is_secure(request: Request) -> bool:
+    configured = os.getenv("MPOS_COOKIE_SECURE", "auto").strip().lower()
+    if configured in {"1", "true", "yes", "on"}:
+        return True
+    if configured in {"0", "false", "no", "off"}:
+        return False
+    forwarded_proto = request.headers.get("x-forwarded-proto", "")
+    return request.url.scheme == "https" or forwarded_proto.split(",", 1)[0] == "https"
+
+
+def _cookie_same_site() -> str:
+    same_site = os.getenv("MPOS_COOKIE_SAMESITE", "lax").strip().lower()
+    return same_site if same_site in {"lax", "strict", "none"} else "lax"
+
+
+def _set_login_cookie(response: Response, request: Request, token: str) -> None:
+    response.set_cookie(
+        key=COOKIE_NAME,
+        value=token,
+        max_age=COOKIE_MAX_AGE,
+        httponly=True,
+        secure=_cookie_is_secure(request),
+        samesite=_cookie_same_site(),
+        path="/",
+    )
+
+
+def _account_payload(user: dict) -> dict:
+    return {
+        **billing_service.account(user["id"]),
+        "username": user["username"],
+        "user_created_at": user["created_at"],
+    }
+
+
+class AuthenticatedUserMiddleware:
+    """Pure ASGI auth middleware so streaming responses remain streaming."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or not scope["path"].startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+
+        public_paths = {
+            "/api/health",
+            "/api/capabilities",
+            "/api/auth/register",
+            "/api/auth/login",
+        }
+        if scope["method"] == "OPTIONS" or scope["path"] in public_paths:
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive=receive)
+        user = auth_service.authenticate(request.cookies.get(COOKIE_NAME))
+        if user is None:
+            response = JSONResponse(status_code=401, content={"detail": "请先登录"})
+            await response(scope, receive, send)
+            return
+
+        user_id = user["id"]
+        scope.setdefault("state", {})["user"] = user
+        scope["state"]["user_id"] = user_id
+        try:
+            segments = scope["path"].strip("/").split("/")
+            if len(segments) >= 3 and segments[:2] == ["api", "sessions"]:
+                session_service.require_owner(segments[2], user_id)
+            elif len(segments) >= 3 and segments[:2] == ["api", "artifacts"]:
+                session_service.require_artifact_owner(segments[2], user_id)
+            elif len(segments) >= 3 and segments[:2] == ["api", "permissions"]:
+                session_service.require_permission_owner(segments[2], user_id)
+        except SessionNotFound:
+            response = JSONResponse(status_code=404, content={"detail": "资源不存在"})
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(AuthenticatedUserMiddleware)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=frontend_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
 @app.get("/api/health")
-def health() -> dict[str, str | bool | None]:
+def health() -> dict[str, Any]:
     key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     configured = bool(key)
     return {
@@ -79,6 +205,9 @@ def health() -> dict[str, str | bool | None]:
             if configured
             else None
         ),
+        "database_backend": database_engine.dialect.name,
+        "object_storage_enabled": session_service.object_storage_enabled,
+        "durable_storage_required": _enabled("MPOS_REQUIRE_DURABLE_STORAGE"),
     }
 
 
@@ -97,27 +226,75 @@ async def requirement_chat(
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-@app.get("/api/billing/account")
-def billing_account(
-    user_id: str = Query(min_length=8, max_length=128),
+@app.post("/api/auth/register", status_code=201)
+def register(
+    payload: AuthCredentials,
+    request: Request,
+    response: Response,
 ) -> dict:
-    return billing_service.account(user_id)
+    try:
+        user, token = auth_service.register(payload.username, payload.password)
+    except UsernameTaken as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _set_login_cookie(response, request, token)
+    return _account_payload(user)
+
+
+@app.post("/api/auth/login")
+def login(
+    payload: AuthCredentials,
+    request: Request,
+    response: Response,
+) -> dict:
+    try:
+        user, token = auth_service.login(payload.username, payload.password)
+    except InvalidCredentials as exc:
+        raise HTTPException(status_code=401, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    _set_login_cookie(response, request, token)
+    return _account_payload(user)
+
+
+@app.post("/api/auth/logout")
+def logout(request: Request, response: Response) -> dict[str, str]:
+    auth_service.logout(request.cookies.get(COOKIE_NAME))
+    response.delete_cookie(
+        COOKIE_NAME,
+        path="/",
+        secure=_cookie_is_secure(request),
+        httponly=True,
+        samesite=_cookie_same_site(),
+    )
+    return {"status": "logged_out"}
+
+
+@app.get("/api/user")
+def current_user(request: Request) -> dict:
+    return _account_payload(_current_user(request))
+
+
+@app.get("/api/billing/account")
+def billing_account(request: Request) -> dict:
+    return billing_service.account(_current_user_id(request))
 
 
 @app.get("/api/sessions")
-def list_sessions() -> list[dict]:
-    return session_service.list_sessions()
+def list_sessions(request: Request) -> list[dict]:
+    return session_service.list_sessions(_current_user_id(request))
 
 
 @app.post("/api/demo/sessions", status_code=201)
-def create_demo_session(request: DemoSessionRequest) -> dict:
+def create_demo_session(payload: DemoSessionRequest, request: Request) -> dict:
     """Create or restore a deterministic, model-independent demo session."""
-    return session_service.create_demo(request)
+    return session_service.create_demo(payload, _current_user_id(request))
 
 
 @app.post("/api/sessions", status_code=201)
-def create_session(request: SessionCreateRequest) -> dict:
-    return session_service.create(request)
+def create_session(payload: SessionCreateRequest, request: Request) -> dict:
+    return session_service.create(payload, _current_user_id(request))
 
 
 @app.get("/api/sessions/{session_id}")
@@ -180,28 +357,43 @@ async def session_events(
 
 
 @app.post("/api/sessions/{session_id}/actions/generate", status_code=202)
-async def generate_session(session_id: str, request: SessionActionRequest) -> dict:
-    return _start_action(session_id, "generate", request)
+async def generate_session(
+    session_id: str,
+    payload: SessionActionRequest,
+    request: Request,
+) -> dict:
+    try:
+        state = session_service.get(session_id)
+        billing_service.consume_generation(
+            _current_user_id(request),
+            f"generation:{session_id}:{state['revision_id']}",
+        )
+        return _start_action(session_id, "generate", payload)
+    except InsufficientCredits as exc:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "INSUFFICIENT_CREDITS",
+                "message": str(exc),
+                "balance": exc.balance,
+                "required": exc.required,
+            },
+        ) from exc
 
 
 @app.post("/api/sessions/{session_id}/actions/run", status_code=202)
 async def run_session(
     session_id: str,
-    request: SessionActionRequest,
-    user_id: str = Header(
-        default="local-anonymous",
-        alias="X-MPOS-User-ID",
-        min_length=8,
-        max_length=128,
-    ),
+    payload: SessionActionRequest,
+    request: Request,
 ) -> dict:
     try:
         state = session_service.get(session_id)
         billing_service.consume_generation(
-            user_id,
+            _current_user_id(request),
             f"generation:{session_id}:{state['revision_id']}",
         )
-        return session_service.start_generation(session_id, request)
+        return session_service.start_generation(session_id, payload)
     except SessionNotFound as exc:
         raise HTTPException(status_code=404, detail="Session 不存在") from exc
     except InsufficientCredits as exc:
@@ -428,9 +620,23 @@ def upload_screenshot(session_id: str, request: ScreenshotUploadRequest) -> dict
 
 
 @app.post("/api/generate", response_model=GenerateResponse)
-async def generate(request: GenerateRequest) -> GenerateResponse:
+async def generate(payload: GenerateRequest, request: Request) -> GenerateResponse:
     try:
-        return await generate_app(request)
+        billing_service.consume_generation(
+            _current_user_id(request),
+            f"legacy-generation:{hashlib.sha256(os.urandom(32)).hexdigest()}",
+        )
+        return await generate_app(payload)
+    except InsufficientCredits as exc:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "INSUFFICIENT_CREDITS",
+                "message": str(exc),
+                "balance": exc.balance,
+                "required": exc.required,
+            },
+        ) from exc
     except GenerationError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 

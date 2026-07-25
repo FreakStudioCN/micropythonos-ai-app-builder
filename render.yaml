@@ -14,7 +14,23 @@ services:
         value: https://api.deepseek.com
       - key: DEEPSEEK_MODEL
         value: deepseek-v4-flash
-      - key: MPOS_BILLING_DEMO_MODE
-        value: "false"
+      - key: MPOS_COOKIE_SECURE
+        value: "true"
+      - key: MPOS_COOKIE_SAMESITE
+        value: lax
       - key: MPOS_DEMO_ERROR_INJECTION
         value: "false"
+      - key: MPOS_REQUIRE_DURABLE_STORAGE
+        value: "true"
+      - key: DATABASE_URL
+        sync: false
+      - key: MPOS_STORAGE_ENDPOINT
+        sync: false
+      - key: MPOS_STORAGE_REGION
+        sync: false
+      - key: MPOS_STORAGE_ACCESS_KEY_ID
+        sync: false
+      - key: MPOS_STORAGE_SECRET_ACCESS_KEY
+        sync: false
+      - key: MPOS_STORAGE_BUCKET
+        value: mpos-sessions

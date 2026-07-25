@@ -18,7 +18,8 @@ class BillingServiceTests(unittest.TestCase):
         account = self.service.account(self.user_id)
         self.assertEqual(account["credits"], 50)
         self.assertEqual(account["generation_cost"], 10)
-        self.assertEqual(account["plan"], "free")
+        self.assertEqual(account["generations_remaining"], 5)
+        self.assertEqual(account["generation_limit"], 5)
 
     def test_generation_charge_is_atomic_and_idempotent(self) -> None:
         first = self.service.consume_generation(self.user_id, "generation:sess:r1")
@@ -37,18 +38,3 @@ class BillingServiceTests(unittest.TestCase):
                 self.user_id,
                 "generation:sess:r6",
             )
-
-    def test_demo_subscription_adds_plan_credits_once(self) -> None:
-        first = self.service.subscribe(
-            self.user_id,
-            "plus",
-            "subscribe-plus-0001",
-        )
-        second = self.service.subscribe(
-            self.user_id,
-            "plus",
-            "subscribe-plus-0001",
-        )
-        self.assertEqual(first["credits"], 350)
-        self.assertEqual(second["credits"], 350)
-        self.assertEqual(first["plan"], "plus")

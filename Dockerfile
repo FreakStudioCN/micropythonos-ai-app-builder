@@ -1,32 +1,40 @@
-FROM node:22-bookworm-slim AS frontend-build
+ARG NODE_IMAGE=m.daocloud.io/docker.io/library/node:22-bookworm-slim
+ARG PYTHON_IMAGE=m.daocloud.io/docker.io/library/python:3.12-slim
+
+FROM ${NODE_IMAGE} AS frontend-build
 
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/package-lock.json ./
-RUN npm ci
+ARG NPM_REGISTRY=https://registry.npmmirror.com
+RUN npm ci --registry=${NPM_REGISTRY}
 COPY frontend/ ./
 RUN npm run build
 
 
-FROM python:3.12-slim AS runtime
+FROM ${PYTHON_IMAGE} AS runtime
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
-    MPOS_SESSION_ROOT=/data/sessions \
-    MPOS_BILLING_ROOT=/data/billing \
-    MPOS_BILLING_DEMO_MODE=false \
+    MPOS_SESSION_ROOT=/tmp/mpos-sessions \
     MPOS_DEMO_ERROR_INJECTION=false
 
 WORKDIR /app
 
 COPY backend/requirements.txt backend/requirements.txt
-RUN pip install --no-cache-dir -r backend/requirements.txt
+ARG PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+ARG PIP_EXTRA_INDEX_URL=https://mirrors.aliyun.com/pypi/simple
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install --retries 5 --timeout 60 \
+    --index-url ${PIP_INDEX_URL} \
+    --extra-index-url ${PIP_EXTRA_INDEX_URL} \
+    -r backend/requirements.txt
 
 COPY backend/ backend/
 COPY runner/ runner/
 COPY vendor/MicroPython_Skills/ vendor/MicroPython_Skills/
 COPY --from=frontend-build /app/frontend/dist/ frontend/dist/
 
-RUN mkdir -p /data/sessions /data/billing
+RUN mkdir -p /tmp/mpos-sessions
 
 EXPOSE 10000
 CMD ["sh", "-c", "uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port ${PORT:-10000}"]

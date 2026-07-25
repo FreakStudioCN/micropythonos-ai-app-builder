@@ -131,10 +131,9 @@ class SessionActionRequest(BaseModel):
     timeout_seconds: int = Field(default=180, ge=10, le=600)
 
 
-class SubscriptionRequest(BaseModel):
-    user_id: str = Field(min_length=8, max_length=128)
-    plan_id: Literal["go", "plus", "pro"]
-    idempotency_key: str = Field(min_length=8, max_length=160)
+class AuthCredentials(BaseModel):
+    username: str = Field(min_length=3, max_length=32)
+    password: str = Field(min_length=8, max_length=128)
 
 
 class DemoSessionRequest(BaseModel):

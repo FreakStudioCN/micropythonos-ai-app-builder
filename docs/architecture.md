@@ -10,6 +10,11 @@
 - MicroPythonOS：提供运行时、桌面模拟、Web port 和硬件部署能力。
 - MicroPython Skills：提供协议化的生成、测试、打包、部署与发布工作流。
 
+第一轮正式内测使用数据库用户名/密码账号。密码使用加盐 scrypt 哈希，登录 token
+只把 SHA-256 哈希保存到数据库，原 token 保存在 HttpOnly Cookie。所有 session、
+artifact、permission 和 billing 请求都在统一中间件中执行用户 UUID 所有权检查，
+支持跨浏览器登录恢复；第一版不提供密码找回。
+
 ## Browser skill pipeline
 
 1. `mpos-plan-app-web`
@@ -45,6 +50,9 @@ React Workbench
 
 会话工作目录位于 `backend/sessions/<session_id>/`，已由 `.gitignore`
 排除。前端只使用 artifact ID 下载文件，不能请求任意主机路径。
+云端运行时工作目录是临时缓存，并增量同步到 Supabase Storage 私有 bucket；账号、
+登录会话、点数账户和账本位于 Supabase PostgreSQL。服务启动时从对象存储恢复
+session/artifact，Render 重启不会把持久数据留在临时磁盘里。
 
 连续修改沿用同一个 `session_id`，递增 `revision_id`。开始新 revision
 前先把上一成功版本的 project 和 artifacts 保存到 `revisions/rN/`，
