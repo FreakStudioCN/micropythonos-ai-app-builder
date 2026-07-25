@@ -25,7 +25,7 @@ from .auth import (
 )
 from .billing import InsufficientCredits, billing_service
 from .database import database_engine
-from .generator import GenerationError, generate_app
+from .generator import GenerationError, generate_app, provider_metadata
 from .requirements_chat import RequirementChatError, clarify_requirements
 from .models import (
     AuthCredentials,
@@ -225,6 +225,11 @@ def health() -> dict[str, Any]:
 @app.get("/api/capabilities")
 def capabilities() -> dict:
     return session_service.capabilities()
+
+
+@app.get("/api/ai/providers")
+def ai_providers() -> dict[str, Any]:
+    return {"providers": provider_metadata(), "default_provider": "auto"}
 
 
 @app.post("/api/requirements/chat", response_model=RequirementChatResponse)
@@ -664,7 +669,17 @@ async def generate(payload: GenerateRequest, request: Request) -> GenerateRespon
             },
         ) from exc
     except GenerationError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
+        code = getattr(exc, "code", "AI_GENERATION_FAILED")
+        status_code = 504 if code == "AI_UPSTREAM_TIMEOUT" else 503 if code == "AI_UPSTREAM_UNAVAILABLE" else 502
+        raise HTTPException(
+            status_code=status_code,
+            detail={
+                "code": code,
+                "message": getattr(exc, "message", str(exc)),
+                "retryable": bool(getattr(exc, "retryable", False)),
+                "details": getattr(exc, "details", {}),
+            },
+        ) from exc
 
 
 # In production the Vite build is served by the same FastAPI process. Register

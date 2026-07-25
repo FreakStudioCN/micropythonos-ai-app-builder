@@ -5,6 +5,14 @@ import {
   WASM_RUNTIME_URL,
 } from "./config";
 import { WebSerialDeviceClient, type DeviceConnectionState } from "./deviceSerial";
+import {
+  describeProviderResult,
+  emptyProviderCatalog,
+  isAiProviderId,
+  normalizeProviderCatalog,
+  type AiProviderId,
+  type AiProviderMetadata,
+} from "./providerRouting";
 
 type Status = "idle" | "created" | "running" | "waiting_preview" | "waiting_device" | "completed" | "failed" | "blocked" | "cancelled" | "timeout";
 type Language = "zh" | "en";
@@ -25,6 +33,9 @@ interface GenerationResult {
   acceptance_tests: string[];
   mpk_filename: string;
   revision: number;
+  provider?: string;
+  failover_used?: boolean;
+  attempted_providers?: string[];
   prompt_normalized_zh?: string;
   prompt_normalized_en?: string;
   store_metadata?: Record<string, string>;
@@ -74,6 +85,7 @@ interface SessionState {
     display_name: string;
     publisher: string;
     version: string;
+    ai_provider?: string;
     targets: string[];
     prompt_normalized_zh?: string;
     prompt_normalized_en?: string;
@@ -140,7 +152,7 @@ const apiFetch = (input: RequestInfo | URL, init: RequestInit = {}) => fetch(
 );
 const stages = [
   ["analysis", "需求分析"],
-  ["generation", "DeepSeek 生成代码"],
+  ["generation", "AI 生成代码"],
   ["test", "静态检查 / WASM 测试"],
   ["package", "生成真实 MPK"],
   ["publish", "发布准备检查"],
@@ -226,6 +238,11 @@ export default function App() {
   const [displayName, setDisplayName] = useState("我的 App");
   const [publisher, setPublisher] = useState("erkou111");
   const [version, setVersion] = useState("0.1.0");
+  const [aiProvider, setAiProvider] = useState<AiProviderId>("auto");
+  const [providerMetadata, setProviderMetadata] = useState<AiProviderMetadata[]>(
+    () => emptyProviderCatalog().providers,
+  );
+  const [providerStatus, setProviderStatus] = useState<"loading" | "ready" | "error">("loading");
   const [desktopTarget, setDesktopTarget] = useState(false);
   const [desktopAvailable, setDesktopAvailable] = useState(false);
   const [webTarget, setWebTarget] = useState(true);
@@ -320,6 +337,9 @@ export default function App() {
   const visibleShowcaseApps = showAllShowcase
     ? filteredShowcaseApps
     : orderedShowcaseApps.filter((item) => item.featured).slice(0, 12);
+  const selectedProvider = providerMetadata.find((provider) => provider.id === aiProvider);
+  const providerReady = providerStatus === "ready" && selectedProvider?.configured === true;
+  const providerResult = result ? describeProviderResult(result, providerMetadata) : null;
 
   const clearRuntimeTimers = () => {
     if (executionTimer.current !== null) window.clearTimeout(executionTimer.current);
@@ -363,6 +383,33 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("mpos-language", language);
   }, [language]);
+  useEffect(() => {
+    if (authStatus !== "signed_in") return;
+    const controller = new AbortController();
+    const loadProviders = async () => {
+      setProviderStatus("loading");
+      try {
+        const response = await apiFetch(`${apiUrl}/api/ai/providers`, {
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`provider metadata returned ${response.status}`);
+        const catalog = normalizeProviderCatalog(await response.json());
+        if (!catalog) throw new Error("provider metadata has an invalid shape");
+        setProviderMetadata(catalog.providers);
+        setAiProvider((current) => catalog.providers.some(
+          (provider) => provider.id === current && provider.configured,
+        ) ? current : catalog.defaultProvider);
+        setProviderStatus("ready");
+      } catch {
+        if (!controller.signal.aborted) {
+          setProviderMetadata(emptyProviderCatalog().providers);
+          setProviderStatus("error");
+        }
+      }
+    };
+    void loadProviders();
+    return () => controller.abort();
+  }, [authStatus]);
   useEffect(() => {
     if (status === "idle" && !wasmReady) {
       setRuntimeStatus(tr("正在启动 MicroPythonOS WASM…", "Starting MicroPythonOS WASM…"));
@@ -471,6 +518,7 @@ export default function App() {
     setDisplayName(session.input.display_name);
     setPublisher(session.input.publisher);
     setVersion(session.input.version);
+    if (isAiProviderId(session.input.ai_provider)) setAiProvider(session.input.ai_provider);
     setDesktopTarget(session.input.targets.includes("desktop-preview"));
     setWebTarget(session.input.targets.includes("web-preview"));
     setPhysicalTarget(session.input.targets.includes("physical-device"));
@@ -694,7 +742,7 @@ export default function App() {
       repairAttempts.current = 0;
       setLogs([
         tr("[analysis] 已把你的需求发送到后端", "[analysis] Request sent to the backend"),
-        tr("[generation] 正在等待 DeepSeek 生成 MicroPythonOS 代码…", "[generation] Waiting for DeepSeek to generate MicroPythonOS code…"),
+        tr("[generation] 正在等待所选 AI Provider 生成 MicroPythonOS 代码…", "[generation] Waiting for the selected AI provider to generate MicroPythonOS code…"),
       ]);
     } else {
       setLogs((items) => [...items, tr(`[repair] 第 ${repairAttempts.current}/2 次自动修复：正在让 DeepSeek 重写不兼容代码…`, `[repair] Automatic repair ${repairAttempts.current}/2: DeepSeek is rewriting incompatible code…`)]);
@@ -730,6 +778,7 @@ export default function App() {
             display_name: displayName,
             publisher,
             version,
+            ai_provider: aiProvider,
             targets: selectedTargets,
             capabilities: {
               file_operation: true,
@@ -773,6 +822,7 @@ export default function App() {
             idempotency_key: `revision-${crypto.randomUUID()}`,
             prompt,
             prompt_language: isZh ? "zh-CN" : "en-US",
+            ai_provider: aiProvider,
           }),
           signal: controller.signal,
         });
@@ -789,6 +839,7 @@ export default function App() {
           idempotency_key: `${repair ? "repair" : "generate"}-${crypto.randomUUID()}`,
           previous_code: repair?.previousCode,
           runtime_error: repair?.runtimeError,
+          ai_provider: aiProvider,
         }),
         signal: controller.signal,
       });
@@ -1516,6 +1567,33 @@ export default function App() {
                 <label>{tr("显示名", "Display name")}<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label>
                 <label>Publisher<input value={publisher} onChange={(event) => setPublisher(event.target.value)} /></label>
                 <label>Version<input value={version} onChange={(event) => setVersion(event.target.value)} /></label>
+                <label>AI Provider
+                  <select
+                    value={aiProvider}
+                    disabled={providerStatus !== "ready"}
+                    onChange={(event) => {
+                      if (isAiProviderId(event.target.value)) setAiProvider(event.target.value);
+                    }}
+                  >
+                    {providerMetadata.map((provider) => (
+                      <option
+                        value={provider.id}
+                        disabled={!provider.configured}
+                        title={provider.model || undefined}
+                        key={provider.id}
+                      >
+                        {provider.label}{provider.configured ? provider.model ? ` · ${provider.model}` : "" : tr(" · 未配置", " · Not configured")}
+                      </option>
+                    ))}
+                  </select>
+                  <small>{providerStatus === "loading"
+                    ? tr("正在读取可用 Provider…", "Loading available providers…")
+                    : providerStatus === "error"
+                      ? tr("无法读取 Provider 配置，暂时不能生成。", "Provider metadata is unavailable. Generation is temporarily disabled.")
+                      : selectedProvider?.configured
+                        ? tr("仅发送 Provider ID；密钥始终保留在后端。", "Only the provider ID is sent; credentials remain on the backend.")
+                        : tr("此 Provider 尚未配置。", "This provider is not configured.")}</small>
+                </label>
               </div>
             </details>
 
@@ -1589,8 +1667,8 @@ export default function App() {
             <div className="actions">
               {status === "running"
                 ? <button className="danger-button" onClick={stop}>{tr("停止任务", "Stop")}</button>
-                : <button className="main-button" disabled={!prompt.trim() || !(desktopTarget || webTarget || physicalTarget || packageTarget)} onClick={() => void run()}>{continuing ? tr("生成新版本", "Generate revision") : ["completed", "failed", "cancelled", "timeout"].includes(status) ? tr("重新生成 App", "Regenerate App") : tr("开始生成 App", "Generate App")}</button>}
-              <span className="real-badge">{tr("真实调用 DeepSeek", "Real DeepSeek API")}</span>
+                : <button className="main-button" disabled={!providerReady || !prompt.trim() || !(desktopTarget || webTarget || physicalTarget || packageTarget)} onClick={() => void run()}>{continuing ? tr("生成新版本", "Generate revision") : ["completed", "failed", "cancelled", "timeout"].includes(status) ? tr("重新生成 App", "Regenerate App") : tr("开始生成 App", "Generate App")}</button>}
+              <span className="real-badge">{tr("真实调用 AI Provider", "Real AI provider")}</span>
             </div>
           </section>
 
@@ -1605,7 +1683,7 @@ export default function App() {
                 })}
               </ol>
             )}
-            {status === "completed" && <div className="success-box"><strong>{sessionState?.input.targets.includes("web-preview") ? tr("App 已在 MicroPythonOS WASM 中真实运行", "App is running in MicroPythonOS WASM") : tr("所选生成和打包阶段已完成", "Selected generation and packaging stages are complete")}</strong><span>{tr(`当前版本 ${sessionState?.revision_id || "r1"}；可以继续描述修改，不会覆盖上一成功版本。`, `Current revision ${sessionState?.revision_id || "r1"}. Continue editing without overwriting the last successful revision.`)}</span><button onClick={() => { setContinuing(true); setStatus("idle"); setToast(tr("请修改上方需求，然后点击“生成新版本”", "Edit the prompt, then click Generate revision")); }}>{tr("继续修改这个 App", "Continue editing this app")}</button></div>}
+            {status === "completed" && <div className="success-box"><strong>{sessionState?.input.targets.includes("web-preview") ? tr("App 已在 MicroPythonOS WASM 中真实运行", "App is running in MicroPythonOS WASM") : tr("所选生成和打包阶段已完成", "Selected generation and packaging stages are complete")}</strong>{providerResult && <span>AI: {providerResult.provider} · {providerResult.model}{providerResult.failoverUsed ? tr(` · 已安全切换（${providerResult.attempted.join(" → ")}）`, ` · Safe failover (${providerResult.attempted.join(" → ")})`) : ""}</span>}<span>{tr(`当前版本 ${sessionState?.revision_id || "r1"}；可以继续描述修改，不会覆盖上一成功版本。`, `Current revision ${sessionState?.revision_id || "r1"}. Continue editing without overwriting the last successful revision.`)}</span><button onClick={() => { setContinuing(true); setStatus("idle"); setToast(tr("请修改上方需求，然后点击“生成新版本”", "Edit the prompt, then click Generate revision")); }}>{tr("继续修改这个 App", "Continue editing this app")}</button></div>}
             {["failed", "timeout", "cancelled", "blocked"].includes(status) && <div className={`error-box state-${status}`}>
               <strong>{status === "timeout" ? tr("运行超时", "Timed out") : status === "cancelled" ? tr("任务已取消", "Cancelled") : status === "blocked" ? tr("等待处理", "Blocked") : tr("真实生成失败", "Generation failed")}</strong>
               {sessionState?.last_error && <code>{sessionState.last_error.code} · {sessionState.last_error.stage} · owner: {sessionState.last_error.owner}</code>}
@@ -1792,7 +1870,7 @@ export default function App() {
                 </div>
                 {sessionState?.artifacts.find((item) => item.role === "desktop_screenshot") && <img className="desktop-screenshot" src={`${apiUrl}/api/artifacts/${sessionState.artifacts.find((item) => item.role === "desktop_screenshot")!.id}`} alt={tr("桌面测试截图", "Desktop smoke screenshot")} />}
                 {result && <>
-                  <small className="preview-summary">{result.summary} · {result.model}</small>
+                  <small className="preview-summary">{result.summary} · {providerResult?.provider} · {providerResult?.model}{providerResult?.failoverUsed ? tr(" · 已执行安全 failover", " · Safe failover used") : ""}</small>
                   <small className="preview-summary">{tr(
                     `AI 规范化需求：${result.prompt_normalized_zh || sessionState?.input.prompt_normalized_zh || prompt}`,
                     `Normalized requirement: ${result.prompt_normalized_en || sessionState?.input.prompt_normalized_en || prompt}`,
@@ -1852,7 +1930,7 @@ export default function App() {
                     <a href="https://upystore.io/developer" target="_blank" rel="noreferrer">{tr("打开 uPyStore 开发者入口", "Open uPyStore Developer")}</a>
                   </div>
                 </div>
-              : <div className="not-ready">{tr("真实生成成功后，这里会出现 DeepSeek 生成的源码和 `.mpk`。", "DeepSeek source files and the `.mpk` will appear here after generation.")}</div>
+              : <div className="not-ready">{tr("真实生成成功后，这里会出现 AI 生成的源码和 `.mpk`。", "AI-generated source files and the `.mpk` will appear here after generation.")}</div>
           )}
         </section>
       </main>
