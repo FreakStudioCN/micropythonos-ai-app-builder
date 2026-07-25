@@ -1101,6 +1101,16 @@ class GeneratedApp(Activity):
             target.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source, target)
             result_files.append(target.relative_to(root).as_posix())
+        archived_generation_run = None
+        generation_run = state.get("generation_attempt_run")
+        if isinstance(generation_run, str) and generation_run:
+            source_run = (root / generation_run).resolve()
+            if root in source_run.parents and source_run.is_dir():
+                target_run = (
+                    archive_root / "generation-attempts" / source_run.name
+                )
+                shutil.copytree(source_run, target_run)
+                archived_generation_run = target_run.relative_to(root).as_posix()
         record = {
             "attempt": attempt_number,
             "idempotency_key": retry_idempotency_key,
@@ -1112,6 +1122,7 @@ class GeneratedApp(Activity):
                 archive_root / "activity_log.jsonl"
             ).relative_to(root).as_posix(),
             "result_files": result_files,
+            "generation_attempt_run": archived_generation_run,
         }
         history.append(record)
         self._write_state(state)
@@ -1125,6 +1136,56 @@ class GeneratedApp(Activity):
                 "previous_checkpoint_id": record["previous_checkpoint_id"],
             },
         )
+
+    def _write_generation_attempt(
+        self,
+        state: dict[str, Any],
+        run_relative: str,
+        record: dict[str, Any],
+    ) -> None:
+        attempt_number = max(1, int(record.get("attempt", 1)))
+        attempt_root = (
+            self._root(state["session_id"])
+            / run_relative
+            / f"attempt-{attempt_number:03d}"
+        )
+        attempt_root.mkdir(parents=True, exist_ok=True)
+        candidate = record.get("candidate")
+        if isinstance(candidate, str) and candidate:
+            (attempt_root / "candidate.py").write_text(candidate, encoding="utf-8")
+        validation = record.get("validation")
+        _json_dump(
+            attempt_root / "validation.json",
+            {
+                "attempt": attempt_number,
+                "status": str(record.get("status") or "unknown"),
+                "validation": validation if isinstance(validation, dict) else {},
+            },
+        )
+        raw_model_meta = record.get("model_meta")
+        safe_model_meta: dict[str, Any] = {}
+        if isinstance(raw_model_meta, dict):
+            for key in ("model", "request_id"):
+                value = raw_model_meta.get(key)
+                if isinstance(value, str) and value:
+                    safe_model_meta[key] = value[:200]
+            usage = raw_model_meta.get("usage")
+            if isinstance(usage, dict):
+                safe_usage = {
+                    key: int(value)
+                    for key in (
+                        "prompt_tokens",
+                        "completion_tokens",
+                        "total_tokens",
+                    )
+                    if isinstance((value := usage.get(key)), (int, float))
+                    and not isinstance(value, bool)
+                }
+                if safe_usage:
+                    safe_model_meta["usage"] = safe_usage
+        _json_dump(attempt_root / "model_meta.json", safe_model_meta)
+        state["generation_attempt_run"] = run_relative
+        self._write_state(state)
 
     def start_action(
         self, session_id: str, action: str, request: SessionActionRequest
@@ -1745,6 +1806,12 @@ class GeneratedApp(Activity):
                         **mpos_skill_adapter.describe("generate"),
                     },
                 )
+                generation_run = (
+                    "generation-attempts/"
+                    f"run-{int(state['attempts'].get('mpos-gen-app-web', 1)):03d}"
+                )
+                state["generation_attempt_run"] = generation_run
+                self._write_state(state)
                 generated = await generate_app(
                     GenerateRequest(
                         prompt=user_input["prompt_original"],
@@ -1755,7 +1822,10 @@ class GeneratedApp(Activity):
                         revision=int(state["revision_id"].removeprefix("r")),
                         previous_code=state.get("pending_repair", {}).get("previous_code"),
                         runtime_error=state.get("pending_repair", {}).get("runtime_error"),
-                    )
+                    ),
+                    attempt_sink=lambda record: self._write_generation_attempt(
+                        state, generation_run, record
+                    ),
                 )
                 generation_data = generated.model_dump()
                 state["generation"] = generation_data

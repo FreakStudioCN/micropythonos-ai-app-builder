@@ -19,6 +19,7 @@ from .auth import (
     COOKIE_MAX_AGE,
     COOKIE_NAME,
     InvalidCredentials,
+    ROLE_SUPERADMIN,
     UsernameTaken,
     auth_service,
 )
@@ -102,6 +103,10 @@ def _current_user(request: Request) -> dict:
     return user
 
 
+def _is_superadmin(user: dict) -> bool:
+    return user.get("role") == ROLE_SUPERADMIN
+
+
 def _cookie_is_secure(request: Request) -> bool:
     configured = os.getenv("MPOS_COOKIE_SECURE", "auto").strip().lower()
     if configured in {"1", "true", "yes", "on"}:
@@ -131,8 +136,13 @@ def _set_login_cookie(response: Response, request: Request, token: str) -> None:
 
 def _account_payload(user: dict) -> dict:
     return {
-        **billing_service.account(user["id"]),
+        **billing_service.account(
+            user["id"],
+            unlimited=_is_superadmin(user),
+        ),
+        "id": user["id"],
         "username": user["username"],
+        "role": user["role"],
         "user_created_at": user["created_at"],
     }
 
@@ -170,12 +180,13 @@ class AuthenticatedUserMiddleware:
         scope["state"]["user_id"] = user_id
         try:
             segments = scope["path"].strip("/").split("/")
-            if len(segments) >= 3 and segments[:2] == ["api", "sessions"]:
-                session_service.require_owner(segments[2], user_id)
-            elif len(segments) >= 3 and segments[:2] == ["api", "artifacts"]:
-                session_service.require_artifact_owner(segments[2], user_id)
-            elif len(segments) >= 3 and segments[:2] == ["api", "permissions"]:
-                session_service.require_permission_owner(segments[2], user_id)
+            if not _is_superadmin(user):
+                if len(segments) >= 3 and segments[:2] == ["api", "sessions"]:
+                    session_service.require_owner(segments[2], user_id)
+                elif len(segments) >= 3 and segments[:2] == ["api", "artifacts"]:
+                    session_service.require_artifact_owner(segments[2], user_id)
+                elif len(segments) >= 3 and segments[:2] == ["api", "permissions"]:
+                    session_service.require_permission_owner(segments[2], user_id)
         except SessionNotFound:
             response = JSONResponse(status_code=404, content={"detail": "资源不存在"})
             await response(scope, receive, send)
@@ -278,12 +289,21 @@ def current_user(request: Request) -> dict:
 
 @app.get("/api/billing/account")
 def billing_account(request: Request) -> dict:
-    return billing_service.account(_current_user_id(request))
+    return _account_payload(_current_user(request))
+
+
+@app.get("/api/admin/users")
+def admin_users(request: Request) -> list[dict]:
+    if not _is_superadmin(_current_user(request)):
+        raise HTTPException(status_code=403, detail="需要超级管理员权限")
+    return [_account_payload(user) for user in auth_service.list_users()]
 
 
 @app.get("/api/sessions")
 def list_sessions(request: Request) -> list[dict]:
-    return session_service.list_sessions(_current_user_id(request))
+    user = _current_user(request)
+    owner_user_id = None if _is_superadmin(user) else user["id"]
+    return session_service.list_sessions(owner_user_id)
 
 
 @app.post("/api/demo/sessions", status_code=201)
@@ -364,9 +384,11 @@ async def generate_session(
 ) -> dict:
     try:
         state = session_service.get(session_id)
+        user = _current_user(request)
         billing_service.consume_generation(
-            _current_user_id(request),
+            user["id"],
             f"generation:{session_id}:{state['revision_id']}",
+            unlimited=_is_superadmin(user),
         )
         return _start_action(session_id, "generate", payload)
     except InsufficientCredits as exc:
@@ -389,9 +411,11 @@ async def run_session(
 ) -> dict:
     try:
         state = session_service.get(session_id)
+        user = _current_user(request)
         billing_service.consume_generation(
-            _current_user_id(request),
+            user["id"],
             f"generation:{session_id}:{state['revision_id']}",
+            unlimited=_is_superadmin(user),
         )
         return session_service.start_generation(session_id, payload)
     except SessionNotFound as exc:
@@ -622,9 +646,11 @@ def upload_screenshot(session_id: str, request: ScreenshotUploadRequest) -> dict
 @app.post("/api/generate", response_model=GenerateResponse)
 async def generate(payload: GenerateRequest, request: Request) -> GenerateResponse:
     try:
+        user = _current_user(request)
         billing_service.consume_generation(
-            _current_user_id(request),
+            user["id"],
             f"legacy-generation:{hashlib.sha256(os.urandom(32)).hexdigest()}",
+            unlimited=_is_superadmin(user),
         )
         return await generate_app(payload)
     except InsufficientCredits as exc:

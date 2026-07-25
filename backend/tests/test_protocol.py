@@ -323,6 +323,31 @@ class ProtocolTests(unittest.TestCase):
             "mpos-gen-app-web",
             {"result": "failed"},
         )
+        generation_run = "generation-attempts/run-001"
+        self.service._write_generation_attempt(
+            state,
+            generation_run,
+            {
+                "attempt": 1,
+                "status": "validation_failed",
+                "candidate": "print('candidate')\n",
+                "validation": {
+                    "status": "failed",
+                    "code": "GENERATION_VALIDATION_FAILED",
+                    "message": "第 8 行阻塞式 while",
+                    "line": 8,
+                },
+                "model_meta": {
+                    "model": "test-model",
+                    "request_id": "req-private",
+                    "usage": {"total_tokens": 42},
+                    "api_key": "sk-model-secret",
+                },
+                "prompt": "sk-prompt-secret",
+                "headers": {"Authorization": "Bearer header-secret"},
+                "cookie": "session=private",
+            },
+        )
         self.service._write_state(state)
         self.service._archive_failed_attempt(state, "retry-archive-run-0001")
         updated = self.service.get(state["session_id"])
@@ -334,6 +359,30 @@ class ProtocolTests(unittest.TestCase):
         )
         self.assertTrue(archive.is_file())
         self.assertTrue(updated["retry_history"][0]["result_files"])
+        run_root = (
+            Path(self.temp.name)
+            / state["session_id"]
+            / generation_run
+            / "attempt-001"
+        )
+        self.assertTrue((run_root / "candidate.py").is_file())
+        diagnostic_text = (
+            (run_root / "validation.json").read_text(encoding="utf-8")
+            + (run_root / "model_meta.json").read_text(encoding="utf-8")
+        )
+        self.assertNotIn("sk-model-secret", diagnostic_text)
+        self.assertNotIn("sk-prompt-secret", diagnostic_text)
+        self.assertNotIn("Authorization", diagnostic_text)
+        archived_run = updated["retry_history"][0]["generation_attempt_run"]
+        self.assertTrue(
+            (
+                Path(self.temp.name)
+                / state["session_id"]
+                / archived_run
+                / "attempt-001"
+                / "candidate.py"
+            ).is_file()
+        )
 
 
 class PipelineTests(unittest.IsolatedAsyncioTestCase):

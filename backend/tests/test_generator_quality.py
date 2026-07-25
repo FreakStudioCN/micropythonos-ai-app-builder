@@ -1,7 +1,9 @@
 import base64
 import io
+import json
 import unittest
 import zipfile
+from unittest.mock import AsyncMock, patch
 
 from app.generator import (
     ApiValidationError,
@@ -10,13 +12,16 @@ from app.generator import (
     _build_mpk,
     _build_correction,
     _normalize_generation_payload,
+    _build_user_prompt,
     _normalize_lvgl_code,
     _parse_model_json,
     _validate_api_summaries,
     _validate_code,
     _validate_product_contract,
     _validate_visual_contract,
+    generate_app,
 )
+from app.models import GenerateRequest
 
 
 STYLED_APP = """
@@ -230,8 +235,10 @@ class GeneratorQualityTests(unittest.TestCase):
             "            pass\n\n"
             "    def update_label(self, value):",
         )
-        with self.assertRaisesRegex(GenerationError, "阻塞式 while"):
+        with self.assertRaises(GenerationError) as caught:
             _validate_code(blocking)
+        self.assertRegex(str(caught.exception), r"第 \d+ 行阻塞式 while")
+        self.assertIn("lv.timer_create", str(caught.exception))
 
     def test_finite_while_inside_on_create_is_allowed(self) -> None:
         finite = STYLED_APP.replace(
@@ -293,6 +300,30 @@ class GeneratorQualityTests(unittest.TestCase):
         self.assertIn(bad_code, correction)
         self.assertIn("self.player_x", correction)
         self.assertIn("set_pos", correction)
+
+    def test_correction_is_last_after_previous_and_failed_code(self) -> None:
+        request = GenerateRequest(
+            prompt="Build a timer dashboard",
+            previous_code="PREVIOUS_CODE_SENTINEL",
+            runtime_error="previous runtime failure",
+        )
+        correction = _build_correction(
+            GenerationError(
+                "第 12 行阻塞式 while 循环，界面更新请使用 lv.timer_create"
+            ),
+            "FAILED_CANDIDATE_SENTINEL",
+            attempt=2,
+        )
+        prompt = _build_user_prompt(request, correction)
+        self.assertLess(
+            prompt.index("PREVIOUS_CODE_SENTINEL"),
+            prompt.index("FAILED_CANDIDATE_SENTINEL"),
+        )
+        self.assertLess(
+            prompt.index("FAILED_CANDIDATE_SENTINEL"),
+            prompt.index("<FINAL_CORRECTION>"),
+        )
+        self.assertTrue(prompt.rstrip().endswith("</FINAL_CORRECTION>"))
 
     def test_unknown_get_pos_is_rejected_by_summary(self) -> None:
         bad = STYLED_APP.replace(
@@ -363,6 +394,100 @@ class GeneratorQualityTests(unittest.TestCase):
             "做一个极简四则运算计算器，按钮要大，适合触摸屏",
         )
         self.assertTrue(result)
+
+
+class GeneratorRetryDiagnosticTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _payload(code: str) -> dict[str, object]:
+        return {
+            "summary": "Status panel",
+            "app_code": code,
+            "acceptance_tests": ["state changes", "state restores"],
+        }
+
+    async def test_failed_attempt_then_success_emits_private_diagnostics(self) -> None:
+        blocking = STYLED_APP.replace(
+            "    def update_label(self, value):",
+            "    def run_forever(self):\n"
+            "        while True:\n"
+            "            pass\n\n"
+            "    def update_label(self, value):",
+        )
+        records: list[dict[str, object]] = []
+        responses = [
+            (
+                self._payload(blocking),
+                "test-model",
+                {
+                    "model": "test-model",
+                    "request_id": "req-failed",
+                    "usage": {"total_tokens": 10},
+                },
+            ),
+            (
+                self._payload(STYLED_APP),
+                "test-model",
+                {
+                    "model": "test-model",
+                    "request_id": "req-success",
+                    "usage": {"total_tokens": 20},
+                },
+            ),
+        ]
+        request = GenerateRequest(
+            prompt="Build a styled status panel with secret sk-super-secret"
+        )
+        with patch(
+            "app.generator._call_deepseek",
+            new=AsyncMock(side_effect=responses),
+        ):
+            result = await generate_app(request, attempt_sink=records.append)
+        self.assertEqual(result.model, "test-model")
+        self.assertEqual([item["status"] for item in records], [
+            "validation_failed",
+            "passed",
+        ])
+        self.assertRegex(
+            str(records[0]["validation"]),
+            r"第 \d+ 行阻塞式 while",
+        )
+        self.assertIn("candidate", records[0])
+        self.assertNotIn(
+            "sk-super-secret",
+            json.dumps(records, ensure_ascii=False),
+        )
+
+    async def test_failed_attempts_are_all_emitted(self) -> None:
+        blocking = STYLED_APP.replace(
+            "    def update_label(self, value):",
+            "    def run_forever(self):\n"
+            "        while True:\n"
+            "            pass\n\n"
+            "    def update_label(self, value):",
+        )
+        records: list[dict[str, object]] = []
+        response = (
+            self._payload(blocking),
+            "test-model",
+            {"model": "test-model"},
+        )
+        with patch(
+            "app.generator._call_deepseek",
+            new=AsyncMock(side_effect=[response] * 2),
+        ):
+            with patch.dict(
+                "app.generator.os.environ",
+                {"DEEPSEEK_MAX_ATTEMPTS": "2"},
+            ):
+                with self.assertRaisesRegex(GenerationError, "经过 2 次"):
+                    await generate_app(
+                        GenerateRequest(prompt="Build a styled status panel"),
+                        attempt_sink=records.append,
+                    )
+        self.assertEqual(len(records), 2)
+        self.assertTrue(
+            all(item["status"] == "validation_failed" for item in records)
+        )
 
 
 if __name__ == "__main__":

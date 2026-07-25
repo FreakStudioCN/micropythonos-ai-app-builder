@@ -1,0 +1,44 @@
+{
+  "id": "main-branch-protection",
+  "name": "main-branch-protection",
+  "title": "Require main alignment before merge",
+  "description": "Protect main so changes merge through pull requests only after the existing CI check passes against the latest main.",
+  "status": "cancelled",
+  "dev_type": null,
+  "scope": "GitHub branch protection and required CI policy",
+  "package": "repository",
+  "priority": "P0",
+  "creator": "lenovo",
+  "assignee": "lenovo",
+  "createdAt": "2026-07-25",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "main",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    ".github/workflows/ci.yml"
+  ],
+  "notes": "Cancelled by the user on 2026-07-25. Existing CI remains unchanged and no branch protection was configured.",
+  "meta": {
+    "repository": "erkou111/micropythonos-ai-app-builder",
+    "requiredCheck": "test",
+    "requestedProtection": {
+      "pullRequestRequired": true,
+      "strictMainAlignment": true,
+      "enforceAdmins": true,
+      "conversationResolution": true,
+      "forcePushesAllowed": false,
+      "deletionsAllowed": false
+    },
+    "cancellation": {
+      "requestedBy": "lenovo",
+      "cancelledAt": "2026-07-25",
+      "reason": "Main branch protection is not required."
+    }
+  }
+}

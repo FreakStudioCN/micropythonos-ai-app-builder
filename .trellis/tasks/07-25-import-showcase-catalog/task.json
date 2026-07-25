@@ -1,0 +1,31 @@
+{
+  "id": "import-showcase-catalog",
+  "name": "import-showcase-catalog",
+  "title": "Import 100-app showcase catalog",
+  "description": "Import the provided 100-app MPK bundle as a safe, searchable frontend showcase catalog.",
+  "status": "in_progress",
+  "dev_type": null,
+  "scope": "frontend showcase catalog, reproducible bundle import, static screenshots and MPK downloads",
+  "package": "frontend",
+  "priority": "P1",
+  "creator": "lenovo",
+  "assignee": "lenovo",
+  "createdAt": "2026-07-25",
+  "completedAt": null,
+  "branch": null,
+  "base_branch": "dc/local-deploy-20260725",
+  "worktree_path": null,
+  "commit": null,
+  "pr_url": null,
+  "subtasks": [],
+  "children": [],
+  "parent": null,
+  "relatedFiles": [
+    "frontend/src/App.tsx",
+    "frontend/src/styles.css",
+    "frontend/public/showcase",
+    "scripts/import_showcase_bundle.py"
+  ],
+  "notes": "Keep the existing three deterministic runnable demos. Imported apps are static showcase assets and must not execute automatically.",
+  "meta": {}
+}

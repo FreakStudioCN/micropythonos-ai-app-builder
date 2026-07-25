@@ -9,6 +9,7 @@ import { WebSerialDeviceClient, type DeviceConnectionState } from "./deviceSeria
 type Status = "idle" | "created" | "running" | "waiting_preview" | "waiting_device" | "completed" | "failed" | "blocked" | "cancelled" | "timeout";
 type Language = "zh" | "en";
 type AuthStatus = "loading" | "signed_out" | "signed_in";
+type AccountRole = "user" | "superadmin";
 interface GeneratedFile {
   path: string;
   content: string;
@@ -82,7 +83,9 @@ type SessionSummary = Omit<SessionState, "generation"> & { generation?: Generati
 interface BillingAccount {
   user_id: string;
   username: string;
+  role: AccountRole;
   credits: number;
+  unlimited_credits: boolean;
   generations_remaining: number;
   generation_limit: number;
   generation_cost: number;
@@ -115,6 +118,17 @@ type SaveFilePickerWindow = Window & {
     }>;
   }) => Promise<SaveFileHandle>;
 };
+interface ShowcaseApp {
+  fullname: string;
+  name: string;
+  category: string;
+  version: string;
+  shortDescription: string;
+  longDescription: string;
+  screenshotUrl: string;
+  mpkUrl: string;
+  featured: boolean;
+}
 
 const defaultPrompt = "做一个极简四则运算计算器，按钮要大，适合触摸屏";
 const defaultPromptEn = "Build a minimal four-function calculator with large touch-friendly buttons";
@@ -141,6 +155,20 @@ const stageIndexForError = (stage?: string) => {
     publish: 4,
   };
   return stage ? (indexByStage[stage] ?? 1) : 1;
+};
+const isShowcaseApp = (value: unknown): value is ShowcaseApp => {
+  if (!value || typeof value !== "object") return false;
+  const item = value as Record<string, unknown>;
+  return [
+    "fullname",
+    "name",
+    "category",
+    "version",
+    "shortDescription",
+    "longDescription",
+    "screenshotUrl",
+    "mpkUrl",
+  ].every((key) => typeof item[key] === "string") && typeof item.featured === "boolean";
 };
 const verifiedBoards = [
   ["Freenove", "ESP32-S3 Display", "ESP32-S3", "触摸屏", "入门交互"],
@@ -237,6 +265,11 @@ export default function App() {
   const [requirementBusy, setRequirementBusy] = useState(false);
   const [requirementError, setRequirementError] = useState("");
   const [requirementResult, setRequirementResult] = useState<RequirementChatResult | null>(null);
+  const [showcaseApps, setShowcaseApps] = useState<ShowcaseApp[]>([]);
+  const [showcaseStatus, setShowcaseStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [showcaseQuery, setShowcaseQuery] = useState("");
+  const [showcaseCategory, setShowcaseCategory] = useState("all");
+  const [showAllShowcase, setShowAllShowcase] = useState(false);
   const [wasmReady, setWasmReady] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState("正在启动 MicroPythonOS WASM…");
   const iframeRef = useRef<HTMLIFrameElement>(null);
@@ -255,6 +288,38 @@ export default function App() {
   const languageRef = useRef<Language>(language);
   languageRef.current = language;
   const liveText = (zh: string, en: string) => languageRef.current === "zh" ? zh : en;
+  const showcaseCategoryText = (category: string) => {
+    if (!isZh) return category.charAt(0).toUpperCase() + category.slice(1);
+    const labels: Record<string, string> = {
+      education: "教育",
+      games: "游戏",
+      graphics: "图形",
+      health: "健康",
+      productivity: "效率",
+      utilities: "工具",
+      weather: "天气",
+    };
+    return labels[category] || category;
+  };
+  const orderedShowcaseApps = [...showcaseApps].sort(
+    (left, right) => Number(right.featured) - Number(left.featured) || left.fullname.localeCompare(right.fullname),
+  );
+  const showcaseCategories = Array.from(new Set(showcaseApps.map((item) => item.category))).sort();
+  const normalizedShowcaseQuery = showcaseQuery.trim().toLocaleLowerCase();
+  const filteredShowcaseApps = orderedShowcaseApps.filter((item) => {
+    const matchesCategory = showcaseCategory === "all" || item.category === showcaseCategory;
+    const matchesQuery = !normalizedShowcaseQuery || [
+      item.name,
+      item.fullname,
+      item.category,
+      item.shortDescription,
+      item.longDescription,
+    ].some((value) => value.toLocaleLowerCase().includes(normalizedShowcaseQuery));
+    return matchesCategory && matchesQuery;
+  });
+  const visibleShowcaseApps = showAllShowcase
+    ? filteredShowcaseApps
+    : orderedShowcaseApps.filter((item) => item.featured).slice(0, 12);
 
   const clearRuntimeTimers = () => {
     if (executionTimer.current !== null) window.clearTimeout(executionTimer.current);
@@ -275,6 +340,25 @@ export default function App() {
       releaseSerialPort();
       clearRuntimeTimers();
     };
+  }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    const loadShowcase = async () => {
+      try {
+        const response = await fetch("/showcase/catalog.json", { signal: controller.signal });
+        if (!response.ok) throw new Error(`Showcase catalog returned ${response.status}`);
+        const payload: unknown = await response.json();
+        if (!Array.isArray(payload) || !payload.every(isShowcaseApp)) {
+          throw new Error("Showcase catalog has an invalid shape");
+        }
+        setShowcaseApps(payload);
+        setShowcaseStatus("ready");
+      } catch {
+        if (!controller.signal.aborted) setShowcaseStatus("error");
+      }
+    };
+    void loadShowcase();
+    return () => controller.abort();
   }, []);
   useEffect(() => {
     localStorage.setItem("mpos-language", language);
@@ -587,6 +671,7 @@ export default function App() {
     if (
       !repair
       && billingAccount
+      && !billingAccount.unlimited_credits
       && billingAccount.credits < billingAccount.generation_cost
     ) {
       setToast(tr("内测点数已用完，请联系项目管理员补充测试点数", "Your beta credits are depleted. Contact the project administrator."));
@@ -1377,9 +1462,16 @@ export default function App() {
       <header>
         <div className="brand"><span>BM</span><div><strong>Blockless-Make-APP</strong><small>{tr("MicroPythonOS AI App 生成与分发平台", "MicroPythonOS AI app creation and distribution")}</small></div></div>
         <div className="header-actions">
-          <span className="user-chip">{billingAccount?.username}</span>
-          <button className="credits-button" onClick={() => setToast(tr("当前为免费内测点数，不提供在线充值", "Free beta credits; online payments are not enabled."))}>
-            <span>◆</span>{billingAccount?.credits ?? 50} {tr("点", "credits")}
+          <span className="user-chip">
+            {billingAccount?.username}
+            {billingAccount?.role === "superadmin" ? ` · ${tr("管理员", "Admin")}` : ""}
+          </span>
+          <button className="credits-button" onClick={() => setToast(
+            billingAccount?.unlimited_credits
+              ? tr("管理员账户不受内测点数限制", "Administrator accounts have unlimited beta credits.")
+              : tr("当前为免费内测点数，不提供在线充值", "Free beta credits; online payments are not enabled."),
+          )}>
+            <span>◆</span>{billingAccount?.unlimited_credits ? "∞" : (billingAccount?.credits ?? 50)} {tr("点", "credits")}
           </button>
           <button className="language-button" onClick={() => setLanguage(isZh ? "en" : "zh")} aria-label={tr("切换为英文", "Switch to Chinese")}>
             {isZh ? "English" : "中文"}
@@ -1531,6 +1623,126 @@ export default function App() {
           <div><h2>{tr("历史会话", "Session history")}</h2><span>{tr("刷新页面或关闭浏览器后仍可恢复", "Restore work after refresh or closing the browser")}</span></div>
           <div className="history-list">{history.slice(0, 5).map((item) => <button key={item.session_id} onClick={() => void restoreSession(item.session_id)}><strong>{item.input.display_name}</strong><span>{item.revision_id} · {item.status} · {item.checkpoint_id}</span><small>{item.input.prompt_original}</small></button>)}</div>
         </section>}
+
+        <section className="card showcase-library" id="showcase">
+          <div className="section-heading">
+            <div>
+              <span>{tr("更多创作灵感", "More ideas to explore")}</span>
+              <h2>{tr("100 App 样例库", "100-App Showcase")}</h2>
+            </div>
+            <p>{tr("从界面截图快速发现灵感，按名称或类别查找，并下载对应的 MPK。", "Browse interface ideas, search by name or category, and download the matching MPK.")}</p>
+          </div>
+
+          <div className="showcase-toolbar">
+            <label className="showcase-field showcase-search">
+              <span>{tr("搜索样例", "Search apps")}</span>
+              <input
+                type="search"
+                value={showcaseQuery}
+                placeholder={tr("名称、描述或包名", "Name, description, or package")}
+                disabled={showcaseStatus !== "ready"}
+                onChange={(event) => {
+                  setShowcaseQuery(event.target.value);
+                  setShowAllShowcase(true);
+                }}
+              />
+            </label>
+            <label className="showcase-field">
+              <span>{tr("类别", "Category")}</span>
+              <select
+                value={showcaseCategory}
+                disabled={showcaseStatus !== "ready"}
+                onChange={(event) => {
+                  setShowcaseCategory(event.target.value);
+                  setShowAllShowcase(true);
+                }}
+              >
+                <option value="all">{tr("全部类别", "All categories")}</option>
+                {showcaseCategories.map((category) => (
+                  <option value={category} key={category}>{showcaseCategoryText(category)}</option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className={`showcase-toggle${showAllShowcase ? " active" : ""}`}
+              aria-expanded={showAllShowcase}
+              disabled={showcaseStatus !== "ready"}
+              onClick={() => {
+                const nextShowAll = !showAllShowcase;
+                setShowAllShowcase(nextShowAll);
+                if (!nextShowAll) {
+                  setShowcaseQuery("");
+                  setShowcaseCategory("all");
+                }
+              }}
+            >
+              {showAllShowcase ? tr("收起精选", "Show featured") : tr("查看全部", "Show all")}
+            </button>
+          </div>
+
+          {showcaseStatus === "loading" && (
+            <div className="showcase-state"><strong>{tr("正在载入样例库…", "Loading showcase…")}</strong></div>
+          )}
+          {showcaseStatus === "error" && (
+            <div className="showcase-state error">
+              <strong>{tr("样例库暂时无法载入", "Showcase unavailable")}</strong>
+              <span>{tr("请刷新页面后重试。", "Refresh the page to try again.")}</span>
+            </div>
+          )}
+          {showcaseStatus === "ready" && (
+            <>
+              <div className="showcase-results">
+                <span>
+                  {showAllShowcase
+                    ? tr(`显示 ${visibleShowcaseApps.length} / ${showcaseApps.length} 个样例`, `Showing ${visibleShowcaseApps.length} of ${showcaseApps.length} apps`)
+                    : tr(`精选 ${visibleShowcaseApps.length} 个样例`, `${visibleShowcaseApps.length} featured apps`)}
+                </span>
+              </div>
+              {visibleShowcaseApps.length > 0 ? (
+                <div className="showcase-grid">
+                  {visibleShowcaseApps.map((item) => (
+                    <article className="showcase-app" key={item.fullname}>
+                      <figure className="showcase-shot">
+                        <img
+                          src={item.screenshotUrl}
+                          alt={tr(`${item.name} 应用截图`, `${item.name} app screenshot`)}
+                          width="320"
+                          height="240"
+                          loading="lazy"
+                          decoding="async"
+                        />
+                        <span>{showcaseCategoryText(item.category)}</span>
+                      </figure>
+                      <div className="showcase-body">
+                        <div className="showcase-title">
+                          <h3>{item.name}</h3>
+                          <small>v{item.version}</small>
+                        </div>
+                        <p title={item.longDescription}>{item.shortDescription}</p>
+                        <div className="showcase-footer">
+                          <code>{item.fullname}</code>
+                          <a
+                            href={item.mpkUrl}
+                            download
+                            aria-label={tr(`下载 ${item.name} MPK`, `Download ${item.name} MPK`)}
+                          >
+                            {tr("下载 MPK", "Download MPK")}
+                          </a>
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <div className="showcase-state">
+                  <strong>{tr("没有匹配的样例", "No matching apps")}</strong>
+                  <span>{tr("换个关键词或类别试试。", "Try another keyword or category.")}</span>
+                </div>
+              )}
+            </>
+          )}
+        </section>
 
         <section className="card ecosystem-card" id="devices">
           <div className="section-heading">

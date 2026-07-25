@@ -1,0 +1,3 @@
+{"file":".trellis/spec/frontend/client/index.md","reason":"Verify frontend behavior and production build expectations"}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check catalog round trip from ZIP to production static serving"}
+{"file":".trellis/tasks/07-25-import-showcase-catalog/research/archive-and-delivery.md","reason":"Check exact 100-pair archive and non-execution safety constraints"}
