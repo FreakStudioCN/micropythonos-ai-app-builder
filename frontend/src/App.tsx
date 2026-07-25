@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   API_BASE_URL,
   GENERATION_TIMEOUT_MS,
@@ -8,6 +8,7 @@ import { WebSerialDeviceClient, type DeviceConnectionState } from "./deviceSeria
 
 type Status = "idle" | "created" | "running" | "waiting_preview" | "waiting_device" | "completed" | "failed" | "blocked" | "cancelled" | "timeout";
 type Language = "zh" | "en";
+type AuthStatus = "loading" | "signed_out" | "signed_in";
 interface GeneratedFile {
   path: string;
   content: string;
@@ -80,9 +81,10 @@ interface SessionState {
 type SessionSummary = Omit<SessionState, "generation"> & { generation?: GenerationResult | null };
 interface BillingAccount {
   user_id: string;
+  username: string;
   credits: number;
-  plan: "free" | "go" | "plus" | "pro";
-  subscription_status: string;
+  generations_remaining: number;
+  generation_limit: number;
   generation_cost: number;
   initial_credits: number;
 }
@@ -118,6 +120,10 @@ const defaultPrompt = "做一个极简四则运算计算器，按钮要大，适
 const defaultPromptEn = "Build a minimal four-function calculator with large touch-friendly buttons";
 const wasmRuntimeUrl = WASM_RUNTIME_URL;
 const apiUrl = API_BASE_URL;
+const apiFetch = (input: RequestInfo | URL, init: RequestInit = {}) => fetch(
+  input,
+  { ...init, credentials: "include" },
+);
 const stages = [
   ["analysis", "需求分析"],
   ["generation", "DeepSeek 生成代码"],
@@ -153,47 +159,6 @@ const verifiedBoards = [
   ["unPhone", "unPhone 9", "ESP32-S3", "触摸屏", "移动创作"],
   ["Waveshare", "ESP32-S3-Touch-LCD-2", "ESP32-S3", "2\" 触摸屏", "新手与展示"],
 ] as const;
-const subscriptionPlans = [
-  {
-    id: "go",
-    name: "Go",
-    price: 19,
-    credits: 100,
-    generations: 10,
-    featured: false,
-    benefitsZh: ["每月 100 点", "最多生成 10 次", "Web 预览与 MPK 打包"],
-    benefitsEn: ["100 credits/month", "Up to 10 generations", "Web preview and MPK packaging"],
-  },
-  {
-    id: "plus",
-    name: "Plus",
-    price: 49,
-    credits: 300,
-    generations: 30,
-    featured: true,
-    benefitsZh: ["每月 300 点", "最多生成 30 次", "优先生成与连续修改", "ESP32 真机部署"],
-    benefitsEn: ["300 credits/month", "Up to 30 generations", "Priority generation and revisions", "ESP32 deployment"],
-  },
-  {
-    id: "pro",
-    name: "Pro",
-    price: 129,
-    credits: 1000,
-    generations: 100,
-    featured: false,
-    benefitsZh: ["每月 1000 点", "最多生成 100 次", "最高优先级", "真机部署与发布检查"],
-    benefitsEn: ["1,000 credits/month", "Up to 100 generations", "Highest priority", "Device deployment and publish checks"],
-  },
-] as const;
-type SubscriptionPlan = (typeof subscriptionPlans)[number];
-const getBillingUserId = () => {
-  const saved = localStorage.getItem("mpos-billing-user-id");
-  if (saved) return saved;
-  const created = `browser-${crypto.randomUUID()}`;
-  localStorage.setItem("mpos-billing-user-id", created);
-  return created;
-};
-
 export default function App() {
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem("mpos-language") === "en" ? "en" : "zh");
   const isZh = language === "zh";
@@ -259,13 +224,13 @@ export default function App() {
   const [deviceError, setDeviceError] = useState("");
   const [screenshotBusy, setScreenshotBusy] = useState(false);
   const [continuing, setContinuing] = useState(false);
-  const [billingUserId] = useState(getBillingUserId);
   const [billingAccount, setBillingAccount] = useState<BillingAccount | null>(null);
-  const [subscriptionOpen, setSubscriptionOpen] = useState(false);
-  const [selectedPlan, setSelectedPlan] = useState<SubscriptionPlan | null>(null);
-  const [subscriptionUsername, setSubscriptionUsername] = useState(
-    () => localStorage.getItem("blockless-subscription-username") || "",
-  );
+  const [authStatus, setAuthStatus] = useState<AuthStatus>("loading");
+  const [authMode, setAuthMode] = useState<"login" | "register">("login");
+  const [authUsername, setAuthUsername] = useState("");
+  const [authPassword, setAuthPassword] = useState("");
+  const [authBusy, setAuthBusy] = useState(false);
+  const [authError, setAuthError] = useState("");
   const [requirementOpen, setRequirementOpen] = useState(false);
   const [requirementMessages, setRequirementMessages] = useState<RequirementMessage[]>([]);
   const [requirementInput, setRequirementInput] = useState("");
@@ -324,29 +289,95 @@ export default function App() {
     const timer = window.setTimeout(() => setToast(""), 2200);
     return () => window.clearTimeout(timer);
   }, [toast]);
-  const refreshHistory = () => {
-    void fetch(`${apiUrl}/api/sessions`)
-      .then((response) => response.ok ? response.json() as Promise<SessionSummary[]> : [])
-      .then(setHistory)
-      .catch(() => setHistory([]));
+  const refreshHistory = async () => {
+    try {
+      const response = await apiFetch(`${apiUrl}/api/sessions`);
+      setHistory(response.ok ? await response.json() as SessionSummary[] : []);
+    } catch {
+      setHistory([]);
+    }
   };
   const refreshBilling = async () => {
-    const response = await fetch(
-      `${apiUrl}/api/billing/account?user_id=${encodeURIComponent(billingUserId)}`,
-    );
+    const response = await apiFetch(`${apiUrl}/api/billing/account`);
     if (!response.ok) throw new Error("billing unavailable");
     const account = await response.json() as BillingAccount;
     setBillingAccount(account);
     return account;
   };
+  const refreshCapabilities = async () => {
+    const response = await apiFetch(`${apiUrl}/api/capabilities`);
+    const payload = response.ok ? await response.json() : null;
+    setDesktopAvailable(Boolean(payload?.capabilities?.desktop_preview));
+  };
+  const loadWorkspace = async () => {
+    await Promise.all([refreshHistory(), refreshCapabilities()]);
+  };
   useEffect(() => {
-    refreshHistory();
-    void refreshBilling().catch(() => setBillingAccount(null));
-    void fetch(`${apiUrl}/api/capabilities`)
-      .then((response) => response.ok ? response.json() : null)
-      .then((payload) => setDesktopAvailable(Boolean(payload?.capabilities?.desktop_preview)))
-      .catch(() => setDesktopAvailable(false));
+    const initialize = async () => {
+      try {
+        const response = await apiFetch(`${apiUrl}/api/user`);
+        if (response.status === 401) {
+          setAuthStatus("signed_out");
+          return;
+        }
+        if (!response.ok) throw new Error("authentication unavailable");
+        setBillingAccount(await response.json() as BillingAccount);
+        setAuthStatus("signed_in");
+        await loadWorkspace();
+      } catch {
+        setBillingAccount(null);
+        setHistory([]);
+        setDesktopAvailable(false);
+        setAuthError(tr("无法连接内测服务，请稍后重试", "Could not reach the beta service. Try again shortly."));
+        setAuthStatus("signed_out");
+      }
+    };
+    void initialize();
   }, []);
+
+  const submitAuth = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (authBusy) return;
+    setAuthBusy(true);
+    setAuthError("");
+    try {
+      const response = await apiFetch(`${apiUrl}/api/auth/${authMode}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ username: authUsername, password: authPassword }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        throw new Error(
+          typeof payload.detail === "string"
+            ? payload.detail
+            : tr("账号操作失败", "Account request failed"),
+        );
+      }
+      setBillingAccount(payload as BillingAccount);
+      setAuthPassword("");
+      setAuthStatus("signed_in");
+      await loadWorkspace();
+    } catch (error) {
+      setAuthError(error instanceof Error ? error.message : tr("账号操作失败", "Account request failed"));
+    } finally {
+      setAuthBusy(false);
+    }
+  };
+
+  const logout = async () => {
+    await apiFetch(`${apiUrl}/api/auth/logout`, { method: "POST" }).catch(() => undefined);
+    requestAbort.current?.abort();
+    eventStream.current?.close();
+    localStorage.removeItem("mpos-session-id");
+    setBillingAccount(null);
+    setSessionState(null);
+    setHistory([]);
+    setResult(null);
+    setStatus("idle");
+    setAuthPassword("");
+    setAuthStatus("signed_out");
+  };
 
   const applySession = (session: SessionState) => {
     localStorage.setItem("mpos-session-id", session.session_id);
@@ -377,7 +408,7 @@ export default function App() {
     setErrorMessage(session.last_error?.message || "");
   };
   const restoreSession = async (sessionId: string) => {
-    const response = await fetch(`${apiUrl}/api/sessions/${sessionId}`);
+    const response = await apiFetch(`${apiUrl}/api/sessions/${sessionId}`);
     if (!response.ok) {
       setToast(tr("会话恢复失败", "Could not restore session"));
       return;
@@ -388,9 +419,10 @@ export default function App() {
     setToast(tr("历史会话已恢复", "Session restored"));
   };
   useEffect(() => {
+    if (authStatus !== "signed_in") return;
     const savedSession = localStorage.getItem("mpos-session-id");
     if (!savedSession) return;
-    void fetch(`${apiUrl}/api/sessions/${savedSession}`)
+    void apiFetch(`${apiUrl}/api/sessions/${savedSession}`)
       .then(async (response) => {
         if (!response.ok) throw new Error("session unavailable");
         return response.json() as Promise<SessionState>;
@@ -408,12 +440,15 @@ export default function App() {
         setLogs((items) => [...items, liveText(`[resume] 已恢复会话 ${session.session_id}（${session.checkpoint_id}）`, `[resume] Restored ${session.session_id} at ${session.checkpoint_id}`)]);
       })
       .catch(() => localStorage.removeItem("mpos-session-id"));
-  }, []);
+  }, [authStatus]);
 
   const openEventStream = (sessionId: string) => {
     eventStream.current?.close();
     const cursor = eventCursors.current[sessionId] || 0;
-    const stream = new EventSource(`${apiUrl}/api/sessions/${sessionId}/events?after=${cursor}`);
+    const stream = new EventSource(
+      `${apiUrl}/api/sessions/${sessionId}/events?after=${cursor}`,
+      { withCredentials: true },
+    );
     const appendEvent = (event: MessageEvent) => {
       const item = JSON.parse(event.data) as {
         seq?: number;
@@ -460,7 +495,7 @@ export default function App() {
         setLogs((items) => [...items, liveText("[preview] App 已在 MicroPythonOS WASM 中启动 ✓", "[preview] App started in MicroPythonOS WASM ✓")]);
         const savedSession = localStorage.getItem("mpos-session-id");
         if (savedSession) {
-          void fetch(`${apiUrl}/api/sessions/${savedSession}/actions/preview-result`, {
+          void apiFetch(`${apiUrl}/api/sessions/${savedSession}/actions/preview-result`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -486,7 +521,7 @@ export default function App() {
         setLogs((items) => [...items, `[preview] ${detail}`]);
         const savedSession = localStorage.getItem("mpos-session-id");
         if (savedSession) {
-          void fetch(`${apiUrl}/api/sessions/${savedSession}/actions/preview-result`, {
+          void apiFetch(`${apiUrl}/api/sessions/${savedSession}/actions/preview-result`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -528,7 +563,7 @@ export default function App() {
       setLogs((items) => [...items, `[preview] ${detail}`]);
       const savedSession = localStorage.getItem("mpos-session-id");
       if (savedSession) {
-        void fetch(`${apiUrl}/api/sessions/${savedSession}/actions/preview-result`, {
+        void apiFetch(`${apiUrl}/api/sessions/${savedSession}/actions/preview-result`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -597,7 +632,7 @@ export default function App() {
           physicalTarget ? "physical-device" : "",
           packageTarget ? "package-only" : "",
         ].filter(Boolean);
-        const createResponse = await fetch(`${apiUrl}/api/sessions`, {
+        const createResponse = await apiFetch(`${apiUrl}/api/sessions`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -646,7 +681,7 @@ export default function App() {
           return;
         }
       } else if (continuing && !repair) {
-        const revisionResponse = await fetch(`${apiUrl}/api/sessions/${sessionId}/revisions`, {
+        const revisionResponse = await apiFetch(`${apiUrl}/api/sessions/${sessionId}/revisions`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -662,12 +697,9 @@ export default function App() {
         setContinuing(false);
       }
       openEventStream(sessionId);
-      const actionResponse = await fetch(`${apiUrl}/api/sessions/${sessionId}/${repair ? "retry" : "actions/run"}`, {
+      const actionResponse = await apiFetch(`${apiUrl}/api/sessions/${sessionId}/${repair ? "retry" : "actions/run"}`, {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-MPOS-User-ID": billingUserId,
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           idempotency_key: `${repair ? "repair" : "generate"}-${crypto.randomUUID()}`,
           previous_code: repair?.previousCode,
@@ -691,7 +723,7 @@ export default function App() {
       let session = await actionResponse.json() as SessionState;
       while (!["waiting_preview", "waiting_device", "completed", "failed", "blocked", "cancelled", "timeout"].includes(session.status)) {
         await new Promise((resolve) => window.setTimeout(resolve, 700));
-        const poll = await fetch(`${apiUrl}/api/sessions/${sessionId}`, { signal: controller.signal });
+        const poll = await apiFetch(`${apiUrl}/api/sessions/${sessionId}`, { signal: controller.signal });
         if (!poll.ok) throw new Error(tr("读取会话状态失败", "Could not read session state"));
         session = await poll.json() as SessionState;
         setSessionState(session);
@@ -758,7 +790,7 @@ export default function App() {
     if (permissionBusy || permission.decision !== "pending") return;
     setPermissionBusy(permission.permission_id);
     try {
-      const response = await fetch(`${apiUrl}/api/permissions/${permission.permission_id}/decision`, {
+      const response = await apiFetch(`${apiUrl}/api/permissions/${permission.permission_id}/decision`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -841,7 +873,7 @@ export default function App() {
     setToast(tr("任务已停止，可以重新生成", "Task stopped. You can generate again."));
     const savedSession = localStorage.getItem("mpos-session-id");
     if (savedSession) {
-      void fetch(`${apiUrl}/api/sessions/${savedSession}/cancel`, {
+      void apiFetch(`${apiUrl}/api/sessions/${savedSession}/cancel`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ idempotency_key: `cancel-${crypto.randomUUID()}` }),
@@ -865,12 +897,20 @@ export default function App() {
     setToast(tr(`已下载 ${filename}`, `Downloaded ${filename}`));
   };
 
-  const downloadArtifact = (artifact: Artifact) => {
-    const anchor = document.createElement("a");
-    anchor.href = `${apiUrl}/api/artifacts/${artifact.id}`;
-    anchor.download = artifact.display_name;
-    anchor.click();
-    setToast(tr(`已下载 ${artifact.display_name}`, `Downloaded ${artifact.display_name}`));
+  const downloadArtifact = async (artifact: Artifact) => {
+    try {
+      const response = await apiFetch(`${apiUrl}/api/artifacts/${artifact.id}`);
+      if (!response.ok) throw new Error(tr("无权下载该产物", "Artifact download is unavailable"));
+      const url = URL.createObjectURL(await response.blob());
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = artifact.display_name;
+      anchor.click();
+      URL.revokeObjectURL(url);
+      setToast(tr(`已下载 ${artifact.display_name}`, `Downloaded ${artifact.display_name}`));
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : tr("下载失败", "Download failed"));
+    }
   };
 
   const uploadScreenshot = async (file: File) => {
@@ -895,7 +935,7 @@ export default function App() {
         reader.onerror = () => reject(reader.error || new Error("File read failed"));
         reader.readAsDataURL(file);
       });
-      const response = await fetch(`${apiUrl}/api/sessions/${sessionId}/screenshots`, {
+      const response = await apiFetch(`${apiUrl}/api/sessions/${sessionId}/screenshots`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -990,7 +1030,7 @@ export default function App() {
     const sessionId = localStorage.getItem("mpos-session-id");
     if (!sessionId) return;
     try {
-      const response = await fetch(`${apiUrl}/api/sessions/${sessionId}/devices/result`, {
+      const response = await apiFetch(`${apiUrl}/api/sessions/${sessionId}/devices/result`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1262,20 +1302,89 @@ export default function App() {
     setToast(tr("已把 AI 整理的完整需求填入输入框", "The refined requirement was added to the prompt"));
   };
 
+  if (authStatus !== "signed_in") {
+    return (
+      <div className="auth-page">
+        <button
+          className="language-button auth-language"
+          onClick={() => setLanguage(isZh ? "en" : "zh")}
+        >{isZh ? "English" : "中文"}</button>
+        <section className="auth-card">
+          <div className="auth-brand"><span>BM</span><div><strong>Blockless-Make-APP</strong><small>MicroPythonOS AI Builder</small></div></div>
+          {authStatus === "loading" ? (
+            <div className="auth-loading">{tr("正在连接内测服务…", "Connecting to the beta service…")}</div>
+          ) : (
+            <>
+              <div className="auth-heading">
+                <span>{tr("正式内测", "PRIVATE BETA")}</span>
+                <h1>{authMode === "login" ? tr("欢迎回来", "Welcome back") : tr("创建内测账号", "Create your beta account")}</h1>
+                <p>{authMode === "login"
+                  ? tr("登录后继续查看自己的项目和剩余点数。", "Sign in to restore your projects and credits.")
+                  : tr("每个账号获得 50 个免费内测点数，可生成约 5 个版本。", "Each account receives 50 beta credits, enough for about 5 revisions.")}</p>
+              </div>
+              <form className="auth-form" onSubmit={submitAuth}>
+                <label htmlFor="auth-username">{tr("用户名", "Username")}</label>
+                <input
+                  id="auth-username"
+                  value={authUsername}
+                  onChange={(event) => setAuthUsername(event.target.value)}
+                  minLength={3}
+                  maxLength={32}
+                  autoComplete="username"
+                  required
+                  autoFocus
+                />
+                <label htmlFor="auth-password">{tr("密码", "Password")}</label>
+                <input
+                  id="auth-password"
+                  type="password"
+                  value={authPassword}
+                  onChange={(event) => setAuthPassword(event.target.value)}
+                  minLength={8}
+                  maxLength={128}
+                  autoComplete={authMode === "login" ? "current-password" : "new-password"}
+                  required
+                />
+                {authError && <div className="auth-error">{authError}</div>}
+                <button className="main-button auth-submit" type="submit" disabled={authBusy}>
+                  {authBusy
+                    ? tr("请稍候…", "Please wait…")
+                    : authMode === "login" ? tr("登录", "Sign in") : tr("注册并进入", "Create account")}
+                </button>
+              </form>
+              <button
+                className="auth-switch"
+                onClick={() => {
+                  setAuthMode(authMode === "login" ? "register" : "login");
+                  setAuthError("");
+                }}
+              >{authMode === "login"
+                ? tr("没有账号？免费注册", "No account? Register free")
+                : tr("已经有账号？返回登录", "Already registered? Sign in")}</button>
+              <small className="auth-notice">{tr(
+                "当前版本不收费、不充值、不自动订阅。密码只以安全哈希保存在后端数据库。",
+                "No payments, top-ups, or automatic subscriptions. Passwords are stored only as secure hashes.",
+              )}</small>
+            </>
+          )}
+        </section>
+      </div>
+    );
+  }
+
   return (
     <div className="page">
       <header>
         <div className="brand"><span>BM</span><div><strong>Blockless-Make-APP</strong><small>{tr("MicroPythonOS AI App 生成与分发平台", "MicroPythonOS AI app creation and distribution")}</small></div></div>
         <div className="header-actions">
-          <button className="credits-button" onClick={() => { setSelectedPlan(null); setSubscriptionOpen(true); }}>
+          <span className="user-chip">{billingAccount?.username}</span>
+          <button className="credits-button" onClick={() => setToast(tr("当前为免费内测点数，不提供在线充值", "Free beta credits; online payments are not enabled."))}>
             <span>◆</span>{billingAccount?.credits ?? 50} {tr("点", "credits")}
-          </button>
-          <button className="subscription-button" onClick={() => { setSelectedPlan(null); setSubscriptionOpen(true); }}>
-            {tr("订阅", "Subscribe")}
           </button>
           <button className="language-button" onClick={() => setLanguage(isZh ? "en" : "zh")} aria-label={tr("切换为英文", "Switch to Chinese")}>
             {isZh ? "English" : "中文"}
           </button>
+          <button className="logout-button" onClick={() => void logout()}>{tr("退出", "Sign out")}</button>
           <div className={`run-state ${status}`}><i />{status === "running" ? tr("生成中", "Generating") : status === "waiting_device" ? tr("等待设备安装", "Waiting for device") : status === "blocked" ? tr("等待授权", "Permission required") : status === "cancelled" ? tr("已取消", "Cancelled") : status === "timeout" ? tr("已超时", "Timed out") : status === "failed" ? tr("生成失败", "Failed") : status === "completed" ? tr("已完成", "Completed") : tr("系统就绪", "Ready")}</div>
         </div>
       </header>
@@ -1508,7 +1617,7 @@ export default function App() {
             result
               ? <div className="artifacts">
                   {sessionState?.artifacts.length
-                    ? <ul>{sessionState.artifacts.map((artifact) => <li key={artifact.id}><span>▣　{artifact.path}<small>{artifact.role} · {artifact.kind} · {Math.ceil(artifact.size / 1024)} KB</small><small>{artifact.mime} · {artifact.phase}</small><code title={artifact.sha256}>sha256: {artifact.sha256.slice(0, 16)}…</code></span><button onClick={() => downloadArtifact(artifact)}>{tr("下载", "Download")}</button></li>)}</ul>
+                    ? <ul>{sessionState.artifacts.map((artifact) => <li key={artifact.id}><span>▣　{artifact.path}<small>{artifact.role} · {artifact.kind} · {Math.ceil(artifact.size / 1024)} KB</small><small>{artifact.mime} · {artifact.phase}</small><code title={artifact.sha256}>sha256: {artifact.sha256.slice(0, 16)}…</code></span><button onClick={() => void downloadArtifact(artifact)}>{tr("下载", "Download")}</button></li>)}</ul>
                     : <ul>{result.files.map((file) => <li key={file.path}><span>▣　{file.path}</span><button onClick={() => download(file.path, file.content)}>{tr("下载", "Download")}</button></li>)}</ul>}
                   <div className="mpk"><div><strong>{result.mpk_filename}</strong><small>{tr("包含真实 MANIFEST.JSON 和 assets/main.py，文件名符合 _rN 发布规则", "Contains MANIFEST.JSON and assets/main.py with the required _rN release name")}</small></div><button onClick={downloadMpk}>{tr("下载真实 .mpk", "Download .mpk")}</button></div>
                   <div className="publish-guide">
@@ -1535,87 +1644,6 @@ export default function App() {
           )}
         </section>
       </main>
-
-      {subscriptionOpen && <div className="modal-backdrop"><div className="modal subscription-modal">
-        <button className="modal-close" aria-label={tr("关闭", "Close")} onClick={() => { setSubscriptionOpen(false); setSelectedPlan(null); }}>×</button>
-        {!selectedPlan
-          ? <>
-              <h2>{tr("选择订阅套餐", "Choose a subscription")}</h2>
-              <p>{tr("每次生成消耗 10 点。选择套餐后，扫码进群联系群主人工开通。", "Each generation costs 10 credits. Choose a plan, then join the group and contact the owner for manual activation.")}</p>
-              <div className="plan-grid">
-                {subscriptionPlans.map((plan) => (
-                  <article className={`plan-card ${plan.featured ? "featured" : ""}`} key={plan.id}>
-                    {plan.featured && <span className="popular-badge">{tr("推荐", "Popular")}</span>}
-                    <h3>{plan.name}</h3>
-                    <div className="plan-price"><strong>¥{plan.price}</strong><span>{tr("/ 月", "/ month")}</span></div>
-                    <div className="plan-credits">{plan.credits} {tr("点", "credits")} · {plan.generations} {tr("次生成", "generations")}</div>
-                    <ul>{(isZh ? plan.benefitsZh : plan.benefitsEn).map((benefit) => <li key={benefit}>✓ {benefit}</li>)}</ul>
-                    <button className={plan.featured ? "main-button" : "secondary-button"} onClick={() => setSelectedPlan(plan)}>{tr(`选择 ${plan.name}`, `Choose ${plan.name}`)}</button>
-                  </article>
-                ))}
-              </div>
-              <small>{tr("当前采用人工收款和人工开通。用户付款后不会自动到账，必须由群主确认。", "Payments and activation are handled manually. Credits are added only after the group owner confirms payment.")}</small>
-            </>
-          : <div className="manual-checkout">
-              <div className="checkout-heading">
-                <button className="secondary-button" onClick={() => setSelectedPlan(null)}>← {tr("返回套餐", "Back to plans")}</button>
-                <div><span>{tr("当前选择", "Selected plan")}</span><strong>{selectedPlan.name} · ¥{selectedPlan.price}{tr("/月", "/month")}</strong></div>
-              </div>
-              <div className="checkout-layout">
-                <div className="group-qr">
-                  <img src="/subscription/blockless-ai-group.webp" alt={tr("Blockless AI 硬件交流群二维码", "Blockless AI hardware group QR code")} />
-                  <strong>{tr("微信扫码加入 Blockless AI 硬件交流群", "Scan with WeChat to join the Blockless AI hardware group")}</strong>
-                  <small>{tr("群二维码会定期更新；如已失效，请联系工作人员获取新二维码。", "The group QR code is updated periodically. Contact the team if it has expired.")}</small>
-                </div>
-                <div className="checkout-instructions">
-                  <h3>{tr("人工开通步骤", "Manual activation steps")}</h3>
-                  <ol>
-                    <li>{tr("使用微信扫描左侧二维码并加入群聊。", "Scan the QR code with WeChat and join the group.")}</li>
-                    <li>{tr(`向群主说明购买 ${selectedPlan.name} 套餐，并支付 ¥${selectedPlan.price}。`, `Tell the group owner you want the ${selectedPlan.name} plan and pay ¥${selectedPlan.price}.`)}</li>
-                    <li>{tr("填写用户名，并把付款信息完整发送给群主。", "Enter your username and send the complete payment information to the group owner.")}</li>
-                    <li>{tr("群主确认收款后人工开通服务并增加点数。", "The group owner confirms payment, activates the plan, and adds credits.")}</li>
-                  </ol>
-                  <label htmlFor="subscription-username">{tr("你的用户名（必填）", "Your username (required)")}</label>
-                  <input
-                    id="subscription-username"
-                    value={subscriptionUsername}
-                    placeholder={tr("填写你在群里使用的用户名", "Enter the username you will use in the group")}
-                    onChange={(event) => {
-                      const nextUsername = event.target.value;
-                      setSubscriptionUsername(nextUsername);
-                      localStorage.setItem("blockless-subscription-username", nextUsername);
-                    }}
-                  />
-                  <label>{tr("你的账户标识", "Your account ID")}</label>
-                  <div className="account-id-row">
-                    <code>{billingUserId}</code>
-                    <button
-                      className="secondary-button"
-                      onClick={() => {
-                        const username = subscriptionUsername.trim();
-                        if (!username) {
-                          setToast(tr("请先填写用户名", "Please enter your username first"));
-                          return;
-                        }
-                        const paymentMessage = tr(
-                          `订阅套餐：${selectedPlan.name}\n支付金额：¥${selectedPlan.price}\n用户名：${username}\n账户标识：${billingUserId}`,
-                          `Plan: ${selectedPlan.name}\nAmount: ¥${selectedPlan.price}\nUsername: ${username}\nAccount ID: ${billingUserId}`,
-                        );
-                        void navigator.clipboard.writeText(paymentMessage);
-                        setToast(tr("付款信息已复制，请发送给群主", "Payment information copied. Send it to the group owner."));
-                      }}
-                    >
-                      {tr("复制付款信息", "Copy payment info")}
-                    </button>
-                  </div>
-                  <div className="payment-warning"><strong>{tr("请注意", "Important")}</strong><span>{tr("不要只发送付款截图，一定要同时发送用户名和账户标识。只有群主确认后点数才会到账。", "Send your username and account ID together with payment information. Credits are added only after the group owner confirms payment.")}</span></div>
-                </div>
-              </div>
-              <div className="checkout-actions">
-                <button className="main-button" onClick={() => { setSubscriptionOpen(false); setSelectedPlan(null); }}>{tr("我已了解", "Got it")}</button>
-              </div>
-            </div>}
-      </div></div>}
 
       {requirementOpen && <div className="modal-backdrop"><div className="modal requirement-modal">
         <section className="requirement-modal-title">

@@ -31,6 +31,10 @@ API 文档：`http://localhost:8000/docs`
 ## Session API
 
 - `GET /api/capabilities`
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `POST /api/auth/logout`
+- `GET /api/user`
 - `GET /api/billing/account`
 - `POST /api/sessions`
 - `GET /api/sessions/{session_id}`
@@ -51,8 +55,16 @@ API 文档：`http://localhost:8000/docs`
 - `GET /api/sessions/{session_id}/artifacts`
 - `GET /api/artifacts/{artifact_id}`
 
-运行状态会持久化到被 Git 忽略的 `backend/sessions/`。API key 仍只放在
+本地运行状态持久化到被 Git 忽略的 `backend/sessions/`，账号和点数默认存入
+`backend/sessions/app.db`。云端使用 `DATABASE_URL` 连接 PostgreSQL，并通过
+`MPOS_STORAGE_*` 把 session 和 artifact 同步到 S3-compatible 私有对象存储。
+API key 和数据库/对象存储凭据仍只放在环境变量或未纳入 Git 的
 `backend/.env`。
+
+内测用户通过用户名和密码登录，后端签发 `mpos_session` HttpOnly Cookie。
+session、artifact、permission 和 billing 都按数据库用户 UUID 隔离；客户端传入
+的用户 ID 不会被采信。HTTPS 部署设置 `MPOS_COOKIE_SECURE=true`。每个新账号初始
+获得 50 点，每个新 revision 消耗 10 点，最多免费生成 5 次；没有充值或购买入口。
 
 生成前会完整读取 `vendor/MicroPython_Skills/mpos-dev/reference/` 下的
 `lvgl_api_summary.json` 和 `mpos_api_summary.json`，并把实际计划调用写入

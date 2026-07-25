@@ -32,6 +32,7 @@ from .models import (
     SessionActionRequest,
     SessionCreateRequest,
 )
+from .object_storage import session_object_store
 from .runner_services import (
     STAGE_SKILLS,
     api_summary_version,
@@ -184,13 +185,19 @@ class SessionNotFound(KeyError):
 
 
 class SessionService:
-    def __init__(self) -> None:
+    def __init__(self, object_store: Any | None = None) -> None:
         SESSION_ROOT.mkdir(parents=True, exist_ok=True)
+        self._object_store = object_store or session_object_store
+        self._object_store.restore_all(SESSION_ROOT)
         self._tasks: dict[str, asyncio.Task[None]] = {}
         self._locks: dict[str, asyncio.Lock] = {}
         self._action_by_session: dict[str, str] = {}
         self._event_cache = EventLogCache()
         self._index = SessionIndex(SESSION_ROOT)
+
+    @property
+    def object_storage_enabled(self) -> bool:
+        return bool(self._object_store.enabled)
 
     def capabilities(self) -> dict[str, Any]:
         desktop_capability = script_dispatcher.desktop_smoke_capability()
@@ -247,7 +254,27 @@ class SessionService:
     def get(self, session_id: str) -> dict[str, Any]:
         return self._read(session_id)
 
-    def list_sessions(self) -> list[dict[str, Any]]:
+    def require_owner(self, session_id: str, user_id: str) -> dict[str, Any]:
+        state = self._read(session_id)
+        if state.get("owner_user_id") != user_id:
+            raise SessionNotFound(session_id)
+        return state
+
+    def require_artifact_owner(self, artifact_id: str, user_id: str) -> None:
+        if not ARTIFACT_ID_RE.fullmatch(artifact_id):
+            raise SessionNotFound(artifact_id)
+        session_id = self._index.session_for_artifact(artifact_id)
+        if not session_id:
+            raise SessionNotFound(artifact_id)
+        self.require_owner(session_id, user_id)
+
+    def require_permission_owner(self, permission_id: str, user_id: str) -> None:
+        session_id = self._index.session_for_permission(permission_id)
+        if not session_id:
+            raise SessionNotFound(permission_id)
+        self.require_owner(session_id, user_id)
+
+    def list_sessions(self, user_id: str | None = None) -> list[dict[str, Any]]:
         sessions: list[dict[str, Any]] = []
         for path in sorted(
             SESSION_ROOT.glob("sess_*/session_state.json"),
@@ -256,6 +283,8 @@ class SessionService:
         ):
             try:
                 item = _json_load(path)
+                if user_id is not None and item.get("owner_user_id") != user_id:
+                    continue
                 item.pop("generation", None)
                 sessions.append(item)
             except (OSError, json.JSONDecodeError):
@@ -401,7 +430,11 @@ class SessionService:
         artifact = next(item for item in state["artifacts"] if item["role"] == role)
         return bundle, artifact
 
-    def create_demo(self, request: DemoSessionRequest) -> dict[str, Any]:
+    def create_demo(
+        self,
+        request: DemoSessionRequest,
+        user_id: str = "local-test-user",
+    ) -> dict[str, Any]:
         seed = DEMO_SEEDS[request.seed]
         state = self.create(
             SessionCreateRequest(
@@ -433,7 +466,8 @@ class SessionService:
                 publisher="MicroPythonOS",
                 version="1.0.0",
                 targets=["web-preview", "package-only"],
-            )
+            ),
+            user_id=user_id,
         )
         if state.get("demo_seed") == request.seed:
             return state
@@ -648,6 +682,7 @@ class GeneratedApp(Activity):
         state["updated_at"] = _now()
         _json_dump(self._state_path(state["session_id"]), state)
         self._index.register_state(state)
+        self._object_store.sync_session(SESSION_ROOT, state["session_id"])
 
     def _event(
         self,
@@ -670,9 +705,18 @@ class GeneratedApp(Activity):
             "payload": payload,
         }
         self._event_cache.append(state["session_id"], log_path, event)
+        self._object_store.sync_path(
+            SESSION_ROOT,
+            state["session_id"],
+            log_path,
+        )
 
-    def create(self, request: SessionCreateRequest) -> dict[str, Any]:
-        for existing in self.list_sessions():
+    def create(
+        self,
+        request: SessionCreateRequest,
+        user_id: str = "local-test-user",
+    ) -> dict[str, Any]:
+        for existing in self.list_sessions(user_id):
             if (
                 existing.get("create_idempotency_key") == request.idempotency_key
                 and existing.get("input", {}).get("prompt_original") == request.prompt
@@ -696,6 +740,7 @@ class GeneratedApp(Activity):
             "schema_version": "mpos-ai-app-session-v1",
             "protocol_version": PROTOCOL_VERSION,
             "session_id": session_id,
+            "owner_user_id": user_id,
             "revision_id": "r1",
             "create_idempotency_key": request.idempotency_key,
             "status": "blocked",
