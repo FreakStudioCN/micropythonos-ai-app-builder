@@ -136,38 +136,6 @@ const stageIndexForError = (stage?: string) => {
   };
   return stage ? (indexByStage[stage] ?? 1) : 1;
 };
-const simulationProjects = [
-  {
-    seed: "countdown",
-    titleZh: "极简倒计时器",
-    titleEn: "Minimal Countdown",
-    sceneZh: "新手可玩",
-    sceneEn: "Beginner",
-    descriptionZh: "大按钮、开始暂停与重置，适合第一次体验和课堂练习。",
-    descriptionEn: "Large controls with start, pause, and reset for first-time makers.",
-    tags: ["Timer", "Touch", "r1"],
-  },
-  {
-    seed: "calendar",
-    titleZh: "触摸日历",
-    titleEn: "Touch Calendar",
-    sceneZh: "热门复刻",
-    sceneEn: "Popular remix",
-    descriptionZh: "月份切换、日期选择和返回今天，可直接在浏览器体验。",
-    descriptionEn: "Browse months, select dates, and jump back to today in the browser.",
-    tags: ["Calendar", "UI", "r1"],
-  },
-  {
-    seed: "device-dashboard",
-    titleZh: "设备状态面板",
-    titleEn: "Device Dashboard",
-    sceneZh: "STEM 课堂",
-    sceneEn: "STEM classroom",
-    descriptionZh: "展示 CPU、内存、存储、WiFi 和电量的仪表盘示例。",
-    descriptionEn: "A dashboard example for CPU, memory, storage, WiFi, and battery.",
-    tags: ["Dashboard", "STEM", "r1"],
-  },
-] as const;
 const verifiedBoards = [
   ["Freenove", "ESP32-S3 Display", "ESP32-S3", "触摸屏", "入门交互"],
   ["Fri3d Camp", "2024 Badge", "ESP32-S3", "徽章屏幕", "活动徽章"],
@@ -298,7 +266,6 @@ export default function App() {
   const [subscriptionUsername, setSubscriptionUsername] = useState(
     () => localStorage.getItem("blockless-subscription-username") || "",
   );
-  const [libraryBusy, setLibraryBusy] = useState("");
   const [requirementOpen, setRequirementOpen] = useState(false);
   const [requirementMessages, setRequirementMessages] = useState<RequirementMessage[]>([]);
   const [requirementInput, setRequirementInput] = useState("");
@@ -470,36 +437,6 @@ export default function App() {
     });
     eventStream.current = stream;
   };
-  const openLibraryProject = async (
-    seed: (typeof simulationProjects)[number]["seed"],
-    remix: boolean,
-  ) => {
-    setLibraryBusy(`${seed}:${remix ? "remix" : "run"}`);
-    try {
-      const response = await fetch(`${apiUrl}/api/demo/sessions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          idempotency_key: `library-${seed}-${crypto.randomUUID()}`,
-          seed,
-          ui_locale: isZh ? "zh-CN" : "en-US",
-        }),
-      });
-      if (!response.ok) throw new Error(tr("项目载入失败", "Could not load project"));
-      const session = await response.json() as SessionState;
-      applySession(session);
-      setContinuing(remix);
-      setActiveTab("preview");
-      refreshHistory();
-      window.setTimeout(() => document.getElementById(remix ? "builder" : "preview")?.scrollIntoView({ behavior: "smooth" }), 50);
-      setToast(remix ? tr("已载入项目，可以修改需求并生成新版本", "Project loaded. Edit the prompt to create a revision.") : tr("项目已在浏览器预览中打开", "Project opened in the browser preview."));
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : tr("项目载入失败", "Could not load project"));
-    } finally {
-      setLibraryBusy("");
-    }
-  };
-
   useEffect(() => {
     const receive = (event: MessageEvent) => {
       const message = event.data as { source?: string; type?: string; text?: string; message?: string };
@@ -1485,38 +1422,6 @@ export default function App() {
           <div><h2>{tr("历史会话", "Session history")}</h2><span>{tr("刷新页面或关闭浏览器后仍可恢复", "Restore work after refresh or closing the browser")}</span></div>
           <div className="history-list">{history.slice(0, 5).map((item) => <button key={item.session_id} onClick={() => void restoreSession(item.session_id)}><strong>{item.input.display_name}</strong><span>{item.revision_id} · {item.status} · {item.checkpoint_id}</span><small>{item.input.prompt_original}</small></button>)}</div>
         </section>}
-
-        <section className="card library-card" id="library">
-          <div className="section-heading">
-            <div><span>{tr("无需设备也能体验", "Try without hardware")}</span><h2>{tr("仿真项目库", "Simulation Project Library")}</h2></div>
-            <p>{tr("先运行、再复刻；有设备时继续安装到 MicroPythonOS。", "Run or remix first, then deploy to MicroPythonOS when you have a device.")}</p>
-          </div>
-          <div className="project-grid">
-            {simulationProjects.map((project) => (
-              <article className="project-card" key={project.seed}>
-                <div className={`project-cover cover-${project.seed}`}><span>{isZh ? project.sceneZh : project.sceneEn}</span><b>{isZh ? project.titleZh : project.titleEn}</b></div>
-                <div className="project-body">
-                  <small>{isZh ? project.sceneZh : project.sceneEn} · Blockless Studio</small>
-                  <h3>{isZh ? project.titleZh : project.titleEn}</h3>
-                  <p>{isZh ? project.descriptionZh : project.descriptionEn}</p>
-                  <div className="project-tags">{project.tags.map((tag) => <span key={tag}>{tag}</span>)}</div>
-                  <div className="project-actions">
-                    <button
-                      className="main-button"
-                      disabled={Boolean(libraryBusy)}
-                      onClick={() => void openLibraryProject(project.seed, false)}
-                    >{libraryBusy === `${project.seed}:run` ? tr("载入中…", "Loading…") : tr("在浏览器运行", "Run in Browser")}</button>
-                    <button
-                      className="secondary-button"
-                      disabled={Boolean(libraryBusy)}
-                      onClick={() => void openLibraryProject(project.seed, true)}
-                    >{libraryBusy === `${project.seed}:remix` ? tr("载入中…", "Loading…") : tr("复刻 / 继续修改", "Remix")}</button>
-                  </div>
-                </div>
-              </article>
-            ))}
-          </div>
-        </section>
 
         <section className="card ecosystem-card" id="devices">
           <div className="section-heading">
