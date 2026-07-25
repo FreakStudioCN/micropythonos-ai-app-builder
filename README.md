@@ -4,8 +4,7 @@
 
 Blockless-Make-APP 是面向创客入门、科创教育和 STEM 课堂的 AI App
 生成与分发平台。用户在浏览器里描述想法，系统生成 MicroPythonOS App，
-支持预览、修改、打包、真机部署、uPyStore 发布准备，以及没有设备也能体验的
-仿真项目库。
+支持预览、修改、打包、真机部署和 uPyStore 发布准备。
 
 > Make, preview, deploy, and share MicroPythonOS apps from the browser.
 
@@ -27,7 +26,6 @@ Blockless-Make-APP 是面向创客入门、科创教育和 STEM 课堂的 AI App
 - 自然语言生成、WASM 预览、版本继续修改和真实 `.mpk` 打包。
 - WebSerial 连接 ESP32/ESP32-S3，安装并运行生成的 App。
 - uPyStore 发布校验、截图、材料 ZIP 和手工上传引导。
-- 仿真项目库：倒计时器、日历和设备状态面板，可运行或 Remix。
 - 硬件生态页：15 款真实适配板卡、Desktop 和 Web 目标。
 - Tuya / 涂鸦智能相关板卡只标为规划适配/概念演示。
 

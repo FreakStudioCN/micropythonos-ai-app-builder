@@ -19,7 +19,6 @@ npm run dev
 - MicroPythonOS WASM 可选预览；
 - 带相对路径、角色、大小、SHA-256、MIME 和阶段的 Artifact Browser；
 - 明确可见的系统安装、设备扫描和 uPyStore 发布检查入口。
-- 无设备可运行/复刻的仿真项目库；
 - 15 款真实适配板卡以及 Web/Desktop 目标展示。
 
 Web preview 只是兼容性预览，不等于真实硬件验证。当前后端未启用串口能力时，
