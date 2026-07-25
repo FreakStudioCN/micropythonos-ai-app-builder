@@ -42,6 +42,8 @@ interface DeviceClientOptions {
 const serialFromNavigator = () =>
   (navigator as Navigator & { serial?: BrowserSerial }).serial;
 
+const MPK_INSTALL_BUDGET_MS = 30_000;
+
 const encodeBase64 = (text: string) => {
   const bytes = new TextEncoder().encode(text);
   let binary = "";
@@ -259,6 +261,27 @@ export class WebSerialDeviceClient {
     }
   }
 
+  private async writeRawBeforeDeadline(
+    value: string | Uint8Array,
+    deadline: number,
+  ) {
+    const timeoutMs = this.remainingInstallTime(deadline, MPK_INSTALL_BUDGET_MS);
+    let timer = 0;
+    try {
+      await Promise.race([
+        this.writeRaw(value),
+        new Promise<never>((_, reject) => {
+          timer = window.setTimeout(
+            () => reject(new Error("MPK install exceeded the 30 second time limit")),
+            timeoutMs,
+          );
+        }),
+      ]);
+    } finally {
+      window.clearTimeout(timer);
+    }
+  }
+
   async sendLine(command: string) {
     await this.writeRaw(`${command}\r\n`);
   }
@@ -374,7 +397,7 @@ export class WebSerialDeviceClient {
     onProgress(0);
     for (let offset = 0; offset < bytes.length; offset += writeSize) {
       const end = Math.min(bytes.length, offset + writeSize);
-      await this.writeRaw(bytes.subarray(offset, end));
+      await this.writeRawBeforeDeadline(bytes.subarray(offset, end), deadline);
       onProgress(Math.round((end / bytes.length) * 100));
     }
     const output = await donePromise;
@@ -395,10 +418,10 @@ export class WebSerialDeviceClient {
     onProgress: (percent: number) => void,
   ) {
     const installStarted = performance.now();
-    const deadline = Date.now() + 115_000;
+    const deadline = Date.now() + MPK_INSTALL_BUDGET_MS;
     const bytes = decodeBase64(base64);
     this.logDiagnostic(
-      `install start: ${packageName}, ${(bytes.length / 1024).toFixed(1)} KiB, budget 115s`,
+      `install start: ${packageName}, ${(bytes.length / 1024).toFixed(1)} KiB, budget 30s`,
     );
     const memoryMarker = `__MPOS_MEMORY_${crypto.randomUUID().replace(/-/g, "")}__`;
     const memoryOutput = await this.execute([
@@ -409,47 +432,16 @@ export class WebSerialDeviceClient {
     const freeMemory = Number(
       memoryOutput.match(new RegExp(`${memoryMarker}\\s+(\\d+)`))?.[1],
     );
-    let canInstallFromRam = bytes.length <= 512 * 1024
+    const canInstallFromRam = bytes.length <= 512 * 1024
       && Number.isFinite(freeMemory)
       && freeMemory > bytes.length * 2 + 96 * 1024;
-    if (canInstallFromRam) {
-      try {
-        await this.execute([
-          "import gc",
-          `__mpos_probe = bytearray(${bytes.length})`,
-          "del __mpos_probe",
-          "gc.collect()",
-        ].join("\n"), this.remainingInstallTime(deadline, 15_000));
-      } catch {
-        canInstallFromRam = false;
-      }
-    }
-
-    // Low-memory boards use the official file installer. Native USB still
-    // uploads the MPK in large raw chunks, so this remains much faster than
-    // the old Base64-per-REPL-command path.
+    // Low-memory boards extract the incoming archive as a single stream. This
+    // avoids writing a temporary MPK and then reading the whole file again.
     if (!canInstallFromRam) {
-      const tempPath = `/tmp/${packageName}.mpk`;
-      this.logDiagnostic(`low-memory path: raw upload to ${tempPath}`);
-      const uploadStarted = performance.now();
-      await this.uploadBase64(
-        tempPath,
-        base64,
-        (percent) => onProgress(Math.round(percent * 0.7)),
-        deadline,
-      );
-      const uploadSeconds = Math.max(0.001, (performance.now() - uploadStarted) / 1000);
       this.logDiagnostic(
-        `upload complete: ${uploadSeconds.toFixed(1)}s, ${(bytes.length / 1024 / uploadSeconds).toFixed(1)} KiB/s`,
+        `streaming path: receive and extract once (${Math.round(freeMemory / 1024)} KiB free)`,
       );
-      onProgress(72);
-      this.logDiagnostic("device install started");
-      await this.execute([
-        "from mpos import AppManager",
-        `AppManager.install_mpk(${pythonString(tempPath)}, ${pythonString(`apps/${packageName}`)})`,
-        `assert AppManager.is_installed_by_name(${pythonString(packageName)}), 'App install did not register'`,
-      ].join("\n"), this.remainingInstallTime(deadline, 90_000));
-      onProgress(100);
+      await this.installMpkStreaming(packageName, bytes, onProgress, deadline);
       this.logDiagnostic(
         `install complete: ${((performance.now() - installStarted) / 1000).toFixed(1)}s total`,
       );
@@ -537,7 +529,7 @@ export class WebSerialDeviceClient {
     onProgress(0);
     for (let offset = 0; offset < bytes.length; offset += writeSize) {
       const end = Math.min(bytes.length, offset + writeSize);
-      await this.writeRaw(bytes.subarray(offset, end));
+      await this.writeRawBeforeDeadline(bytes.subarray(offset, end), deadline);
       onProgress(Math.round((end / bytes.length) * 80));
     }
     onProgress(85);
@@ -558,6 +550,98 @@ export class WebSerialDeviceClient {
     this.logDiagnostic(
       `install complete: ${((performance.now() - installStarted) / 1000).toFixed(1)}s total`,
     );
+  }
+
+  private async installMpkStreaming(
+    packageName: string,
+    bytes: Uint8Array,
+    onProgress: (percent: number) => void,
+    deadline: number,
+  ) {
+    const destination = `apps/${packageName}`;
+    const token = crypto.randomUUID().replace(/-/g, "");
+    const readyMarker = `__MPOS_STREAM_READY_${token}__`;
+    const okMarker = `__MPOS_STREAM_OK_${token}__`;
+    const errorMarker = `__MPOS_STREAM_ERROR_${token}__`;
+    const doneMarker = `__MPOS_STREAM_DONE_${token}__`;
+    const receiver = [
+      "import sys, os, micropython, shutil, gc",
+      "from mpos import AppManager",
+      "from mpos.content.streaming_unzip import StreamingUnzip",
+      "try:",
+      ` _st = os.stat(${pythonString(destination)})`,
+      " if _st[0] & 0x4000:",
+      `  shutil.rmtree(${pythonString(destination)})`,
+      " else:",
+      `  os.remove(${pythonString(destination)})`,
+      "except OSError:",
+      " pass",
+      `_extractor = StreamingUnzip(${pythonString(destination)}, expected_app_name=${pythonString(packageName)}, free_space_limit=lambda req: AppManager._check_free_space('.', req))`,
+      `print(${pythonString(readyMarker)})`,
+      "micropython.kbd_intr(-1)",
+      "try:",
+      ` _remaining = ${bytes.length}`,
+      " while _remaining:",
+      "  _part = sys.stdin.buffer.read(min(32768, _remaining))",
+      "  if not _part:",
+      "   raise OSError('serial install ended before all bytes arrived')",
+      "  _extractor.feed(_part)",
+      "  _remaining -= len(_part)",
+      " _extractor.finish()",
+      " gc.collect()",
+      " AppManager.refresh_apps()",
+      ` if not AppManager.is_installed_by_name(${pythonString(packageName)}):`,
+      "  raise OSError('App was extracted but is not registered')",
+      ` print(${pythonString(okMarker)})`,
+      "except Exception as e:",
+      " try:",
+      `  shutil.rmtree(${pythonString(destination)})`,
+      " except Exception:",
+      "  pass",
+      " sys.print_exception(e)",
+      ` print(${pythonString(errorMarker)} + repr(e))`,
+      "finally:",
+      " micropython.kbd_intr(3)",
+      ` print(${pythonString(doneMarker)})`,
+    ].join("\n");
+    const command = `exec(__import__('ubinascii').a2b_base64(${pythonString(encodeBase64(receiver))}).decode())`;
+    const start = this.output.length;
+    const readyPromise = this.waitForOutput(
+      readyMarker,
+      start,
+      this.remainingInstallTime(deadline, 5_000),
+    );
+    await this.sendLine(command);
+    await readyPromise;
+
+    const donePromise = this.waitForOutput(
+      doneMarker,
+      start,
+      this.remainingInstallTime(deadline, MPK_INSTALL_BUDGET_MS),
+    );
+    const writeSize = this.selectedInfo.usbVendorId === 0x303a ? 32_768 : 8_192;
+    const transferStarted = performance.now();
+    onProgress(0);
+    for (let offset = 0; offset < bytes.length; offset += writeSize) {
+      this.remainingInstallTime(deadline, MPK_INSTALL_BUDGET_MS);
+      const end = Math.min(bytes.length, offset + writeSize);
+      await this.writeRawBeforeDeadline(bytes.subarray(offset, end), deadline);
+      onProgress(Math.round((end / bytes.length) * 90));
+    }
+    const transferSeconds = Math.max(0.001, (performance.now() - transferStarted) / 1000);
+    this.logDiagnostic(
+      `stream transfer complete: ${transferSeconds.toFixed(1)}s, ${(bytes.length / 1024 / transferSeconds).toFixed(1)} KiB/s`,
+    );
+    const output = await donePromise;
+    const errorIndex = output.indexOf(errorMarker);
+    if (errorIndex >= 0) {
+      const message = output.slice(errorIndex + errorMarker.length).split(/\r?\n/, 1)[0].trim();
+      throw new Error(message || "Device rejected the streaming MPK install");
+    }
+    if (!output.includes(okMarker)) {
+      throw new Error("Device did not confirm the streaming MPK install");
+    }
+    onProgress(100);
   }
 
   async uploadBase64WithReplChunks(
@@ -643,7 +727,7 @@ export class WebSerialDeviceClient {
   private remainingInstallTime(deadline: number, cap: number) {
     const remaining = deadline - Date.now();
     if (remaining <= 1_000) {
-      throw new Error("MPK install exceeded the 120 second time limit");
+      throw new Error("MPK install exceeded the 30 second time limit");
     }
     return Math.max(1_000, Math.min(cap, remaining));
   }
