@@ -3,6 +3,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 PROTOCOL_VERSION = "mpos-ai-app/v1"
+AIProviderId = Literal["auto", "deepseek_primary", "deepseek_secondary", "aigocode"]
 
 
 class GenerateRequest(BaseModel):
@@ -14,6 +15,7 @@ class GenerateRequest(BaseModel):
     revision: int = Field(default=1, ge=1, le=9999)
     previous_code: str | None = Field(default=None, max_length=100_000)
     runtime_error: str | None = Field(default=None, max_length=8000)
+    ai_provider: AIProviderId = "auto"
 
     @field_validator("package_name")
     @classmethod
@@ -36,6 +38,10 @@ class GenerateResponse(BaseModel):
     files: list[GeneratedFile]
     mpk_base64: str
     model: str
+    provider: str = ""
+    failover_used: bool = False
+    attempted_providers: list[str] = Field(default_factory=list)
+    provider_attempts: list[dict[str, Any]] = Field(default_factory=list)
     warnings: list[str] = []
     acceptance_tests: list[str] = []
     mpk_filename: str
@@ -106,6 +112,7 @@ class SessionCreateRequest(BaseModel):
     category: str = "generated"
     publisher: str = "erkou111"
     version: str = "0.1.0"
+    ai_provider: AIProviderId = "auto"
     targets: list[
         Literal["desktop-preview", "web-preview", "physical-device", "package-only"]
     ] = ["web-preview", "package-only"]
@@ -129,6 +136,7 @@ class SessionActionRequest(BaseModel):
     previous_code: str | None = Field(default=None, max_length=100_000)
     runtime_error: str | None = Field(default=None, max_length=8000)
     timeout_seconds: int = Field(default=180, ge=10, le=600)
+    ai_provider: AIProviderId | None = None
 
 
 class AuthCredentials(BaseModel):
@@ -156,6 +164,7 @@ class RevisionRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=200)
     prompt: str = Field(min_length=3, max_length=4000)
     prompt_language: Literal["zh-CN", "en-US", "mixed", "unknown"] = "unknown"
+    ai_provider: AIProviderId | None = None
 
 
 class PreviewResultRequest(SessionActionRequest):

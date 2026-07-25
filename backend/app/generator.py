@@ -1,3 +1,4 @@
+import asyncio
 import ast
 import base64
 import io
@@ -8,6 +9,8 @@ import struct
 import time
 import zipfile
 import zlib
+from contextvars import ContextVar
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Callable
@@ -164,6 +167,26 @@ SHOOTER_UI_BLUEPRINT = """
 
 class GenerationError(RuntimeError):
     pass
+
+
+class UpstreamGenerationError(GenerationError):
+    """A sanitized, structured error returned by an AI upstream."""
+
+    def __init__(
+        self,
+        code: str,
+        message: str,
+        *,
+        retryable: bool,
+        failover_allowed: bool,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(f"{code}: {message}")
+        self.code = code
+        self.message = message
+        self.retryable = retryable
+        self.failover_allowed = failover_allowed
+        self.details = details or {}
 
 
 class ApiValidationError(GenerationError):
@@ -389,7 +412,7 @@ def _settings() -> tuple[str, str, str]:
     return key, base_url, model
 
 
-async def _call_deepseek(
+async def _call_deepseek_legacy(
     request: GenerateRequest,
     correction: str = "",
     timeout_seconds: float | None = None,
@@ -406,7 +429,12 @@ async def _call_deepseek(
         "response_format": {"type": "json_object"},
         "temperature": 0.12 if correction else 0.25,
         "max_tokens": max_tokens,
-        "thinking": {"type": "disabled"},
+        **(
+            {"thinking": {"type": "disabled"}}
+            if _ACTIVE_PROVIDER_CONFIG.get() is None
+            or _ACTIVE_PROVIDER_CONFIG.get().id.startswith("deepseek_")
+            else {}
+        ),
     }
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     request_timeout = timeout_seconds or float(
@@ -416,7 +444,15 @@ async def _call_deepseek(
     try:
         timeout = httpx.Timeout(
             request_timeout,
-            connect=min(5.0, request_timeout),
+            connect=min(
+                _bounded_float_env(
+                    "AI_CONNECT_TIMEOUT_SECONDS",
+                    default=5.0,
+                    minimum=0.1,
+                    maximum=120.0,
+                ),
+                request_timeout,
+            ),
         )
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
@@ -1147,11 +1183,9 @@ def _emit_generation_attempt(
     }
     if error is not None:
         message = _safe_attempt_message(error)
-        code = (
-            error.code
-            if isinstance(error, ApiValidationError)
-            else "GENERATION_VALIDATION_FAILED"
-        )
+        code = getattr(error, "code", "GENERATION_VALIDATION_FAILED")
+        if model_meta is None and isinstance(error, UpstreamGenerationError):
+            model_meta = error.details
         line_match = re.search(r"第\s*(\d+)\s*行", message)
         validation.update(
             {
@@ -1255,18 +1289,536 @@ def _build_mpk(package_name: str, manifest: dict[str, Any], app_code: str) -> st
     return base64.b64encode(stream.getvalue()).decode("ascii")
 
 
+AI_PROVIDER_IDS = (
+    "deepseek_primary",
+    "deepseek_secondary",
+    "aigocode",
+)
+
+
+@dataclass(frozen=True)
+class AIProviderConfig:
+    id: str
+    label: str
+    api_key: str
+    base_url: str
+    model: str
+
+    @property
+    def configured(self) -> bool:
+        return bool(
+            self.api_key
+            and self.api_key
+            not in {
+                "replace_with_your_deepseek_api_key",
+                "replace_with_your_aigocode_api_key",
+            }
+        )
+
+
+_ACTIVE_PROVIDER_CONFIG: ContextVar[AIProviderConfig | None] = ContextVar(
+    "active_ai_provider_config",
+    default=None,
+)
+_PROVIDER_CIRCUITS: dict[str, dict[str, float]] = {}
+
+
+def _first_env(*names: str, default: str = "") -> str:
+    for name in names:
+        value = os.getenv(name, "").strip()
+        if value:
+            return value
+    return default
+
+
+def _bounded_float_env(
+    name: str,
+    *,
+    default: float,
+    minimum: float,
+    maximum: float,
+    fallbacks: tuple[str, ...] = (),
+) -> float:
+    raw = _first_env(name, *fallbacks, default=str(default))
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _bounded_int_env(
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    try:
+        value = int(os.getenv(name, str(default)))
+    except (TypeError, ValueError):
+        value = default
+    return max(minimum, min(maximum, value))
+
+
+def _provider_configs() -> dict[str, AIProviderConfig]:
+    primary = AIProviderConfig(
+        id="deepseek_primary",
+        label="DeepSeek Primary",
+        api_key=_first_env("DEEPSEEK_PRIMARY_API_KEY", "DEEPSEEK_API_KEY"),
+        base_url=_first_env(
+            "DEEPSEEK_PRIMARY_BASE_URL",
+            "DEEPSEEK_BASE_URL",
+            default="https://api.deepseek.com",
+        ).rstrip("/"),
+        model=_first_env(
+            "DEEPSEEK_PRIMARY_MODEL",
+            "DEEPSEEK_MODEL",
+            default="deepseek-v4-flash",
+        ),
+    )
+    secondary = AIProviderConfig(
+        id="deepseek_secondary",
+        label="DeepSeek Secondary",
+        api_key=_first_env(
+            "DEEPSEEK_SECONDARY_API_KEY",
+            "DEEPSEEK_BACKUP_API_KEY",
+        ),
+        base_url=_first_env(
+            "DEEPSEEK_SECONDARY_BASE_URL",
+            "DEEPSEEK_BACKUP_BASE_URL",
+            default="https://api.deepseek.com",
+        ).rstrip("/"),
+        model=_first_env(
+            "DEEPSEEK_SECONDARY_MODEL",
+            "DEEPSEEK_BACKUP_MODEL",
+            default="deepseek-v4-flash",
+        ),
+    )
+    aigocode = AIProviderConfig(
+        id="aigocode",
+        label="AIGoCode GLM",
+        api_key=_first_env("AIGOCODE_API_KEY"),
+        base_url=_first_env(
+            "AIGOCODE_BASE_URL",
+            default="https://api.aigocode.app/v1",
+        ).rstrip("/"),
+        model=_first_env("AIGOCODE_MODEL", default="glm-4.7"),
+    )
+    return {item.id: item for item in (primary, secondary, aigocode)}
+
+
+def provider_metadata() -> list[dict[str, str | bool]]:
+    configs = _provider_configs()
+    configured_any = any(config.configured for config in configs.values())
+    providers: list[dict[str, str | bool]] = [
+        {
+            "id": "auto",
+            "label": "Automatic failover",
+            "configured": configured_any,
+            "model": "",
+        }
+    ]
+    providers.extend(
+        {
+            "id": config.id,
+            "label": config.label,
+            "configured": config.configured,
+            "model": config.model,
+        }
+        for config in configs.values()
+    )
+    return providers
+
+
+def _settings() -> tuple[str, str, str]:
+    config = _ACTIVE_PROVIDER_CONFIG.get() or _provider_configs()["deepseek_primary"]
+    if not config.configured:
+        raise UpstreamGenerationError(
+            "AI_UPSTREAM_UNAVAILABLE",
+            f"AI provider {config.id} is not configured",
+            retryable=False,
+            failover_allowed=False,
+            details={"provider": config.id},
+        )
+    return config.api_key, config.base_url, config.model
+
+
+def _provider_order() -> list[str]:
+    raw = os.getenv(
+        "AI_PROVIDER_ORDER",
+        "deepseek_primary,deepseek_secondary,aigocode",
+    )
+    ordered: list[str] = []
+    for provider_id in raw.split(","):
+        provider_id = provider_id.strip()
+        if provider_id in AI_PROVIDER_IDS and provider_id not in ordered:
+            ordered.append(provider_id)
+    return ordered or list(AI_PROVIDER_IDS)
+
+
+def _circuit_open(provider_id: str) -> bool:
+    state = _PROVIDER_CIRCUITS.get(provider_id)
+    if not state:
+        return False
+    open_until = state.get("open_until", 0.0)
+    if open_until <= time.monotonic():
+        _PROVIDER_CIRCUITS.pop(provider_id, None)
+        return False
+    return True
+
+
+def _record_provider_failure(provider_id: str) -> None:
+    threshold = _bounded_int_env(
+        "AI_PROVIDER_CIRCUIT_FAILURE_THRESHOLD",
+        default=2,
+        minimum=1,
+        maximum=20,
+    )
+    state = _PROVIDER_CIRCUITS.setdefault(
+        provider_id,
+        {"failures": 0.0, "open_until": 0.0},
+    )
+    state["failures"] += 1.0
+    if state["failures"] >= threshold:
+        cooldown = _bounded_float_env(
+            "AI_PROVIDER_CIRCUIT_COOLDOWN_SECONDS",
+            default=30.0,
+            minimum=0.1,
+            maximum=3600.0,
+        )
+        state["open_until"] = time.monotonic() + cooldown
+
+
+def _record_provider_success(provider_id: str) -> None:
+    _PROVIDER_CIRCUITS.pop(provider_id, None)
+
+
+def _reset_provider_circuits() -> None:
+    """Reset process-local circuit state; intended for isolated tests."""
+
+    _PROVIDER_CIRCUITS.clear()
+
+
+def _provider_candidates(requested_provider: str) -> tuple[list[AIProviderConfig], bool]:
+    configs = _provider_configs()
+    if requested_provider != "auto":
+        config = configs.get(requested_provider)
+        if config is None:
+            raise UpstreamGenerationError(
+                "AI_UPSTREAM_UNAVAILABLE",
+                f"Unknown AI provider {requested_provider}",
+                retryable=False,
+                failover_allowed=False,
+                details={"provider": requested_provider},
+            )
+        if not config.configured:
+            raise UpstreamGenerationError(
+                "AI_UPSTREAM_UNAVAILABLE",
+                f"AI provider {requested_provider} is not configured",
+                retryable=False,
+                failover_allowed=False,
+                details={"provider": requested_provider},
+            )
+        if _circuit_open(requested_provider):
+            raise UpstreamGenerationError(
+                "AI_UPSTREAM_UNAVAILABLE",
+                f"AI provider {requested_provider} is temporarily unavailable",
+                retryable=True,
+                failover_allowed=False,
+                details={"provider": requested_provider},
+            )
+        return [config], True
+
+    candidates = [
+        configs[provider_id]
+        for provider_id in _provider_order()
+        if configs[provider_id].configured and not _circuit_open(provider_id)
+    ]
+    if not candidates:
+        raise UpstreamGenerationError(
+            "AI_UPSTREAM_UNAVAILABLE",
+            "No configured AI provider is currently available",
+            retryable=True,
+            failover_allowed=False,
+            details={"attempted_providers": []},
+        )
+    return candidates, False
+
+
+def _status_from_generation_error(message: str) -> int | None:
+    match = re.search(
+        r"(?:返回|status(?:\s+code)?|http)\s*[:=]?\s*(\d{3})",
+        message,
+        re.IGNORECASE,
+    )
+    return int(match.group(1)) if match else None
+
+
+async def _call_provider_with_retries(
+    config: AIProviderConfig,
+    request: GenerateRequest,
+    correction: str,
+    deadline: float,
+) -> tuple[dict[str, Any], str, dict[str, Any], list[dict[str, Any]]]:
+    retries = _bounded_int_env(
+        "AI_UPSTREAM_MAX_RETRIES",
+        default=2,
+        minimum=0,
+        maximum=5,
+    )
+    read_timeout = _bounded_float_env(
+        "AI_READ_TIMEOUT_SECONDS",
+        default=60.0,
+        minimum=0.1,
+        maximum=600.0,
+        fallbacks=("DEEPSEEK_REQUEST_TIMEOUT_SECONDS",),
+    )
+    backoff = _bounded_float_env(
+        "AI_RETRY_BACKOFF_SECONDS",
+        default=0.5,
+        minimum=0.0,
+        maximum=30.0,
+    )
+    attempts: list[dict[str, Any]] = []
+
+    for attempt in range(1, retries + 2):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise UpstreamGenerationError(
+                "AI_UPSTREAM_TIMEOUT",
+                f"AI provider {config.id} exceeded the overall timeout",
+                retryable=True,
+                failover_allowed=True,
+                details={
+                    "provider": config.id,
+                    "attempts": attempt - 1,
+                    "provider_attempts": attempts,
+                },
+            )
+
+        attempts_remaining = retries + 2 - attempt
+        attempt_timeout = min(read_timeout, remaining / attempts_remaining)
+        token = _ACTIVE_PROVIDER_CONFIG.set(config)
+        try:
+            generated, model, model_meta = await asyncio.wait_for(
+                _call_deepseek_legacy(
+                    request,
+                    correction=correction,
+                    timeout_seconds=attempt_timeout,
+                ),
+                timeout=attempt_timeout,
+            )
+        except asyncio.TimeoutError:
+            outcome = "timeout"
+            status_code = None
+            upstream_code = "AI_UPSTREAM_TIMEOUT"
+        except GenerationError as exc:
+            message = str(exc)
+            status_code = _status_from_generation_error(message)
+            if status_code == 429:
+                outcome = "http_429"
+                upstream_code = "AI_UPSTREAM_UNAVAILABLE"
+            elif status_code is not None and status_code >= 500:
+                outcome = f"http_{status_code}"
+                upstream_code = "AI_UPSTREAM_UNAVAILABLE"
+            elif status_code is not None:
+                if status_code in {401, 403}:
+                    error_code = "AI_UPSTREAM_AUTH_FAILED"
+                    error_message = (
+                        f"AI provider {config.id} rejected its credentials or permissions"
+                    )
+                elif status_code == 404:
+                    error_code = "AI_UPSTREAM_CONFIG_ERROR"
+                    error_message = (
+                        f"AI provider {config.id} endpoint or model is not configured"
+                    )
+                else:
+                    error_code = "AI_UPSTREAM_REJECTED"
+                    error_message = f"AI provider {config.id} rejected the request"
+                attempts.append(
+                    {
+                        "provider": config.id,
+                        "attempt": attempt,
+                        "outcome": f"http_{status_code}",
+                        "status_code": status_code,
+                    }
+                )
+                raise UpstreamGenerationError(
+                    error_code,
+                    error_message,
+                    retryable=False,
+                    failover_allowed=False,
+                    details={
+                        "provider": config.id,
+                        "status_code": status_code,
+                        "attempts": attempt,
+                        "provider_attempts": attempts,
+                    },
+                ) from exc
+            elif "没有返回" in message or "timeout" in message.lower():
+                outcome = "timeout"
+                upstream_code = "AI_UPSTREAM_TIMEOUT"
+            elif "无法连接" in message or "connect" in message.lower():
+                outcome = "connection_error"
+                upstream_code = "AI_UPSTREAM_UNAVAILABLE"
+            else:
+                # Parse/content/validation errors are deterministic and must not
+                # silently switch providers.
+                raise
+        else:
+            attempts.append(
+                {
+                    "provider": config.id,
+                    "attempt": attempt,
+                    "outcome": "success",
+                }
+            )
+            return generated, model, model_meta, attempts
+        finally:
+            _ACTIVE_PROVIDER_CONFIG.reset(token)
+
+        attempt_record: dict[str, Any] = {
+            "provider": config.id,
+            "attempt": attempt,
+            "outcome": outcome,
+        }
+        if status_code is not None:
+            attempt_record["status_code"] = status_code
+        attempts.append(attempt_record)
+        if attempt > retries:
+            message = (
+                f"AI provider {config.id} timed out"
+                if upstream_code == "AI_UPSTREAM_TIMEOUT"
+                else f"AI provider {config.id} is unavailable"
+            )
+            raise UpstreamGenerationError(
+                upstream_code,
+                message,
+                retryable=True,
+                failover_allowed=True,
+                details={
+                    "provider": config.id,
+                    "status_code": status_code,
+                    "attempts": attempt,
+                    "provider_attempts": attempts,
+                },
+            )
+        delay = backoff * (2 ** (attempt - 1))
+        remaining = deadline - time.monotonic()
+        if delay > 0 and remaining > 0:
+            await asyncio.sleep(min(delay, remaining))
+
+    raise AssertionError("unreachable")
+
+
+async def _call_deepseek(
+    request: GenerateRequest,
+    correction: str = "",
+    timeout_seconds: float | None = None,
+) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    requested_provider = getattr(request, "ai_provider", "auto") or "auto"
+    candidates, explicit = _provider_candidates(requested_provider)
+    overall_timeout = _bounded_float_env(
+        "AI_OVERALL_TIMEOUT_SECONDS",
+        default=120.0,
+        minimum=1.0,
+        maximum=900.0,
+        fallbacks=("DEEPSEEK_GENERATION_BUDGET_SECONDS",),
+    )
+    if timeout_seconds is not None:
+        try:
+            requested_timeout = float(timeout_seconds)
+        except (TypeError, ValueError):
+            requested_timeout = overall_timeout
+        overall_timeout = min(overall_timeout, max(0.05, requested_timeout))
+    deadline = time.monotonic() + overall_timeout
+    attempted_providers: list[str] = []
+    provider_attempts: list[dict[str, Any]] = []
+    last_error: UpstreamGenerationError | None = None
+
+    for index, config in enumerate(candidates):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        providers_remaining = len(candidates) - index
+        provider_deadline = time.monotonic() + (remaining / providers_remaining)
+        attempted_providers.append(config.id)
+        try:
+            generated, model, model_meta, attempts = await _call_provider_with_retries(
+                config,
+                request,
+                correction,
+                provider_deadline,
+            )
+        except UpstreamGenerationError as exc:
+            last_error = exc
+            safe_attempts = exc.details.get("provider_attempts", [])
+            if isinstance(safe_attempts, list):
+                provider_attempts.extend(safe_attempts)
+            if exc.retryable:
+                _record_provider_failure(config.id)
+            if explicit or not exc.failover_allowed:
+                exc.details = {
+                    **exc.details,
+                    "attempted_providers": attempted_providers,
+                    "provider_attempts": provider_attempts,
+                    "failover_used": False,
+                }
+                raise
+            continue
+
+        _record_provider_success(config.id)
+        provider_attempts.extend(attempts)
+        routing = {
+            "provider": config.id,
+            "model": model,
+            "failover_used": len(attempted_providers) > 1,
+            "attempted_providers": attempted_providers,
+            "provider_attempts": provider_attempts,
+        }
+        generated = dict(generated)
+        generated["ai_routing"] = routing
+        model_meta = {**model_meta, **routing}
+        return generated, model, model_meta
+
+    code = last_error.code if last_error else "AI_UPSTREAM_UNAVAILABLE"
+    message = (
+        "All configured AI providers timed out"
+        if code == "AI_UPSTREAM_TIMEOUT"
+        else "All configured AI providers are unavailable"
+    )
+    raise UpstreamGenerationError(
+        code,
+        message,
+        retryable=True,
+        failover_allowed=False,
+        details={
+            "attempted_providers": attempted_providers,
+            "provider_attempts": provider_attempts,
+            "failover_used": len(attempted_providers) > 1,
+        },
+    )
+
+
 async def generate_app(
     request: GenerateRequest,
     *,
     attempt_sink: GenerationAttemptSink | None = None,
 ) -> GenerateResponse:
-    budget_seconds = max(
-        8.0,
-        min(60.0, float(os.getenv("DEEPSEEK_GENERATION_BUDGET_SECONDS", "20"))),
+    budget_seconds = _bounded_float_env(
+        "AI_OVERALL_TIMEOUT_SECONDS",
+        default=120.0,
+        minimum=8.0,
+        maximum=900.0,
+        fallbacks=("DEEPSEEK_GENERATION_BUDGET_SECONDS",),
     )
-    request_timeout_seconds = max(
-        3.0,
-        min(30.0, float(os.getenv("DEEPSEEK_REQUEST_TIMEOUT_SECONDS", "19"))),
+    request_timeout_seconds = _bounded_float_env(
+        "AI_READ_TIMEOUT_SECONDS",
+        default=60.0,
+        minimum=3.0,
+        maximum=600.0,
+        fallbacks=("DEEPSEEK_REQUEST_TIMEOUT_SECONDS",),
     )
     max_attempts = max(
         1,
@@ -1281,6 +1833,7 @@ async def generate_app(
     acceptance_tests: list[str] = []
     api_usage: dict[str, Any] = {"checked": False, "planned": [], "missing": []}
     last_error: GenerationError | None = None
+    model_meta: dict[str, Any] = {}
     attempts_used = 0
     for attempt in range(1, max_attempts + 1):
         remaining = deadline - time.monotonic()
@@ -1296,13 +1849,22 @@ async def generate_app(
             request_timeout_seconds,
             max(2.0, remaining - reserved_for_retry),
         )
-        model_meta: dict[str, Any] = {}
+        model_meta = {}
         try:
             generated, model, model_meta = await _call_deepseek(
                 request,
                 correction,
                 timeout_seconds=call_timeout,
             )
+        except UpstreamGenerationError as exc:
+            _emit_generation_attempt(
+                attempt_sink,
+                attempt=attempt,
+                status="model_error",
+                error=exc,
+                model_meta=exc.details,
+            )
+            raise
         except GenerationError as exc:
             last_error = exc
             _emit_generation_attempt(
@@ -1440,6 +2002,10 @@ async def generate_app(
         "mode": "create" if not request.previous_code else "repair",
         "summary": summary,
         "model": model,
+        "provider": str(model_meta.get("provider") or ""),
+        "failover_used": bool(model_meta.get("failover_used", False)),
+        "attempted_providers": model_meta.get("attempted_providers", []),
+        "provider_attempts": model_meta.get("provider_attempts", []),
         "language": {
             "prompt_original": request.prompt,
             "prompt_normalized_zh": prompt_normalized_zh,
@@ -1477,6 +2043,10 @@ async def generate_app(
         ],
         mpk_base64=mpk,
         model=model,
+        provider=str(model_meta.get("provider") or ""),
+        failover_used=bool(model_meta.get("failover_used", False)),
+        attempted_providers=model_meta.get("attempted_providers", []),
+        provider_attempts=model_meta.get("provider_attempts", []),
         warnings=warnings,
         acceptance_tests=acceptance_tests,
         mpk_filename=mpk_filename,

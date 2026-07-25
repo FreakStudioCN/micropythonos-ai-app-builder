@@ -157,6 +157,7 @@ class ProtocolTests(unittest.TestCase):
                 idempotency_key="revision-test-0001",
                 prompt="给日历增加返回今天按钮",
                 prompt_language="zh-CN",
+                ai_provider="aigocode",
             ),
         )
         self.assertEqual(revised["revision_id"], "r2")
@@ -164,6 +165,7 @@ class ProtocolTests(unittest.TestCase):
             revised["pending_repair"]["previous_code"],
             "print('r1 calendar')\n",
         )
+        self.assertEqual(revised["input"]["ai_provider"], "aigocode")
         snapshot = (
             Path(self.temp.name)
             / state["session_id"]
@@ -393,6 +395,48 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self) -> None:
         self.temp.cleanup()
+
+    async def test_start_generation_updates_selected_provider(self) -> None:
+        state = self.service.create(
+            SessionCreateRequest(
+                idempotency_key="provider-switch-create-0001",
+                prompt="Build a provider switch test app",
+                package_name="com.example.provider_switch",
+                targets=["package-only"],
+                ai_provider="deepseek_primary",
+            )
+        )
+        for permission in state["permissions"]:
+            if permission["required"]:
+                state = self.service.decide_permission(
+                    permission["permission_id"],
+                    PermissionDecisionRequest(
+                        idempotency_key=f"allow-{permission['permission_id']}",
+                        decision="allow_once",
+                    ),
+                )
+        with patch.object(
+            self.service,
+            "_run_generation",
+            new=AsyncMock(return_value=None),
+        ):
+            started = self.service.start_generation(
+                state["session_id"],
+                SessionActionRequest(
+                    idempotency_key="provider-switch-run-0001",
+                    ai_provider="deepseek_secondary",
+                ),
+            )
+            await self.service._tasks[state["session_id"]]
+
+        self.assertEqual(
+            started["input"]["ai_provider"],
+            "deepseek_secondary",
+        )
+        self.assertEqual(
+            self.service.get(state["session_id"])["input"]["ai_provider"],
+            "deepseek_secondary",
+        )
 
     async def test_pipeline_writes_required_protocol_artifacts(self) -> None:
         state = self.service.create(

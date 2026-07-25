@@ -1,3 +1,4 @@
+import json
 import sqlite3
 import tempfile
 import unittest
@@ -156,6 +157,30 @@ class AccessControlTests(unittest.TestCase):
         self.assertEqual(selected["generation_cost"], 10)
         self.assertEqual(selected["generations_remaining"], 5)
         self.assertFalse(selected["unlimited_credits"])
+
+    def test_provider_metadata_requires_login_and_is_safe(self) -> None:
+        self.assertEqual(self.client_a.get("/api/ai/providers").status_code, 401)
+        self._register(self.client_a, "provider_reader")
+        secret = "provider-secret-must-not-leak"
+        with patch.dict(
+            main_module.os.environ,
+            {
+                "DEEPSEEK_PRIMARY_API_KEY": secret,
+                "DEEPSEEK_PRIMARY_BASE_URL": "https://secret-provider.invalid/v1",
+            },
+        ):
+            response = self.client_a.get("/api/ai/providers")
+
+        self.assertEqual(response.status_code, 200, response.text)
+        payload = response.json()
+        self.assertEqual(payload["default_provider"], "auto")
+        self.assertEqual(
+            [item["id"] for item in payload["providers"]],
+            ["auto", "deepseek_primary", "deepseek_secondary", "aigocode"],
+        )
+        serialized = json.dumps(payload)
+        self.assertNotIn(secret, serialized)
+        self.assertNotIn("secret-provider.invalid", serialized)
 
     def test_registration_cannot_claim_superadmin_role(self) -> None:
         response = self.client_a.post(

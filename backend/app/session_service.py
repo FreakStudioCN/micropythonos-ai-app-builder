@@ -771,6 +771,7 @@ class GeneratedApp(Activity):
                 "publisher": request.publisher,
                 "version": request.version,
                 "targets": request.targets,
+                "ai_provider": request.ai_provider,
             },
             "capabilities": request.capabilities.model_dump(),
             "repo_commit": self.capabilities()["repo_commit"],
@@ -1042,6 +1043,8 @@ class GeneratedApp(Activity):
         if state["status"] in {"failed", "timeout", "cancelled"}:
             self._archive_failed_attempt(state, request.idempotency_key)
             state = self._read(session_id)
+        if request.ai_provider is not None:
+            state["input"]["ai_provider"] = request.ai_provider
         state["last_action_idempotency_key"] = request.idempotency_key
         previous_code = request.previous_code
         if not previous_code and state.get("generation"):
@@ -1165,10 +1168,45 @@ class GeneratedApp(Activity):
         raw_model_meta = record.get("model_meta")
         safe_model_meta: dict[str, Any] = {}
         if isinstance(raw_model_meta, dict):
-            for key in ("model", "request_id"):
+            for key in ("provider", "model", "request_id"):
                 value = raw_model_meta.get(key)
                 if isinstance(value, str) and value:
                     safe_model_meta[key] = value[:200]
+            failover_used = raw_model_meta.get("failover_used")
+            if isinstance(failover_used, bool):
+                safe_model_meta["failover_used"] = failover_used
+            attempted_providers = raw_model_meta.get("attempted_providers")
+            if isinstance(attempted_providers, list):
+                safe_model_meta["attempted_providers"] = [
+                    value
+                    for value in attempted_providers
+                    if isinstance(value, str) and value in {"deepseek_primary", "deepseek_secondary", "aigocode"}
+                ]
+            provider_attempts = raw_model_meta.get("provider_attempts")
+            if isinstance(provider_attempts, list):
+                safe_attempts: list[dict[str, Any]] = []
+                for item in provider_attempts:
+                    if not isinstance(item, dict):
+                        continue
+                    provider = item.get("provider")
+                    outcome = item.get("outcome")
+                    attempt = item.get("attempt")
+                    if (
+                        provider not in {"deepseek_primary", "deepseek_secondary", "aigocode"}
+                        or not isinstance(outcome, str)
+                        or not isinstance(attempt, int)
+                    ):
+                        continue
+                    safe_item: dict[str, Any] = {
+                        "provider": provider,
+                        "attempt": attempt,
+                        "outcome": outcome[:40],
+                    }
+                    status_code = item.get("status_code")
+                    if isinstance(status_code, int):
+                        safe_item["status_code"] = status_code
+                    safe_attempts.append(safe_item)
+                safe_model_meta["provider_attempts"] = safe_attempts
             usage = raw_model_meta.get("usage")
             if isinstance(usage, dict):
                 safe_usage = {
@@ -1186,6 +1224,17 @@ class GeneratedApp(Activity):
         _json_dump(attempt_root / "model_meta.json", safe_model_meta)
         state["generation_attempt_run"] = run_relative
         self._write_state(state)
+        if safe_model_meta:
+            self._event(
+                state,
+                "status_update",
+                "mpos-gen-app-web",
+                {
+                    "status": "generation_attempt",
+                    "attempt": attempt_number,
+                    "model_meta": safe_model_meta,
+                },
+            )
 
     def start_action(
         self, session_id: str, action: str, request: SessionActionRequest
@@ -1326,6 +1375,10 @@ class GeneratedApp(Activity):
                             revision=int(state["revision_id"].removeprefix("r")),
                             previous_code=previous_code,
                             runtime_error=request.runtime_error,
+                            ai_provider=(
+                                request.ai_provider
+                                or user_input.get("ai_provider", "auto")
+                            ),
                         )
                     )
                     state["generation"] = generated.model_dump()
@@ -1552,9 +1605,13 @@ class GeneratedApp(Activity):
                     "message": message.split(":", 1)[-1].strip(),
                     "stage": action,
                     "phase": phase,
-                    "owner": "app",
-                    "retryable": True,
-                    "details": {},
+                    "owner": (
+                        "external"
+                        if str(getattr(exc, "code", "")).startswith("AI_UPSTREAM_")
+                        else "app"
+                    ),
+                    "retryable": bool(getattr(exc, "retryable", True)),
+                    "details": getattr(exc, "details", {}),
                     "logs": ["activity_log.jsonl"],
                 }
                 state["status"] = "failed"
@@ -1660,6 +1717,8 @@ class GeneratedApp(Activity):
         state["input"]["prompt_language"] = request.prompt_language
         state["input"]["prompt_normalized_zh"] = request.prompt
         state["input"]["prompt_normalized_en"] = request.prompt
+        if request.ai_provider is not None:
+            state["input"]["ai_provider"] = request.ai_provider
         state["status"] = "created"
         state["current_phase"] = "mpos-analyze-app-web"
         state["checkpoint_id"] = "session_created"
@@ -1822,6 +1881,7 @@ class GeneratedApp(Activity):
                         revision=int(state["revision_id"].removeprefix("r")),
                         previous_code=state.get("pending_repair", {}).get("previous_code"),
                         runtime_error=state.get("pending_repair", {}).get("runtime_error"),
+                        ai_provider=user_input.get("ai_provider", "auto"),
                     ),
                     attempt_sink=lambda record: self._write_generation_attempt(
                         state, generation_run, record
@@ -2232,9 +2292,14 @@ class GeneratedApp(Activity):
                     "message": message.split(":", 1)[-1].strip(),
                     "stage": "generation",
                     "phase": "mpos-gen-app-web",
-                    "owner": "app",
-                    "retryable": True,
-                    "details": {"attempt": state["attempts"].get("mpos-gen-app-web", 1)},
+                    "owner": (
+                        "external" if code.startswith("AI_UPSTREAM_") else "app"
+                    ),
+                    "retryable": bool(getattr(exc, "retryable", True)),
+                    "details": {
+                        "attempt": state["attempts"].get("mpos-gen-app-web", 1),
+                        **getattr(exc, "details", {}),
+                    },
                     "logs": ["activity_log.jsonl"],
                 }
                 state["status"] = "failed"
