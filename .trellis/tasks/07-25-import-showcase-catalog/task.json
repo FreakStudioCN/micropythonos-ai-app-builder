@@ -3,7 +3,7 @@
   "name": "import-showcase-catalog",
   "title": "Import 100-app showcase catalog",
   "description": "Import the provided 100-app MPK bundle as a safe, searchable frontend showcase catalog.",
-  "status": "in_progress",
+  "status": "completed",
   "dev_type": null,
   "scope": "frontend showcase catalog, reproducible bundle import, static screenshots and MPK downloads",
   "package": "frontend",
@@ -11,7 +11,7 @@
   "creator": "lenovo",
   "assignee": "lenovo",
   "createdAt": "2026-07-25",
-  "completedAt": null,
+  "completedAt": "2026-07-25",
   "branch": null,
   "base_branch": "dc/local-deploy-20260725",
   "worktree_path": null,
@@ -27,5 +27,15 @@
     "scripts/import_showcase_bundle.py"
   ],
   "notes": "Keep the existing three deterministic runnable demos. Imported apps are static showcase assets and must not execute automatically.",
-  "meta": {}
+  "meta": {
+    "check": {
+      "status": "passed",
+      "completedAt": "2026-07-25",
+      "evidence": [
+        "catalog validation passed with 100 entries",
+        "frontend production build passed",
+        "100 screenshots and 100 downloadable MPK assets were committed"
+      ]
+    }
+  }
 }

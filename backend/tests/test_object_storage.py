@@ -80,6 +80,7 @@ class ObjectStorageTests(unittest.TestCase):
             "MPOS_STORAGE_ACCESS_KEY_ID": "",
             "MPOS_STORAGE_SECRET_ACCESS_KEY": "",
             "MPOS_STORAGE_BUCKET": "",
+            "MPOS_STORAGE_SESSION_TOKEN": "",
         }
         with patch.dict(os.environ, names):
             self.assertIsInstance(
@@ -93,6 +94,24 @@ class ObjectStorageTests(unittest.TestCase):
                 "Incomplete object-storage configuration",
             ):
                 S3SessionObjectStore.from_env()
+
+    def test_session_token_is_forwarded_without_exposing_it(self) -> None:
+        names = {
+            "MPOS_STORAGE_ENDPOINT": "https://storage.example.test",
+            "MPOS_STORAGE_REGION": "ap-southeast-1",
+            "MPOS_STORAGE_ACCESS_KEY_ID": "project-ref",
+            "MPOS_STORAGE_SECRET_ACCESS_KEY": "anon-key",
+            "MPOS_STORAGE_BUCKET": "test-bucket",
+            "MPOS_STORAGE_SESSION_TOKEN": "server-side-jwt",
+        }
+        with patch.dict(os.environ, names):
+            with patch("app.object_storage.boto3.client") as create_client:
+                store = S3SessionObjectStore.from_env()
+        self.assertIsInstance(store, S3SessionObjectStore)
+        kwargs = create_client.call_args.kwargs
+        self.assertEqual(kwargs["aws_session_token"], "server-side-jwt")
+        self.assertEqual(kwargs["aws_access_key_id"], "project-ref")
+        self.assertNotIn("server-side-jwt", repr(store.__dict__))
 
     def test_session_round_trip_and_unchanged_file_cache(self) -> None:
         client = _FakeS3Client()

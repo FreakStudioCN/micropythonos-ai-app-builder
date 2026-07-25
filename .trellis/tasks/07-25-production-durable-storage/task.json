@@ -3,7 +3,7 @@
   "name": "production-durable-storage",
   "title": "Configure production durable storage",
   "description": "Connect the Render production service to the existing Supabase Storage S3 bucket for durable session artifacts.",
-  "status": "blocked",
+  "status": "in_progress",
   "dev_type": null,
   "scope": "Supabase Storage S3 credentials and Render production environment",
   "package": "operations",
@@ -21,7 +21,7 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "Do not commit S3 credentials. Supabase PAT can manage storage config and buckets but cannot create hosted S3 access keys; that endpoint requires a Dashboard login JWT.",
+  "notes": "Do not commit S3 credentials. The implementation now supports Supabase S3 session-token authentication so deployment can use server-side project credentials without generating a Dashboard S3 key pair.",
   "meta": {
     "supabase": {
       "projectRef": "jzbbjpiqnbhdqykzjdxa",
@@ -37,12 +37,13 @@
         "MPOS_STORAGE_ENDPOINT",
         "MPOS_STORAGE_BUCKET",
         "MPOS_STORAGE_ACCESS_KEY_ID",
-        "MPOS_STORAGE_SECRET_ACCESS_KEY"
+        "MPOS_STORAGE_SECRET_ACCESS_KEY",
+        "MPOS_STORAGE_SESSION_TOKEN"
       ]
     },
-    "blocker": {
-      "type": "external_authentication",
-      "required": "Supabase Dashboard-generated S3 access key pair"
+    "implementation": {
+      "status": "in_progress",
+      "authentication": "Supabase S3 session token"
     }
   }
 }
