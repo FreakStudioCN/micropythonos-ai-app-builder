@@ -455,6 +455,62 @@ def _validate_code(code: str) -> list[str]:
     hits: list[str] = []
     forbidden_calls = {"eval", "exec", "compile", "open"}
     blocking_while_nodes: set[int] = set()
+
+    def _extract_assigned_names(node: ast.AST) -> set[str]:
+        names: set[str] = set()
+        for candidate in ast.walk(node):
+            if isinstance(candidate, ast.Name) and isinstance(candidate.ctx, ast.Store):
+                names.add(candidate.id)
+            elif isinstance(candidate, ast.AugAssign):
+                for target in ast.walk(candidate.target):
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+            elif isinstance(candidate, (ast.Assign, ast.AnnAssign)):
+                targets = (
+                    candidate.targets
+                    if isinstance(candidate, ast.Assign)
+                    else [candidate.target]
+                )
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        names.add(target.id)
+                    elif isinstance(target, (ast.Tuple, ast.List)):
+                        for item in ast.walk(target):
+                            if isinstance(item, ast.Name):
+                                names.add(item.id)
+        return names
+
+    def _contains_load_name(test: ast.AST) -> bool:
+        return any(isinstance(node, ast.Name) for node in ast.walk(test))
+
+    def _is_finite_while_in_on_create(loop: ast.While) -> bool:
+        if not _contains_load_name(loop.test):
+            return False
+        if _contains_load_name(loop.test) and _extract_assigned_names(loop):
+            test_names = {
+                node.id
+                for node in ast.walk(loop.test)
+                if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load)
+            }
+            mutated_names = _extract_assigned_names(loop)
+            if not (test_names & mutated_names):
+                return False
+            for child in ast.walk(loop):
+                if isinstance(child, ast.Call):
+                    if isinstance(child.func, ast.Name) and child.func.id in {
+                        "sleep",
+                        "sleep_ms",
+                        "sleep_us",
+                    }:
+                        return False
+                    if (
+                        isinstance(child.func, ast.Attribute)
+                        and child.func.attr in {"sleep", "sleep_ms", "sleep_us"}
+                    ):
+                        return False
+            return True
+        return False
+
     for function in ast.walk(tree):
         if not isinstance(function, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -465,7 +521,10 @@ def _validate_code(code: str) -> list[str]:
                 isinstance(child.test, ast.Constant)
                 and child.test.value in {True, 1}
             )
-            if function.name == "onCreate" or condition_is_always_true:
+            is_blocking_on_create = (
+                function.name == "onCreate" and not _is_finite_while_in_on_create(child)
+            )
+            if is_blocking_on_create or condition_is_always_true:
                 blocking_while_nodes.add(id(child))
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
@@ -1001,9 +1060,9 @@ def _build_correction(error: GenerationError, candidate: str = "") -> str:
         )
     if "阻塞式 while" in message:
         suggestions.append(
-            "只删除 while True、onCreate 内循环或持续刷新界面的主循环。"
+            "删除 while True、持续刷新界面的主循环。"
             "动画和倒计时改用 lv.timer_create。若是计算器解析表达式，"
-            "可以保留有限 while，但每轮必须推进索引并具有明确退出条件。"
+            "可以保留有限 while，但 onCreate 内只能用于短暂一次性计算，不允许界面持续刷新。"
         )
     if "界面仍像未设计的原型" in message:
         suggestions.append(
