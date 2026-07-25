@@ -12,6 +12,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .billing import InsufficientCredits, billing_service
 from .generator import GenerationError, generate_app
+from .requirements_chat import RequirementChatError, clarify_requirements
 from .models import (
     DemoErrorInjectionRequest,
     DemoSessionRequest,
@@ -19,8 +20,11 @@ from .models import (
     GenerateResponse,
     DeviceScanRequest,
     DeviceResultRequest,
+    PermissionBatchDecisionRequest,
     PermissionDecisionRequest,
     PreviewResultRequest,
+    RequirementChatRequest,
+    RequirementChatResponse,
     RevisionRequest,
     ResumeRequest,
     ScreenshotUploadRequest,
@@ -81,6 +85,16 @@ def health() -> dict[str, str | bool | None]:
 @app.get("/api/capabilities")
 def capabilities() -> dict:
     return session_service.capabilities()
+
+
+@app.post("/api/requirements/chat", response_model=RequirementChatResponse)
+async def requirement_chat(
+    request: RequirementChatRequest,
+) -> RequirementChatResponse:
+    try:
+        return await clarify_requirements(request)
+    except RequirementChatError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
 @app.get("/api/billing/account")
@@ -373,6 +387,18 @@ def decide_permission(
         return session_service.decide_permission(permission_id, request)
     except SessionNotFound as exc:
         raise HTTPException(status_code=404, detail="Permission 不存在") from exc
+
+
+@app.post("/api/sessions/{session_id}/permissions/allow-all")
+def allow_all_permissions(
+    session_id: str, request: PermissionBatchDecisionRequest
+) -> dict:
+    try:
+        return session_service.allow_all_permissions(session_id, request)
+    except SessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="Session 不存在") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @app.post("/api/sessions/{session_id}/devices/scan")

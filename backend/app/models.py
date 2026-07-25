@@ -45,6 +45,27 @@ class GenerateResponse(BaseModel):
     store_metadata: dict[str, Any] = Field(default_factory=dict)
 
 
+class RequirementMessage(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(min_length=1, max_length=4000)
+
+
+class RequirementChatRequest(BaseModel):
+    locale: Literal["zh-CN", "en-US"] = "zh-CN"
+    draft_prompt: str = Field(min_length=3, max_length=4000)
+    messages: list[RequirementMessage] = Field(min_length=1, max_length=24)
+    finalize: bool = False
+
+
+class RequirementChatResponse(BaseModel):
+    assistant_message: str
+    ready: bool = False
+    refined_prompt: str = ""
+    missing_fields: list[str] = Field(default_factory=list)
+    brief: dict[str, Any] = Field(default_factory=dict)
+    model: str
+
+
 class Capabilities(BaseModel):
     file_operation: bool = True
     script_run: bool = True
@@ -146,6 +167,10 @@ class PreviewResultRequest(SessionActionRequest):
 class PermissionDecisionRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=200)
     decision: Literal["allow_once", "deny"]
+
+
+class PermissionBatchDecisionRequest(BaseModel):
+    idempotency_key: str = Field(min_length=8, max_length=200)
 
 
 class ResumeRequest(BaseModel):

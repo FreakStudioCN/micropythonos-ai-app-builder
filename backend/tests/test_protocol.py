@@ -14,6 +14,7 @@ from app.models import (
     DeviceResultRequest,
     GeneratedFile,
     GenerateResponse,
+    PermissionBatchDecisionRequest,
     PermissionDecisionRequest,
     RevisionRequest,
     ScreenshotUploadRequest,
@@ -83,6 +84,34 @@ class ProtocolTests(unittest.TestCase):
             if item["permission_id"] == permission["permission_id"]
         )
         self.assertEqual(decided["decision"], "allow_once")
+
+    def test_all_permissions_can_be_allowed_atomically(self) -> None:
+        state = self.service.create(
+            SessionCreateRequest(
+                idempotency_key="create-batch-permissions-0001",
+                prompt="Build a touch calculator",
+                package_name="com.example.batch_permissions",
+                targets=["web-preview", "package-only"],
+            )
+        )
+        required = [item for item in state["permissions"] if item["required"]]
+        self.assertGreaterEqual(len(required), 4)
+
+        request = PermissionBatchDecisionRequest(
+            idempotency_key="allow-all-permissions-0001"
+        )
+        first = self.service.allow_all_permissions(state["session_id"], request)
+        second = self.service.allow_all_permissions(state["session_id"], request)
+
+        self.assertEqual(first["updated_at"], second["updated_at"])
+        self.assertEqual(first["status"], "created")
+        self.assertTrue(
+            all(
+                item["decision"] == "allow_once"
+                for item in first["permissions"]
+                if item["required"]
+            )
+        )
 
     def test_session_has_protocol_checkpoint_and_manifest_metadata(self) -> None:
         state = self.service.create(

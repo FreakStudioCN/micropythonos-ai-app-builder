@@ -5,6 +5,7 @@ import json
 import os
 import re
 import struct
+import time
 import zipfile
 import zlib
 from functools import lru_cache
@@ -233,6 +234,114 @@ def _parse_model_json(message: dict[str, Any]) -> dict[str, Any]:
     raise GenerationError("DeepSeek 没有返回可解析的生成结果")
 
 
+def _normalize_generation_payload(payload: dict[str, Any]) -> dict[str, Any]:
+    """Accept common JSON shapes while keeping one internal generation contract."""
+    normalized = dict(payload)
+
+    containers: list[dict[str, Any]] = [payload]
+    for key in ("result", "data", "output", "app", "application", "generated_app"):
+        value = payload.get(key)
+        if isinstance(value, dict):
+            containers.append(value)
+
+    code: str | None = None
+    for container in containers:
+        for key in (
+            "app_code",
+            "code",
+            "python_code",
+            "source_code",
+            "source",
+            "app_py",
+            "main_py",
+        ):
+            value = container.get(key)
+            if isinstance(value, str) and value.strip():
+                code = value
+                break
+        if code:
+            break
+
+    if not code:
+        for container in containers:
+            files = container.get("files")
+            if isinstance(files, dict):
+                preferred_paths = (
+                    "app.py",
+                    "assets/main.py",
+                    "main.py",
+                )
+                for preferred_path in preferred_paths:
+                    value = files.get(preferred_path)
+                    if isinstance(value, str) and value.strip():
+                        code = value
+                        break
+                    if isinstance(value, dict):
+                        content = value.get("content") or value.get("code")
+                        if isinstance(content, str) and content.strip():
+                            code = content
+                            break
+                if not code:
+                    for path, value in files.items():
+                        if not str(path).lower().endswith((".py", "app.py")):
+                            continue
+                        if isinstance(value, str) and value.strip():
+                            code = value
+                            break
+                        if isinstance(value, dict):
+                            content = value.get("content") or value.get("code")
+                            if isinstance(content, str) and content.strip():
+                                code = content
+                                break
+            elif isinstance(files, list):
+                for item in files:
+                    if not isinstance(item, dict):
+                        continue
+                    path = str(
+                        item.get("path")
+                        or item.get("name")
+                        or item.get("filename")
+                        or ""
+                    )
+                    content = item.get("content") or item.get("code")
+                    if (
+                        path.lower().endswith((".py", "app.py"))
+                        and isinstance(content, str)
+                        and content.strip()
+                    ):
+                        code = content
+                        break
+            if code:
+                break
+
+    tests: list[str] | None = None
+    for container in containers:
+        for key in (
+            "acceptance_tests",
+            "tests",
+            "acceptance_criteria",
+            "test_cases",
+        ):
+            value = container.get(key)
+            if isinstance(value, list):
+                cleaned = [str(item).strip() for item in value if str(item).strip()]
+                if cleaned:
+                    tests = cleaned
+                    break
+        if tests:
+            break
+
+    if code:
+        normalized["app_code"] = code
+    if tests:
+        normalized["acceptance_tests"] = tests
+    for container in containers[1:]:
+        for key in ("summary", "store_metadata"):
+            if key not in normalized and key in container:
+                normalized[key] = container[key]
+    return normalized
+
+
 def _settings() -> tuple[str, str, str]:
     key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
@@ -245,7 +354,9 @@ def _settings() -> tuple[str, str, str]:
 
 
 async def _call_deepseek(
-    request: GenerateRequest, correction: str = ""
+    request: GenerateRequest,
+    correction: str = "",
+    timeout_seconds: float | None = None,
 ) -> tuple[dict[str, Any], str]:
     key, base_url, model = _settings()
     user_prompt = (
@@ -281,6 +392,7 @@ async def _call_deepseek(
             f"运行错误（如果为空则表示功能修改）：\n{request.runtime_error or '无'}\n\n"
             f"上一次 app.py：\n{request.previous_code}"
         )
+    max_tokens = max(2200, min(6000, int(os.getenv("DEEPSEEK_MAX_TOKENS", "3200"))))
     payload = {
         "model": model,
         "messages": [
@@ -289,15 +401,27 @@ async def _call_deepseek(
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0.12 if correction else 0.25,
-        "max_tokens": 8000,
+        "max_tokens": max_tokens,
         "thinking": {"type": "disabled"},
     }
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
+    request_timeout = timeout_seconds or float(
+        os.getenv("DEEPSEEK_REQUEST_TIMEOUT_SECONDS", "19")
+    )
+    request_timeout = max(2.0, min(60.0, request_timeout))
     try:
-        async with httpx.AsyncClient(timeout=120) as client:
+        timeout = httpx.Timeout(
+            request_timeout,
+            connect=min(5.0, request_timeout),
+        )
+        async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 f"{base_url}/chat/completions", headers=headers, json=payload
             )
+    except httpx.TimeoutException as exc:
+        raise GenerationError(
+            f"DeepSeek 在 {request_timeout:.1f} 秒内没有返回"
+        ) from exc
     except httpx.HTTPError as exc:
         raise GenerationError(f"无法连接 DeepSeek：{exc}") from exc
 
@@ -489,25 +613,73 @@ def _validate_product_contract(code: str, prompt: str) -> list[str]:
 
     lowered_prompt = prompt.casefold()
     lowered_code = code.casefold()
+    tree = ast.parse(code)
+    function_names = {
+        node.name.casefold()
+        for node in ast.walk(tree)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    event_binding_count = sum(
+        1
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "add_event_cb"
+    )
     missing: list[str] = []
     if any(token in lowered_prompt for token in ("日历", "calendar")):
         if "month" not in lowered_code:
             missing.append("月份状态和切换逻辑")
-        if "day_buttons" not in lowered_code and "range(1, 32)" not in lowered_code:
+        if not any(
+            token in lowered_code
+            for token in (
+                "day_buttons",
+                "date_buttons",
+                "month_days",
+                "days_in_month",
+                "range(1, 32)",
+                "range(1, 43)",
+            )
+        ):
             missing.append("日期按钮集合")
-        if lowered_code.count("add_event_cb") < 2:
+        if event_binding_count < 1:
             missing.append("上月/下月或返回今天的真实交互")
     if any(token in lowered_prompt for token in ("计算器", "calculator")):
-        if not any(token in lowered_code for token in ("calculate", "compute", "equals")):
+        calculator_function_tokens = (
+            "calculate",
+            "compute",
+            "equals",
+            "equal",
+            "evaluate",
+            "apply_operator",
+            "perform_operation",
+            "execute_operation",
+            "handle_operator",
+        )
+        has_named_logic = any(
+            any(token in name for token in calculator_function_tokens)
+            for name in function_names
+        )
+        has_ast_arithmetic = any(
+            isinstance(node, ast.BinOp)
+            and isinstance(node.op, (ast.Add, ast.Sub, ast.Mult, ast.Div))
+            for node in ast.walk(tree)
+        )
+        has_state_machine = (
+            any(token in lowered_code for token in ("current_operator", "pending_operator", "operator"))
+            and any(token in lowered_code for token in ("result", "display", "operand"))
+        )
+        if not (has_named_logic or has_ast_arithmetic or has_state_machine):
             missing.append("计算执行逻辑")
         if not all(token in code for token in ("+", "-", "*", "/")):
             missing.append("四则运算符")
-        if lowered_code.count("add_event_cb") < 2:
+        # A single add_event_cb inside a button factory/loop can bind every key.
+        if event_binding_count < 1:
             missing.append("数字和运算按钮交互")
     if any(token in lowered_prompt for token in ("番茄", "pomodoro", "计时器", "timer")):
         if "lv.timer_create" not in code:
             missing.append("非阻塞计时器")
-        if lowered_code.count("add_event_cb") < 2:
+        if event_binding_count < 1:
             missing.append("开始/暂停/重置交互")
     if missing:
         raise GenerationError(
@@ -935,6 +1107,19 @@ def _build_mpk(package_name: str, manifest: dict[str, Any], app_code: str) -> st
 
 
 async def generate_app(request: GenerateRequest) -> GenerateResponse:
+    budget_seconds = max(
+        8.0,
+        min(60.0, float(os.getenv("DEEPSEEK_GENERATION_BUDGET_SECONDS", "20"))),
+    )
+    request_timeout_seconds = max(
+        3.0,
+        min(30.0, float(os.getenv("DEEPSEEK_REQUEST_TIMEOUT_SECONDS", "19"))),
+    )
+    max_attempts = max(
+        1,
+        min(2, int(os.getenv("DEEPSEEK_MAX_ATTEMPTS", "1"))),
+    )
+    deadline = time.monotonic() + budget_seconds
     correction = ""
     generated: dict[str, Any] = {}
     model = ""
@@ -943,10 +1128,27 @@ async def generate_app(request: GenerateRequest) -> GenerateResponse:
     acceptance_tests: list[str] = []
     api_usage: dict[str, Any] = {"checked": False, "planned": [], "missing": []}
     last_error: GenerationError | None = None
-    max_attempts = 5
-    for _attempt in range(max_attempts):
+    attempts_used = 0
+    for attempt in range(max_attempts):
+        remaining = deadline - time.monotonic()
+        if remaining < 2.0:
+            last_error = GenerationError(
+                f"生成已达到 {budget_seconds:.0f} 秒时间预算"
+            )
+            break
+        attempts_used = attempt + 1
+        attempts_after_this = max_attempts - attempts_used
+        reserved_for_retry = 3.0 if attempts_after_this else 0.0
+        call_timeout = min(
+            request_timeout_seconds,
+            max(2.0, remaining - reserved_for_retry),
+        )
         try:
-            generated, model = await _call_deepseek(request, correction)
+            generated, model = await _call_deepseek(
+                request,
+                correction,
+                timeout_seconds=call_timeout,
+            )
         except GenerationError as exc:
             last_error = exc
             correction = (
@@ -955,10 +1157,15 @@ async def generate_app(request: GenerateRequest) -> GenerateResponse:
                 "app_code 必须是 JSON 字符串。"
             )
             continue
+        generated = _normalize_generation_payload(generated)
         candidate = generated.get("app_code")
         candidate_tests = generated.get("acceptance_tests")
         if not isinstance(candidate, str) or not candidate.strip():
-            last_error = GenerationError("DeepSeek 返回结果中缺少 app_code")
+            received_fields = ", ".join(sorted(str(key) for key in generated)[:8])
+            field_hint = f"（收到字段：{received_fields}）" if received_fields else ""
+            last_error = GenerationError(
+                f"DeepSeek 返回结果中缺少可识别的 App 源码{field_hint}"
+            )
             correction = _build_correction(last_error)
             continue
         if (
@@ -995,7 +1202,8 @@ async def generate_app(request: GenerateRequest) -> GenerateResponse:
             correction = _build_correction(exc, candidate)
     if last_error is not None or not code:
         raise GenerationError(
-            f"DeepSeek 连续 {max_attempts} 次生成未通过检查：{last_error}"
+            f"DeepSeek 在 {budget_seconds:.0f} 秒预算内经过 "
+            f"{attempts_used} 次尝试仍未通过检查：{last_error}"
         )
     manifest = _manifest(request)
     manifest["activities"][0]["entrypoint"] = "assets/main.py"

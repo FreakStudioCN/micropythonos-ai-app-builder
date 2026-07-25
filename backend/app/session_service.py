@@ -24,6 +24,7 @@ from .models import (
     DemoSessionRequest,
     DeviceResultRequest,
     GenerateRequest,
+    PermissionBatchDecisionRequest,
     PermissionDecisionRequest,
     PreviewResultRequest,
     RevisionRequest,
@@ -917,6 +918,57 @@ class GeneratedApp(Activity):
                 self._write_state(state)
                 return self.get(state["session_id"])
         raise SessionNotFound(permission_id)
+
+    def allow_all_permissions(
+        self, session_id: str, request: PermissionBatchDecisionRequest
+    ) -> dict[str, Any]:
+        state = self._read(session_id)
+        if state.get("permission_batch_idempotency_key") == request.idempotency_key:
+            return state
+
+        denied = [
+            item
+            for item in state["permissions"]
+            if item.get("required") and item.get("decision") == "deny"
+        ]
+        if denied:
+            raise ValueError("存在已经拒绝的权限，请新建会话后重新确认")
+
+        decided_at = _now()
+        changed = False
+        for permission in state["permissions"]:
+            if not permission.get("required") or permission.get("decision") != "pending":
+                continue
+            permission["decision"] = "allow_once"
+            permission["decision_idempotency_key"] = (
+                f"{request.idempotency_key}:{permission['permission_id']}"
+            )
+            permission["decided_at"] = decided_at
+            permission["decision_source"] = "batch_allow_once"
+            changed = True
+            self._event(
+                state,
+                "status_update",
+                "mpos-plan-app-web",
+                {
+                    "status": "permission_allowed",
+                    "permission_id": permission["permission_id"],
+                    "message": f"权限已一键确认：{permission['title']}",
+                },
+            )
+
+        state["permission_batch_idempotency_key"] = request.idempotency_key
+        if changed:
+            state["status"] = "created"
+            state["last_error"] = None
+            self._event(
+                state,
+                "status_update",
+                "mpos-plan-app-web",
+                {"status": "ready", "message": "全部必需权限已一次性确认"},
+            )
+            self._write_state(state)
+        return self.get(session_id)
 
     def start_generation(
         self, session_id: str, request: SessionActionRequest
