@@ -23,6 +23,7 @@ interface BrowserSerialPort {
 
 interface BrowserSerial {
   requestPort(): Promise<BrowserSerialPort>;
+  getPorts?(): Promise<BrowserSerialPort[]>;
 }
 
 interface OutputWaiter {
@@ -59,6 +60,13 @@ const decodeBase64 = (value: string) => {
   return bytes;
 };
 
+export class DeviceDisconnectedError extends Error {
+  constructor(message = "The ESP32 connection was lost") {
+    super(message);
+    this.name = "DeviceDisconnectedError";
+  }
+}
+
 export class WebSerialDeviceClient {
   private port: BrowserSerialPort | null = null;
   private reader: SerialReader | null = null;
@@ -67,6 +75,10 @@ export class WebSerialDeviceClient {
   private decoder = new TextDecoder();
   private output = "";
   private waiters: OutputWaiter[] = [];
+  private connectionGeneration = 0;
+  private manualDisconnect = false;
+  private selectedInfo: { usbVendorId?: number; usbProductId?: number } = {};
+  private reconnecting: Promise<boolean> | null = null;
   private readonly options: DeviceClientOptions;
 
   constructor(options: DeviceClientOptions) {
@@ -78,7 +90,7 @@ export class WebSerialDeviceClient {
   }
 
   get connected() {
-    return Boolean(this.port && this.reader && this.writer);
+    return Boolean(this.reading && this.port && this.reader && this.writer);
   }
 
   async connect() {
@@ -88,6 +100,11 @@ export class WebSerialDeviceClient {
     }
     this.options.onState("connecting");
     const port = await serial.requestPort();
+    this.manualDisconnect = false;
+    return this.openPort(port);
+  }
+
+  private async openPort(port: BrowserSerialPort) {
     const info = port.getInfo?.() || {};
     // ESP32-S3 native USB (Espressif VID 0x303A) is not tied to a physical
     // 115200-baud UART. Asking Web Serial for a high baud rate removes the
@@ -111,26 +128,40 @@ export class WebSerialDeviceClient {
       await port.close();
       throw new Error("The selected serial port cannot be read or written");
     }
+    const generation = ++this.connectionGeneration;
     this.port = port;
     this.reader = port.readable.getReader();
     this.writer = port.writable.getWriter();
+    this.decoder = new TextDecoder();
     this.reading = true;
+    this.selectedInfo = info;
     const identity = info.usbVendorId
       ? `VID ${info.usbVendorId.toString(16).padStart(4, "0").toUpperCase()}`
       : "USB serial device";
     this.options.onState("connected", `${identity} · ${baudRate} baud`);
-    void this.readLoop();
+    void this.readLoop(generation);
     await this.writeRaw("\r\n");
     return { ...info, baudRate };
   }
 
   async disconnect() {
+    this.manualDisconnect = true;
+    ++this.connectionGeneration;
     this.reading = false;
+    this.rejectWaiters(new DeviceDisconnectedError("Serial connection closed"));
+    await this.releaseTransport();
+    this.options.onState("disconnected");
+  }
+
+  private rejectWaiters(error: Error) {
     for (const waiter of this.waiters) {
       window.clearTimeout(waiter.timer);
-      waiter.reject(new Error("Serial connection closed"));
+      waiter.reject(error);
     }
     this.waiters = [];
+  }
+
+  private async releaseTransport() {
     try {
       await this.reader?.cancel();
     } catch {
@@ -154,13 +185,78 @@ export class WebSerialDeviceClient {
       // The browser may already have closed the device.
     }
     this.port = null;
-    this.options.onState("disconnected");
+  }
+
+  private async markTransportLost(error: unknown, generation: number) {
+    if (generation !== this.connectionGeneration || this.manualDisconnect) return;
+    ++this.connectionGeneration;
+    this.reading = false;
+    const rawMessage = error instanceof Error ? error.message : String(error || "");
+    const message = /device has been lost|disconnected|networkerror/i.test(rawMessage)
+      ? "ESP32 disconnected or restarted. Reconnecting…"
+      : rawMessage || "The ESP32 connection was lost";
+    this.rejectWaiters(new DeviceDisconnectedError(message));
+    await this.releaseTransport();
+    this.options.onState("error", message);
+    void this.reconnect();
+  }
+
+  async reconnect(timeoutMs = 12_000) {
+    if (this.connected) return true;
+    if (this.reconnecting) return this.reconnecting;
+    const serial = serialFromNavigator();
+    if (!serial?.getPorts) return false;
+    const getPorts = serial.getPorts.bind(serial);
+    this.manualDisconnect = false;
+    this.reconnecting = (async () => {
+      const deadline = Date.now() + timeoutMs;
+      this.options.onState("connecting", "Waiting for ESP32 to reconnect…");
+      while (Date.now() < deadline) {
+        const ports = await getPorts().catch(() => []);
+        const candidates = ports.filter((candidate) => {
+          const info = candidate.getInfo?.() || {};
+          return (!this.selectedInfo.usbVendorId || info.usbVendorId === this.selectedInfo.usbVendorId)
+            && (!this.selectedInfo.usbProductId || info.usbProductId === this.selectedInfo.usbProductId);
+        });
+        for (const candidate of candidates) {
+          try {
+            await this.openPort(candidate);
+            return true;
+          } catch {
+            // A resetting USB device can be visible before it is ready to open.
+          }
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 500));
+      }
+      this.options.onState(
+        "error",
+        "ESP32 did not reconnect. Unplug it, reconnect it, then click Connect ESP32.",
+      );
+      return false;
+    })().finally(() => {
+      this.reconnecting = null;
+    });
+    return this.reconnecting;
+  }
+
+  static isDisconnectError(error: unknown) {
+    if (error instanceof DeviceDisconnectedError) return true;
+    const message = error instanceof Error ? error.message : String(error);
+    return /device has been lost|connection.*lost|disconnected|serial connection closed|networkerror/i.test(message);
   }
 
   async writeRaw(value: string | Uint8Array) {
     if (!this.writer) throw new Error("ESP32 is not connected");
     const data = typeof value === "string" ? new TextEncoder().encode(value) : value;
-    await this.writer.write(data);
+    const generation = this.connectionGeneration;
+    try {
+      await this.writer.write(data);
+    } catch (error) {
+      await this.markTransportLost(error, generation);
+      throw new DeviceDisconnectedError(
+        error instanceof Error ? error.message : "The ESP32 connection was lost",
+      );
+    }
   }
 
   async sendLine(command: string) {
@@ -236,7 +332,7 @@ export class WebSerialDeviceClient {
       "_written = 0",
       "try:",
       " while _remaining:",
-      "  _part = sys.stdin.buffer.read(min(4096, _remaining))",
+      "  _part = sys.stdin.buffer.read(min(16384, _remaining))",
       "  if not _part:",
       "   raise OSError('serial upload ended before all bytes arrived')",
       "  _count = _f.write(_part)",
@@ -266,7 +362,7 @@ export class WebSerialDeviceClient {
     const secondsAtSlowSerialRate = Math.ceil(bytes.length / 2_000);
     const transferTimeout = Math.max(30_000, (secondsAtSlowSerialRate + 20) * 1_000);
     const donePromise = this.waitForOutput(doneMarker, start, transferTimeout);
-    const writeSize = 4096;
+    const writeSize = this.selectedInfo.usbVendorId === 0x303a ? 32_768 : 8_192;
     onProgress(0);
     for (let offset = 0; offset < bytes.length; offset += writeSize) {
       const end = Math.min(bytes.length, offset + writeSize);
@@ -291,6 +387,51 @@ export class WebSerialDeviceClient {
     onProgress: (percent: number) => void,
   ) {
     const bytes = decodeBase64(base64);
+    const memoryMarker = `__MPOS_MEMORY_${crypto.randomUUID().replace(/-/g, "")}__`;
+    const memoryOutput = await this.execute([
+      "import gc",
+      "gc.collect()",
+      `print(${pythonString(memoryMarker)}, gc.mem_free())`,
+    ].join("\n"), 15_000);
+    const freeMemory = Number(
+      memoryOutput.match(new RegExp(`${memoryMarker}\\s+(\\d+)`))?.[1],
+    );
+    let canInstallFromRam = bytes.length <= 512 * 1024
+      && Number.isFinite(freeMemory)
+      && freeMemory > bytes.length * 2 + 96 * 1024;
+    if (canInstallFromRam) {
+      try {
+        await this.execute([
+          "import gc",
+          `__mpos_probe = bytearray(${bytes.length})`,
+          "del __mpos_probe",
+          "gc.collect()",
+        ].join("\n"), 15_000);
+      } catch {
+        canInstallFromRam = false;
+      }
+    }
+
+    // Low-memory boards use the official file installer. Native USB still
+    // uploads the MPK in large raw chunks, so this remains much faster than
+    // the old Base64-per-REPL-command path.
+    if (!canInstallFromRam) {
+      const tempPath = `/tmp/${packageName}.mpk`;
+      await this.uploadBase64(
+        tempPath,
+        base64,
+        (percent) => onProgress(Math.round(percent * 0.7)),
+      );
+      onProgress(72);
+      await this.execute([
+        "from mpos import AppManager",
+        `AppManager.install_mpk(${pythonString(tempPath)}, ${pythonString(`apps/${packageName}`)})`,
+        `assert AppManager.is_installed_by_name(${pythonString(packageName)}), 'App install did not register'`,
+      ].join("\n"), 180_000);
+      onProgress(100);
+      return;
+    }
+
     const destination = `apps/${packageName}`;
     const token = crypto.randomUUID().replace(/-/g, "");
     const readyMarker = `__MPOS_INSTALL_READY_${token}__`;
@@ -298,33 +439,38 @@ export class WebSerialDeviceClient {
     const errorMarker = `__MPOS_INSTALL_ERROR_${token}__`;
     const doneMarker = `__MPOS_INSTALL_DONE_${token}__`;
 
-    // Feed the serial bytes directly into MicroPythonOS' streaming unzip
-    // implementation. This avoids writing /tmp/*.mpk, reading it back,
-    // extracting it, and deleting it as four separate flash operations.
+    // Receive the compressed MPK into RAM first and extract only after the
+    // transfer finishes. Serial input is no longer throttled by decompression
+    // and flash writes, which is both faster and less likely to drop USB.
     const receiver = [
-      "import sys, os, micropython, shutil",
+      "import sys, os, micropython, shutil, gc",
       "from mpos import AppManager",
       "from mpos.content.streaming_unzip import StreamingUnzip",
-      "try:",
-      ` _st = os.stat(${pythonString(destination)})`,
-      " if _st[0] & 0x4000:",
-      `  shutil.rmtree(${pythonString(destination)})`,
-      " else:",
-      `  os.remove(${pythonString(destination)})`,
-      "except OSError:",
-      " pass",
-      `_extractor = StreamingUnzip(${pythonString(destination)}, expected_app_name=${pythonString(packageName)}, free_space_limit=lambda req: AppManager._check_free_space('.', req))`,
+      `_archive = bytearray(${bytes.length})`,
       `print(${pythonString(readyMarker)})`,
       "micropython.kbd_intr(-1)",
-      `_remaining = ${bytes.length}`,
       "try:",
-      " while _remaining:",
-      "  _part = sys.stdin.buffer.read(min(8192, _remaining))",
+      " _offset = 0",
+      ` while _offset < ${bytes.length}:`,
+      `  _part = sys.stdin.buffer.read(min(32768, ${bytes.length} - _offset))`,
       "  if not _part:",
       "   raise OSError('serial install ended before all bytes arrived')",
-      "  _extractor.feed(_part)",
-      "  _remaining -= len(_part)",
+      "  _archive[_offset:_offset + len(_part)] = _part",
+      "  _offset += len(_part)",
+      " try:",
+      `  _st = os.stat(${pythonString(destination)})`,
+      "  if _st[0] & 0x4000:",
+      `   shutil.rmtree(${pythonString(destination)})`,
+      "  else:",
+      `   os.remove(${pythonString(destination)})`,
+      " except OSError:",
+      "  pass",
+      `_extractor = StreamingUnzip(${pythonString(destination)}, expected_app_name=${pythonString(packageName)}, free_space_limit=lambda req: AppManager._check_free_space('.', req))`,
+      " for _offset in range(0, len(_archive), 32768):",
+      "  _extractor.feed(_archive[_offset:_offset + 32768])",
       " _extractor.finish()",
+      " del _archive",
+      " gc.collect()",
       " AppManager.refresh_apps()",
       ` if not AppManager.is_installed_by_name(${pythonString(packageName)}):`,
       "  raise OSError('App was extracted but is not registered')",
@@ -337,6 +483,11 @@ export class WebSerialDeviceClient {
       " sys.print_exception(e)",
       ` print(${pythonString(errorMarker)} + repr(e))`,
       "finally:",
+      " try:",
+      "  del _archive",
+      " except Exception:",
+      "  pass",
+      " gc.collect()",
       " micropython.kbd_intr(3)",
       ` print(${pythonString(doneMarker)})`,
     ].join("\n");
@@ -349,13 +500,14 @@ export class WebSerialDeviceClient {
     const secondsAtSlowSerialRate = Math.ceil(bytes.length / 2_000);
     const transferTimeout = Math.max(30_000, (secondsAtSlowSerialRate + 25) * 1_000);
     const donePromise = this.waitForOutput(doneMarker, start, transferTimeout);
-    const writeSize = 16_384;
+    const writeSize = this.selectedInfo.usbVendorId === 0x303a ? 32_768 : 8_192;
     onProgress(0);
     for (let offset = 0; offset < bytes.length; offset += writeSize) {
       const end = Math.min(bytes.length, offset + writeSize);
       await this.writeRaw(bytes.subarray(offset, end));
-      onProgress(Math.round((end / bytes.length) * 95));
+      onProgress(Math.round((end / bytes.length) * 80));
     }
+    onProgress(85);
     const output = await donePromise;
     const errorIndex = output.indexOf(errorMarker);
     if (errorIndex >= 0) {
@@ -485,9 +637,10 @@ export class WebSerialDeviceClient {
     }
   }
 
-  private async readLoop() {
+  private async readLoop(generation: number) {
+    let terminalError: unknown;
     try {
-      while (this.reading && this.reader) {
+      while (this.reading && this.reader && generation === this.connectionGeneration) {
         const { value, done } = await this.reader.read();
         if (done) break;
         if (value?.length) this.appendOutput(this.decoder.decode(value, { stream: true }));
@@ -495,9 +648,13 @@ export class WebSerialDeviceClient {
       const tail = this.decoder.decode();
       if (tail) this.appendOutput(tail);
     } catch (error) {
-      if (this.reading) {
-        const message = error instanceof Error ? error.message : String(error);
-        this.options.onState("error", message);
+      terminalError = error;
+    } finally {
+      if (this.reading && generation === this.connectionGeneration) {
+        await this.markTransportLost(
+          terminalError || new DeviceDisconnectedError("The ESP32 serial stream closed"),
+          generation,
+        );
       }
     }
   }

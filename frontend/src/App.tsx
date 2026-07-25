@@ -887,6 +887,7 @@ export default function App() {
         setDeviceState(nextState);
         setSerialConnected(nextState === "connected");
         if (nextState === "connected") {
+          setDeviceError("");
           setDeviceMessage(tr(
             `已连接 ${detail || "USB 串口设备"}。`,
             `Connected to ${detail || "USB serial device"}.`,
@@ -978,7 +979,26 @@ export default function App() {
     try {
       await action(client);
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
+      let finalError: unknown = error;
+      if (
+        ["probe", "install", "run", "restart"].includes(label)
+        && WebSerialDeviceClient.isDisconnectError(error)
+      ) {
+        setDeviceMessage(tr(
+          "设备刚刚重启或短暂断开，正在自动重连并重试…",
+          "The device restarted or briefly disconnected. Reconnecting and retrying…",
+        ));
+        const reconnected = await client.reconnect(15_000);
+        if (reconnected) {
+          try {
+            await action(client);
+            return;
+          } catch (retryError) {
+            finalError = retryError;
+          }
+        }
+      }
+      const reason = finalError instanceof Error ? finalError.message : String(finalError);
       setDeviceError(reason);
       setDeviceLogs((previous) => `${previous}\n[ERROR] ${reason}\n`.slice(-100_000));
       if (["probe", "install", "run", "restart"].includes(label)) {
