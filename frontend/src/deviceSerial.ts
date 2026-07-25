@@ -304,6 +304,7 @@ export class WebSerialDeviceClient {
     remotePath: string,
     base64: string,
     onProgress: (percent: number) => void,
+    deadline = Date.now() + 120_000,
   ) {
     const bytes = decodeBase64(base64);
     const token = crypto.randomUUID().replace(/-/g, "");
@@ -355,12 +356,19 @@ export class WebSerialDeviceClient {
     ].join("\n");
     const command = `exec(__import__('ubinascii').a2b_base64(${pythonString(encodeBase64(receiver))}).decode())`;
     const start = this.output.length;
-    const readyPromise = this.waitForOutput(readyMarker, start, 15_000);
+    const readyPromise = this.waitForOutput(
+      readyMarker,
+      start,
+      this.remainingInstallTime(deadline, 15_000),
+    );
     await this.sendLine(command);
     await readyPromise;
 
     const secondsAtSlowSerialRate = Math.ceil(bytes.length / 2_000);
-    const transferTimeout = Math.max(30_000, (secondsAtSlowSerialRate + 20) * 1_000);
+    const transferTimeout = this.remainingInstallTime(
+      deadline,
+      Math.max(30_000, (secondsAtSlowSerialRate + 20) * 1_000),
+    );
     const donePromise = this.waitForOutput(doneMarker, start, transferTimeout);
     const writeSize = this.selectedInfo.usbVendorId === 0x303a ? 32_768 : 8_192;
     onProgress(0);
@@ -386,13 +394,18 @@ export class WebSerialDeviceClient {
     base64: string,
     onProgress: (percent: number) => void,
   ) {
+    const installStarted = performance.now();
+    const deadline = Date.now() + 115_000;
     const bytes = decodeBase64(base64);
+    this.logDiagnostic(
+      `install start: ${packageName}, ${(bytes.length / 1024).toFixed(1)} KiB, budget 115s`,
+    );
     const memoryMarker = `__MPOS_MEMORY_${crypto.randomUUID().replace(/-/g, "")}__`;
     const memoryOutput = await this.execute([
       "import gc",
       "gc.collect()",
       `print(${pythonString(memoryMarker)}, gc.mem_free())`,
-    ].join("\n"), 15_000);
+    ].join("\n"), this.remainingInstallTime(deadline, 15_000));
     const freeMemory = Number(
       memoryOutput.match(new RegExp(`${memoryMarker}\\s+(\\d+)`))?.[1],
     );
@@ -406,7 +419,7 @@ export class WebSerialDeviceClient {
           `__mpos_probe = bytearray(${bytes.length})`,
           "del __mpos_probe",
           "gc.collect()",
-        ].join("\n"), 15_000);
+        ].join("\n"), this.remainingInstallTime(deadline, 15_000));
       } catch {
         canInstallFromRam = false;
       }
@@ -417,21 +430,33 @@ export class WebSerialDeviceClient {
     // the old Base64-per-REPL-command path.
     if (!canInstallFromRam) {
       const tempPath = `/tmp/${packageName}.mpk`;
+      this.logDiagnostic(`low-memory path: raw upload to ${tempPath}`);
+      const uploadStarted = performance.now();
       await this.uploadBase64(
         tempPath,
         base64,
         (percent) => onProgress(Math.round(percent * 0.7)),
+        deadline,
+      );
+      const uploadSeconds = Math.max(0.001, (performance.now() - uploadStarted) / 1000);
+      this.logDiagnostic(
+        `upload complete: ${uploadSeconds.toFixed(1)}s, ${(bytes.length / 1024 / uploadSeconds).toFixed(1)} KiB/s`,
       );
       onProgress(72);
+      this.logDiagnostic("device install started");
       await this.execute([
         "from mpos import AppManager",
         `AppManager.install_mpk(${pythonString(tempPath)}, ${pythonString(`apps/${packageName}`)})`,
         `assert AppManager.is_installed_by_name(${pythonString(packageName)}), 'App install did not register'`,
-      ].join("\n"), 180_000);
+      ].join("\n"), this.remainingInstallTime(deadline, 90_000));
       onProgress(100);
+      this.logDiagnostic(
+        `install complete: ${((performance.now() - installStarted) / 1000).toFixed(1)}s total`,
+      );
       return;
     }
 
+    this.logDiagnostic(`fast path: receive compressed MPK in RAM (${Math.round(freeMemory / 1024)} KiB free)`);
     const destination = `apps/${packageName}`;
     const token = crypto.randomUUID().replace(/-/g, "");
     const readyMarker = `__MPOS_INSTALL_READY_${token}__`;
@@ -493,14 +518,22 @@ export class WebSerialDeviceClient {
     ].join("\n");
     const command = `exec(__import__('ubinascii').a2b_base64(${pythonString(encodeBase64(receiver))}).decode())`;
     const start = this.output.length;
-    const readyPromise = this.waitForOutput(readyMarker, start, 15_000);
+    const readyPromise = this.waitForOutput(
+      readyMarker,
+      start,
+      this.remainingInstallTime(deadline, 15_000),
+    );
     await this.sendLine(command);
     await readyPromise;
 
     const secondsAtSlowSerialRate = Math.ceil(bytes.length / 2_000);
-    const transferTimeout = Math.max(30_000, (secondsAtSlowSerialRate + 25) * 1_000);
+    const transferTimeout = this.remainingInstallTime(
+      deadline,
+      Math.max(30_000, (secondsAtSlowSerialRate + 25) * 1_000),
+    );
     const donePromise = this.waitForOutput(doneMarker, start, transferTimeout);
     const writeSize = this.selectedInfo.usbVendorId === 0x303a ? 32_768 : 8_192;
+    const transferStarted = performance.now();
     onProgress(0);
     for (let offset = 0; offset < bytes.length; offset += writeSize) {
       const end = Math.min(bytes.length, offset + writeSize);
@@ -508,6 +541,10 @@ export class WebSerialDeviceClient {
       onProgress(Math.round((end / bytes.length) * 80));
     }
     onProgress(85);
+    const transferSeconds = Math.max(0.001, (performance.now() - transferStarted) / 1000);
+    this.logDiagnostic(
+      `raw transfer complete: ${transferSeconds.toFixed(1)}s, ${(bytes.length / 1024 / transferSeconds).toFixed(1)} KiB/s; extracting`,
+    );
     const output = await donePromise;
     const errorIndex = output.indexOf(errorMarker);
     if (errorIndex >= 0) {
@@ -518,6 +555,9 @@ export class WebSerialDeviceClient {
       throw new Error("Device did not confirm the MPK install");
     }
     onProgress(100);
+    this.logDiagnostic(
+      `install complete: ${((performance.now() - installStarted) / 1000).toFixed(1)}s total`,
+    );
   }
 
   async uploadBase64WithReplChunks(
@@ -598,6 +638,18 @@ export class WebSerialDeviceClient {
       return (base64.length / 4) * 3 - padding;
     }
     return (chars / 4) * 3;
+  }
+
+  private remainingInstallTime(deadline: number, cap: number) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 1_000) {
+      throw new Error("MPK install exceeded the 120 second time limit");
+    }
+    return Math.max(1_000, Math.min(cap, remaining));
+  }
+
+  private logDiagnostic(message: string) {
+    this.options.onData(`\n[MPK] ${message}\n`);
   }
 
   private waitForOutput(needle: string, start: number, timeoutMs: number) {
