@@ -119,7 +119,17 @@ class GeneratorQualityTests(unittest.TestCase):
             self.assertTrue(archive.getinfo(names[0]).is_dir())
             self.assertEqual(names[1], f"{package_name}/assets/")
             self.assertIn(f"{package_name}/MANIFEST.JSON", names)
+            self.assertIn(f"{package_name}/META-INF/MANIFEST.JSON", names)
+            self.assertIn(f"{package_name}/icon_64x64.png", names)
+            self.assertIn(
+                f"{package_name}/res/mipmap-mdpi/icon_64x64.png",
+                names,
+            )
             self.assertIn(f"{package_name}/assets/main.py", names)
+            icon = archive.read(f"{package_name}/icon_64x64.png")
+            self.assertEqual(icon[:8], b"\x89PNG\r\n\x1a\n")
+            self.assertEqual(int.from_bytes(icon[16:20], "big"), 64)
+            self.assertEqual(int.from_bytes(icon[20:24], "big"), 64)
 
     def test_flex_flow_selector_is_removed_for_current_lvgl_binding(self) -> None:
         source = "grid.set_flex_flow(lv.FLEX_FLOW.ROW_WRAP, 0)"

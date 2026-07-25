@@ -4,7 +4,9 @@ import io
 import json
 import os
 import re
+import struct
 import zipfile
+import zlib
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
@@ -871,14 +873,62 @@ def _manifest(request: GenerateRequest) -> dict[str, Any]:
     }
 
 
+def _png_chunk(chunk_type: bytes, payload: bytes) -> bytes:
+    checksum = zlib.crc32(chunk_type + payload) & 0xFFFFFFFF
+    return (
+        struct.pack(">I", len(payload))
+        + chunk_type
+        + payload
+        + struct.pack(">I", checksum)
+    )
+
+
+def _default_icon_png(package_name: str) -> bytes:
+    """Create a deterministic 64x64 RGBA icon without external dependencies."""
+    seed = zlib.crc32(package_name.encode("utf-8")) & 0xFFFFFFFF
+    start = (52 + (seed & 63), 62 + ((seed >> 8) & 63), 180 + ((seed >> 16) & 55))
+    end = (92 + ((seed >> 6) & 63), 42 + ((seed >> 14) & 63), 190 + ((seed >> 22) & 55))
+    raw = bytearray()
+    tiles = ((13, 13), (37, 13), (13, 37), (37, 37))
+    for y in range(64):
+        raw.append(0)
+        for x in range(64):
+            ratio = (x + y) / 126
+            red = round(start[0] * (1 - ratio) + end[0] * ratio)
+            green = round(start[1] * (1 - ratio) + end[1] * ratio)
+            blue = round(start[2] * (1 - ratio) + end[2] * ratio)
+            if any(left <= x < left + 14 and top <= y < top + 14 for left, top in tiles):
+                red, green, blue = 245, 247, 255
+            raw.extend((red, green, blue, 255))
+    header = struct.pack(">IIBBBBB", 64, 64, 8, 6, 0, 0, 0)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", header)
+        + _png_chunk(b"IDAT", zlib.compress(bytes(raw), 9))
+        + _png_chunk(b"IEND", b"")
+    )
+
+
 def _build_mpk(package_name: str, manifest: dict[str, Any], app_code: str) -> str:
     stream = io.BytesIO()
+    manifest_bytes = json.dumps(
+        manifest,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    icon_bytes = _default_icon_png(package_name)
     with zipfile.ZipFile(stream, "w", compression=zipfile.ZIP_STORED) as archive:
         archive.writestr(f"{package_name}/", b"")
         archive.writestr(f"{package_name}/assets/", b"")
+        archive.writestr(f"{package_name}/META-INF/", b"")
+        archive.writestr(f"{package_name}/res/", b"")
+        archive.writestr(f"{package_name}/res/mipmap-mdpi/", b"")
+        archive.writestr(f"{package_name}/MANIFEST.JSON", manifest_bytes)
+        archive.writestr(f"{package_name}/META-INF/MANIFEST.JSON", manifest_bytes)
+        archive.writestr(f"{package_name}/icon_64x64.png", icon_bytes)
         archive.writestr(
-            f"{package_name}/MANIFEST.JSON",
-            json.dumps(manifest, ensure_ascii=False, separators=(",", ":")),
+            f"{package_name}/res/mipmap-mdpi/icon_64x64.png",
+            icon_bytes,
         )
         archive.writestr(f"{package_name}/assets/main.py", app_code)
     return base64.b64encode(stream.getvalue()).decode("ascii")
@@ -1002,7 +1052,7 @@ async def generate_app(request: GenerateRequest) -> GenerateResponse:
             "version": request.version,
             "name": request.display_name,
         },
-        "files_written": ["MANIFEST.JSON", "assets/main.py"],
+        "files_written": ["MANIFEST.JSON", "icon_64x64.png", "assets/main.py"],
         "api_usage": api_usage,
         "validation": {"gates": warnings},
         "acceptance_tests": acceptance_tests,

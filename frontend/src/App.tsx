@@ -86,6 +86,21 @@ interface BillingAccount {
   generation_cost: number;
   initial_credits: number;
 }
+interface SaveFileHandle {
+  createWritable(): Promise<{
+    write(data: Blob): Promise<void>;
+    close(): Promise<void>;
+  }>;
+}
+type SaveFilePickerWindow = Window & {
+  showSaveFilePicker?: (options: {
+    suggestedName: string;
+    types: Array<{
+      description: string;
+      accept: Record<string, string[]>;
+    }>;
+  }) => Promise<SaveFileHandle>;
+};
 
 const defaultPrompt = "做一个极简四则运算计算器，按钮要大，适合触摸屏";
 const defaultPromptEn = "Build a minimal four-function calculator with large touch-friendly buttons";
@@ -1095,17 +1110,36 @@ export default function App() {
     setDeviceMessage(tr(`已重启 ${appName}`, `Restarted ${appName}`));
   });
 
-  const downloadMpk = () => {
+  const downloadMpk = async () => {
     if (!result) return;
     const binary = window.atob(result.mpk_base64);
     const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
     const blob = new Blob([bytes], { type: "application/zip" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = result.mpk_filename;
-    anchor.click();
-    URL.revokeObjectURL(url);
+    const pickerWindow = window as SaveFilePickerWindow;
+    if (pickerWindow.showSaveFilePicker) {
+      try {
+        const handle = await pickerWindow.showSaveFilePicker({
+          suggestedName: result.mpk_filename,
+          types: [{
+            description: "MicroPythonOS package",
+            accept: { "application/zip": [".mpk"] },
+          }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        throw error;
+      }
+    } else {
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = result.mpk_filename;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    }
     setToast(tr(`已下载真实 ${result.mpk_filename}`, `Downloaded ${result.mpk_filename}`));
   };
 

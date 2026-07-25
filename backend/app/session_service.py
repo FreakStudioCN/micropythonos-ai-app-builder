@@ -17,7 +17,7 @@ from typing import Any
 
 from fastapi.encoders import jsonable_encoder
 
-from .generator import GenerationError, _build_mpk, generate_app
+from .generator import GenerationError, _build_mpk, _default_icon_png, generate_app
 from .models import (
     PROTOCOL_VERSION,
     DemoErrorInjectionRequest,
@@ -1209,6 +1209,12 @@ class GeneratedApp(Activity):
                             "result" if role == "generation_result" else "source",
                             role,
                         )
+                    self._write_generated_icon(
+                        state,
+                        app_root,
+                        generated.package_name,
+                        phase,
+                    )
                     self._checkpoint(
                         state, phase, "code_generated", "mpos-test-app-web"
                     )
@@ -1695,6 +1701,12 @@ class GeneratedApp(Activity):
                         "source" if role != "generation_result" else "result",
                         role,
                     )
+                self._write_generated_icon(
+                    state,
+                    app_root,
+                    generated.package_name,
+                    "mpos-gen-app-web",
+                )
                 previous_code = state.get("pending_repair", {}).get("previous_code")
                 generated_code = next(
                     (
@@ -2159,6 +2171,24 @@ class GeneratedApp(Activity):
             {**phase_payload, "artifacts": state["artifacts"]},
         )
 
+    def _write_generated_icon(
+        self,
+        state: dict[str, Any],
+        app_root: Path,
+        package_name: str,
+        phase: str,
+    ) -> None:
+        icon_path = app_root / "icon_64x64.png"
+        icon_path.parent.mkdir(parents=True, exist_ok=True)
+        icon_path.write_bytes(_default_icon_png(package_name))
+        self._register_artifact(
+            state,
+            icon_path,
+            phase,
+            "source",
+            "app_icon",
+        )
+
     def _write_artifact_json(
         self, state: dict[str, Any], name: str, phase: str, value: dict[str, Any]
     ) -> None:
@@ -2268,6 +2298,7 @@ class GeneratedApp(Activity):
                         or artifact["role"]
                         in {
                             "app_manifest",
+                            "app_icon",
                             "mpk",
                             "app_index_entry",
                             "desktop_screenshot",
