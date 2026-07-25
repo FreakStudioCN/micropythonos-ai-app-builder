@@ -1,4 +1,0 @@
-{"file": "backend/tests/test_access_control.py", "reason": "Auth, Cookie, CORS and isolation assertions"}
-{"file": "backend/tests/test_object_storage.py", "reason": "Object storage configuration and restore assertions"}
-{"file": "backend/tests/test_billing.py", "reason": "50/10 credit and idempotency assertions"}
-{"file": "docs/deployment-render-supabase.md", "reason": "Operator deployment and smoke-test checklist"}

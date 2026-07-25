@@ -1,5 +1,0 @@
-{"file":".trellis/spec/backend/security/index.md","reason":"Verify auth, ownership, credits, and deployment regressions"}
-{"file":".trellis/spec/backend/auth-and-durable-beta.md","reason":"Check ordinary-user isolation remains intact while admin access is explicit"}
-{"file":".trellis/spec/frontend/client/index.md","reason":"Verify frontend role and unlimited account handling"}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check the role/unlimited contract end to end"}
-{"file":".trellis/tasks/07-25-superadmin-role/research/role-and-environment.md","reason":"Validate implementation against observed schema and environment constraints"}

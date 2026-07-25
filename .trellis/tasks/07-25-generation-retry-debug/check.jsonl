@@ -1,4 +1,0 @@
-{"file":".trellis/spec/backend/security/index.md","reason":"Quality checks for private session artifacts and backend regressions"}
-{"file":".trellis/spec/backend/auth-and-durable-beta.md","reason":"Verify ownership, private storage, and secret-handling contracts"}
-{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Check the full generator-to-storage data flow and archive round trip"}
-{"file":".trellis/tasks/07-25-generation-retry-debug/research/generation-retry-debug.md","reason":"Verify the implementation addresses the observed retry root cause"}
