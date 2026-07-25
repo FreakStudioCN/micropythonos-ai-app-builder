@@ -48,7 +48,8 @@ class S3SessionObjectStore:
             "bucket": "MPOS_STORAGE_BUCKET",
         }
         values = {key: os.getenv(name, "").strip() for key, name in names.items()}
-        if not any(values.values()):
+        session_token = os.getenv("MPOS_STORAGE_SESSION_TOKEN", "").strip()
+        if not any(values.values()) and not session_token:
             return DisabledSessionObjectStore()
         missing = [names[key] for key, value in values.items() if not value]
         if missing:
@@ -56,6 +57,8 @@ class S3SessionObjectStore:
                 "Incomplete object-storage configuration: " + ", ".join(missing)
             )
         bucket = values.pop("bucket")
+        if session_token:
+            values["aws_session_token"] = session_token
         client = boto3.client(
             "s3",
             **values,
