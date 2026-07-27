@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.blockless.dev/mpos-ai-app/v1/generation-result.schema.json",
+  "title": "mpos-gen-app-web generation result",
+  "allOf": [
+    {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/resultBase"
+    },
+    {
+      "type": "object",
+      "required": [
+        "mode",
+        "app",
+        "files_written",
+        "api_usage",
+        "validation"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "mpos-gen-app-web-v1"
+        },
+        "phase": {
+          "const": "mpos-gen-app-web"
+        },
+        "stage": {
+          "const": "generate"
+        },
+        "mode": {
+          "enum": [
+            "create",
+            "repair",
+            "revise"
+          ]
+        },
+        "app": {
+          "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/app"
+        },
+        "files_written": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/relativePath"
+              },
+              {
+                "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/fileRecord"
+              }
+            ]
+          }
+        },
+        "api_usage": {
+          "type": "object",
+          "required": [
+            "checked",
+            "missing"
+          ],
+          "properties": {
+            "checked": {
+              "type": "boolean"
+            },
+            "used": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            },
+            "missing": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "validation": {
+          "type": "object",
+          "required": [
+            "gates"
+          ],
+          "properties": {
+            "gates": {
+              "type": "array",
+              "items": {
+                "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/gate"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        "handoff": {
+          "type": "object",
+          "required": [
+            "next_phase"
+          ],
+          "properties": {
+            "next_phase": {
+              "enum": [
+                "mpos-test-app-web",
+                null
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "required_artifacts": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "unevaluatedProperties": false
+}

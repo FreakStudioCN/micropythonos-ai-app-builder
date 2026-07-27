@@ -1,0 +1,113 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.blockless.dev/mpos-ai-app/v1/app-test-result.schema.json",
+  "title": "mpos-test-app-web App test result",
+  "allOf": [
+    {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/resultBase"
+    },
+    {
+      "type": "object",
+      "required": [
+        "desktop_launch",
+        "controller_smoke",
+        "screenshots",
+        "manual_commands"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "mpos-test-app-web-v1"
+        },
+        "phase": {
+          "const": "mpos-test-app-web"
+        },
+        "stage": {
+          "const": "test"
+        },
+        "desktop_launch": {
+          "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/testTargetResult"
+        },
+        "controller_smoke": {
+          "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/testTargetResult"
+        },
+        "web_preview": {
+          "oneOf": [
+            {
+              "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/testTargetResult"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "screenshots": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "visible_text": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "widget_tree": {
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": true
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manual_commands": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "handoff": {
+          "type": "object",
+          "required": [
+            "next_phase"
+          ],
+          "properties": {
+            "next_phase": {
+              "enum": [
+                "mpos-package-app-web",
+                "mpos-gen-app-web",
+                null
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "required_artifacts": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "unevaluatedProperties": false
+}

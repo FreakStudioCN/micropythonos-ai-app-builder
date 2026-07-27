@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.blockless.dev/mpos-ai-app/v1/publish-result.schema.json",
+  "title": "mpos-publish-app-web publish result",
+  "allOf": [
+    {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/resultBase"
+    },
+    {
+      "type": "object",
+      "required": [
+        "publish_ready",
+        "release_readiness",
+        "blockers",
+        "app",
+        "mpk",
+        "screenshot_readiness",
+        "upystore_comparison",
+        "manual_upload_guidance"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "mpos-publish-app-web-v1"
+        },
+        "phase": {
+          "const": "mpos-publish-app-web"
+        },
+        "stage": {
+          "const": "publish_check"
+        },
+        "publish_ready": {
+          "type": "boolean"
+        },
+        "release_readiness": {
+          "enum": [
+            "ready_for_manual_upload",
+            "partial",
+            "blocked",
+            "unknown_unverified"
+          ]
+        },
+        "blockers": {
+          "type": "array",
+          "items": {
+            "oneOf": [
+              {
+                "type": "string",
+                "minLength": 1
+              },
+              {
+                "type": "object",
+                "required": [
+                  "code",
+                  "message"
+                ],
+                "properties": {
+                  "code": {
+                    "type": "string",
+                    "pattern": "^[A-Z][A-Z0-9_]{2,127}$"
+                  },
+                  "message": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "field": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "artifact_id": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "app": {
+          "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/app"
+        },
+        "mpk": {
+          "type": "object",
+          "required": [
+            "path",
+            "filename"
+          ],
+          "properties": {
+            "path": {
+              "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/relativePath"
+            },
+            "filename": {
+              "type": "string",
+              "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+_r[1-9][0-9]*\\.mpk$"
+            },
+            "sha256": {
+              "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/sha256"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "screenshot_readiness": {
+          "type": "object",
+          "required": [
+            "ready",
+            "artifact_ids",
+            "missing"
+          ],
+          "properties": {
+            "ready": {
+              "type": "boolean"
+            },
+            "artifact_ids": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            },
+            "missing": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "upystore_comparison": {
+          "type": "object",
+          "required": [
+            "status"
+          ],
+          "properties": {
+            "status": {
+              "enum": [
+                "not_checked",
+                "not_published",
+                "current",
+                "update_available",
+                "conflict",
+                "unknown_unverified"
+              ]
+            },
+            "latest_version": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": false
+        },
+        "manual_upload_guidance": {
+          "type": "object",
+          "required": [
+            "developer_url",
+            "steps"
+          ],
+          "properties": {
+            "developer_url": {
+              "type": "string",
+              "format": "uri",
+              "pattern": "^https://"
+            },
+            "steps": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "bundle_artifact_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "handoff": {
+          "type": "object",
+          "required": [
+            "next_phase"
+          ],
+          "properties": {
+            "next_phase": {
+              "type": "null"
+            },
+            "reason": {
+              "type": "string"
+            },
+            "required_artifacts": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "publish_ready"
+            ],
+            "properties": {
+              "publish_ready": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "release_readiness": {
+                "const": "ready_for_manual_upload"
+              },
+              "blockers": {
+                "maxItems": 0
+              },
+              "screenshot_readiness": {
+                "properties": {
+                  "ready": {
+                    "const": true
+                  },
+                  "missing": {
+                    "maxItems": 0
+                  }
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  ],
+  "unevaluatedProperties": false
+}

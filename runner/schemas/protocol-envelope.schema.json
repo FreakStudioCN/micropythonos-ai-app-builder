@@ -1,6 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "mpos-ai-app-v1-envelope",
+  "title": "MicroPythonOS AI App protocol envelope",
   "type": "object",
   "required": [
     "protocol_version",
@@ -13,25 +14,101 @@
     "input"
   ],
   "properties": {
-    "protocol_version": {"const": "mpos-ai-app/v1"},
-    "session_id": {"type": "string", "pattern": "^sess_[a-f0-9]{16}$"},
-    "checkpoint_id": {"type": "string", "minLength": 1},
-    "idempotency_key": {"type": "string", "minLength": 8},
-    "operation": {"type": "string", "minLength": 1},
-    "status": {
-      "enum": [
-        "created",
-        "running",
-        "blocked",
-        "waiting_preview",
-        "completed",
-        "failed",
-        "cancelled",
-        "timeout"
-      ]
+    "protocol_version": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/protocolVersion"
     },
-    "capabilities": {"type": "object"},
-    "input": {"type": "object"}
+    "session_id": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/sessionId"
+    },
+    "checkpoint_id": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/checkpointId"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128
+    },
+    "operation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "status": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/envelopeStatus"
+    },
+    "stage": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/canonicalStage"
+    },
+    "capabilities": {
+      "$comment": "Known and future v1 capabilities are boolean feature flags.",
+      "type": "object",
+      "properties": {
+        "desktop_preview": {
+          "type": "boolean"
+        },
+        "web_preview": {
+          "type": "boolean"
+        },
+        "physical_device": {
+          "type": "boolean"
+        },
+        "mpremote": {
+          "type": "boolean"
+        },
+        "upystore_publish": {
+          "type": "boolean"
+        },
+        "network_read": {
+          "type": "boolean"
+        },
+        "file_write": {
+          "type": "boolean"
+        },
+        "script_run": {
+          "type": "boolean"
+        },
+        "device_serial": {
+          "type": "boolean"
+        },
+        "final_artifacts_only": {
+          "type": "boolean"
+        },
+        "batch_mode": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": {
+        "type": "boolean"
+      }
+    },
+    "input": {
+      "$comment": "Operation-specific input is validated by the operation handler.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "output": {
+      "$comment": "Operation-specific output is validated by its result schema.",
+      "type": "object",
+      "additionalProperties": true
+    },
+    "structured_errors": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/structuredError"
+      }
+    },
+    "permission_request": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/permission-request.schema.json"
+    },
+    "artifact_manifest": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/artifact-manifest.schema.json"
+    },
+    "created_at": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/timestamp"
+    },
+    "updated_at": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/timestamp"
+    }
   },
-  "additionalProperties": true
+  "additionalProperties": false
 }

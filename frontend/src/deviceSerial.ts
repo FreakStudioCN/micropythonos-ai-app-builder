@@ -68,6 +68,71 @@ export const buildFastPathExtractorLine = (
 ) =>
   ` _extractor = StreamingUnzip(${pythonString(destination)}, expected_app_name=${pythonString(packageName)}, free_space_limit=lambda req: AppManager._check_free_space('.', req))`;
 
+export type DeviceInstallStage = "PING" | "MEMORY" | "READY" | "TRANSFER";
+
+export class DeviceProbeError extends Error {
+  readonly stage: DeviceInstallStage;
+  readonly originalError?: unknown;
+
+  constructor(stage: DeviceInstallStage, message: string, originalError?: unknown) {
+    super(`[${stage}] ${message}`);
+    this.name = "DeviceProbeError";
+    this.stage = stage;
+    this.originalError = originalError;
+  }
+}
+
+export const runDeviceInstallStage = async <T>(
+  stage: DeviceInstallStage,
+  action: () => Promise<T>,
+): Promise<T> => {
+  try {
+    return await action();
+  } catch (error) {
+    if (error instanceof DeviceProbeError) throw error;
+    const message = error instanceof Error ? error.message : String(error);
+    throw new DeviceProbeError(stage, message || "Device did not respond", error);
+  }
+};
+
+interface InstallPreflightOptions {
+  execute: (source: string, timeoutMs: number) => Promise<string>;
+  remainingTime: (timeoutMs: number) => number;
+  tokenFactory?: () => string;
+}
+
+export const runInstallPreflight = async ({
+  execute,
+  remainingTime,
+  tokenFactory = () => crypto.randomUUID().replace(/-/g, ""),
+}: InstallPreflightOptions): Promise<number> => {
+  const pingMarker = `__MPOS_PING_${tokenFactory()}__`;
+  const pingOutput = await runDeviceInstallStage(
+    "PING",
+    () => execute(`print(${pythonString(pingMarker)})`, remainingTime(5_000)),
+  );
+  if (!pingOutput.includes(pingMarker)) {
+    throw new DeviceProbeError("PING", "Device REPL did not return the PING marker");
+  }
+
+  const memoryMarker = `__MPOS_MEMORY_${tokenFactory()}__`;
+  const memoryOutput = await runDeviceInstallStage(
+    "MEMORY",
+    () => execute([
+      "import gc",
+      "gc.collect()",
+      `print(${pythonString(memoryMarker)}, gc.mem_free())`,
+    ].join("\n"), remainingTime(10_000)),
+  );
+  const freeMemory = Number(
+    memoryOutput.match(new RegExp(`${memoryMarker}\\s+(\\d+)`))?.[1],
+  );
+  if (!Number.isFinite(freeMemory)) {
+    throw new DeviceProbeError("MEMORY", "Device did not return a valid free-memory value");
+  }
+  return freeMemory;
+};
+
 export class DeviceDisconnectedError extends Error {
   constructor(message = "The ESP32 connection was lost") {
     super(message);
@@ -143,9 +208,14 @@ export class WebSerialDeviceClient {
     this.decoder = new TextDecoder();
     this.reading = true;
     this.selectedInfo = info;
-    const identity = info.usbVendorId
-      ? `VID ${info.usbVendorId.toString(16).padStart(4, "0").toUpperCase()}`
-      : "USB serial device";
+    const identity = [
+      info.usbVendorId !== undefined
+        ? `VID ${info.usbVendorId.toString(16).padStart(4, "0").toUpperCase()}`
+        : "",
+      info.usbProductId !== undefined
+        ? `PID ${info.usbProductId.toString(16).padStart(4, "0").toUpperCase()}`
+        : "",
+    ].filter(Boolean).join(" · ") || "USB serial device";
     this.options.onState("connected", `${identity} · ${baudRate} baud`);
     void this.readLoop(generation);
     await this.writeRaw("\r\n");
@@ -429,15 +499,10 @@ export class WebSerialDeviceClient {
     this.logDiagnostic(
       `install start: ${packageName}, ${(bytes.length / 1024).toFixed(1)} KiB, budget 30s`,
     );
-    const memoryMarker = `__MPOS_MEMORY_${crypto.randomUUID().replace(/-/g, "")}__`;
-    const memoryOutput = await this.execute([
-      "import gc",
-      "gc.collect()",
-      `print(${pythonString(memoryMarker)}, gc.mem_free())`,
-    ].join("\n"), this.remainingInstallTime(deadline, 15_000));
-    const freeMemory = Number(
-      memoryOutput.match(new RegExp(`${memoryMarker}\\s+(\\d+)`))?.[1],
-    );
+    const freeMemory = await runInstallPreflight({
+      execute: (source, timeoutMs) => this.execute(source, timeoutMs),
+      remainingTime: (timeoutMs) => this.remainingInstallTime(deadline, timeoutMs),
+    });
     const canInstallFromRam = bytes.length <= 512 * 1024
       && Number.isFinite(freeMemory)
       && freeMemory > bytes.length * 2 + 96 * 1024;
@@ -516,34 +581,38 @@ export class WebSerialDeviceClient {
     ].join("\n");
     const command = `exec(__import__('ubinascii').a2b_base64(${pythonString(encodeBase64(receiver))}).decode())`;
     const start = this.output.length;
-    const readyPromise = this.waitForOutput(
-      readyMarker,
-      start,
-      this.remainingInstallTime(deadline, 15_000),
-    );
-    await this.sendLine(command);
-    await readyPromise;
+    await runDeviceInstallStage("READY", async () => {
+      const readyPromise = this.waitForOutput(
+        readyMarker,
+        start,
+        this.remainingInstallTime(deadline, 15_000),
+      );
+      await this.sendLine(command);
+      await readyPromise;
+    });
 
-    const secondsAtSlowSerialRate = Math.ceil(bytes.length / 2_000);
-    const transferTimeout = this.remainingInstallTime(
-      deadline,
-      Math.max(30_000, (secondsAtSlowSerialRate + 25) * 1_000),
-    );
-    const donePromise = this.waitForOutput(doneMarker, start, transferTimeout);
-    const writeSize = this.selectedInfo.usbVendorId === 0x303a ? 32_768 : 8_192;
-    const transferStarted = performance.now();
-    onProgress(0);
-    for (let offset = 0; offset < bytes.length; offset += writeSize) {
-      const end = Math.min(bytes.length, offset + writeSize);
-      await this.writeRawBeforeDeadline(bytes.subarray(offset, end), deadline);
-      onProgress(Math.round((end / bytes.length) * 80));
-    }
-    onProgress(85);
-    const transferSeconds = Math.max(0.001, (performance.now() - transferStarted) / 1000);
-    this.logDiagnostic(
-      `raw transfer complete: ${transferSeconds.toFixed(1)}s, ${(bytes.length / 1024 / transferSeconds).toFixed(1)} KiB/s; extracting`,
-    );
-    const output = await donePromise;
+    const output = await runDeviceInstallStage("TRANSFER", async () => {
+      const secondsAtSlowSerialRate = Math.ceil(bytes.length / 2_000);
+      const transferTimeout = this.remainingInstallTime(
+        deadline,
+        Math.max(30_000, (secondsAtSlowSerialRate + 25) * 1_000),
+      );
+      const donePromise = this.waitForOutput(doneMarker, start, transferTimeout);
+      const writeSize = this.selectedInfo.usbVendorId === 0x303a ? 32_768 : 8_192;
+      const transferStarted = performance.now();
+      onProgress(0);
+      for (let offset = 0; offset < bytes.length; offset += writeSize) {
+        const end = Math.min(bytes.length, offset + writeSize);
+        await this.writeRawBeforeDeadline(bytes.subarray(offset, end), deadline);
+        onProgress(Math.round((end / bytes.length) * 80));
+      }
+      onProgress(85);
+      const transferSeconds = Math.max(0.001, (performance.now() - transferStarted) / 1000);
+      this.logDiagnostic(
+        `raw transfer complete: ${transferSeconds.toFixed(1)}s, ${(bytes.length / 1024 / transferSeconds).toFixed(1)} KiB/s; extracting`,
+      );
+      return donePromise;
+    });
     const errorIndex = output.indexOf(errorMarker);
     if (errorIndex >= 0) {
       const message = output.slice(errorIndex + errorMarker.length).split(/\r?\n/, 1)[0].trim();
@@ -612,33 +681,37 @@ export class WebSerialDeviceClient {
     ].join("\n");
     const command = `exec(__import__('ubinascii').a2b_base64(${pythonString(encodeBase64(receiver))}).decode())`;
     const start = this.output.length;
-    const readyPromise = this.waitForOutput(
-      readyMarker,
-      start,
-      this.remainingInstallTime(deadline, 5_000),
-    );
-    await this.sendLine(command);
-    await readyPromise;
+    await runDeviceInstallStage("READY", async () => {
+      const readyPromise = this.waitForOutput(
+        readyMarker,
+        start,
+        this.remainingInstallTime(deadline, 5_000),
+      );
+      await this.sendLine(command);
+      await readyPromise;
+    });
 
-    const donePromise = this.waitForOutput(
-      doneMarker,
-      start,
-      this.remainingInstallTime(deadline, MPK_INSTALL_BUDGET_MS),
-    );
-    const writeSize = this.selectedInfo.usbVendorId === 0x303a ? 32_768 : 8_192;
-    const transferStarted = performance.now();
-    onProgress(0);
-    for (let offset = 0; offset < bytes.length; offset += writeSize) {
-      this.remainingInstallTime(deadline, MPK_INSTALL_BUDGET_MS);
-      const end = Math.min(bytes.length, offset + writeSize);
-      await this.writeRawBeforeDeadline(bytes.subarray(offset, end), deadline);
-      onProgress(Math.round((end / bytes.length) * 90));
-    }
-    const transferSeconds = Math.max(0.001, (performance.now() - transferStarted) / 1000);
-    this.logDiagnostic(
-      `stream transfer complete: ${transferSeconds.toFixed(1)}s, ${(bytes.length / 1024 / transferSeconds).toFixed(1)} KiB/s`,
-    );
-    const output = await donePromise;
+    const output = await runDeviceInstallStage("TRANSFER", async () => {
+      const donePromise = this.waitForOutput(
+        doneMarker,
+        start,
+        this.remainingInstallTime(deadline, MPK_INSTALL_BUDGET_MS),
+      );
+      const writeSize = this.selectedInfo.usbVendorId === 0x303a ? 32_768 : 8_192;
+      const transferStarted = performance.now();
+      onProgress(0);
+      for (let offset = 0; offset < bytes.length; offset += writeSize) {
+        this.remainingInstallTime(deadline, MPK_INSTALL_BUDGET_MS);
+        const end = Math.min(bytes.length, offset + writeSize);
+        await this.writeRawBeforeDeadline(bytes.subarray(offset, end), deadline);
+        onProgress(Math.round((end / bytes.length) * 90));
+      }
+      const transferSeconds = Math.max(0.001, (performance.now() - transferStarted) / 1000);
+      this.logDiagnostic(
+        `stream transfer complete: ${transferSeconds.toFixed(1)}s, ${(bytes.length / 1024 / transferSeconds).toFixed(1)} KiB/s`,
+      );
+      return donePromise;
+    });
     const errorIndex = output.indexOf(errorMarker);
     if (errorIndex >= 0) {
       const message = output.slice(errorIndex + errorMarker.length).split(/\r?\n/, 1)[0].trim();

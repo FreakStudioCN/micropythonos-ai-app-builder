@@ -5,6 +5,8 @@ interface ImportMetaEnv {
   readonly VITE_WASM_BASE?: string;
   readonly VITE_UPLOAD_CHUNK_SIZE?: string;
   readonly VITE_GENERATION_TIMEOUT_MS?: string;
+  readonly VITE_GENERATION_IDLE_TIMEOUT_MS?: string;
+  readonly VITE_GENERATION_OVERALL_TIMEOUT_MS?: string;
   readonly VITE_MPOS_API_TOKEN?: string;
 }
 

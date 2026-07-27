@@ -1,0 +1,114 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.blockless.dev/mpos-ai-app/v1/deploy-result.schema.json",
+  "title": "mpos-deploy-app-web deploy result",
+  "allOf": [
+    {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/resultBase"
+    },
+    {
+      "type": "object",
+      "required": [
+        "mode",
+        "hardware_available",
+        "board",
+        "serial_port",
+        "micropythonos_installed",
+        "permission_decisions",
+        "commands",
+        "logs"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "mpos-deploy-app-web-v1"
+        },
+        "phase": {
+          "const": "mpos-deploy-app-web"
+        },
+        "stage": {
+          "const": "deploy"
+        },
+        "mode": {
+          "enum": [
+            "desktop-preview",
+            "web-preview",
+            "device-copy",
+            "mpk-install",
+            "install-site",
+            "local-flash"
+          ]
+        },
+        "hardware_available": {
+          "type": "boolean"
+        },
+        "board": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "serial_port": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "micropythonos_installed": {
+          "oneOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "const": "unknown"
+            }
+          ]
+        },
+        "permission_decisions": {
+          "type": "array",
+          "items": {
+            "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/permissionDecision"
+          }
+        },
+        "commands": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "logs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "handoff": {
+          "type": "object",
+          "required": [
+            "next_phase"
+          ],
+          "properties": {
+            "next_phase": {
+              "enum": [
+                "mpos-publish-app-web",
+                null
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "required_artifacts": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "unevaluatedProperties": false
+}

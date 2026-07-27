@@ -609,6 +609,44 @@
         notify("MPOS_APP_RUNNING");
       }
 
+      async function runPackagedApp(payload) {
+        if (!bridgeReady) throw new Error("MicroPythonOS WASM 尚未就绪");
+        var packageName = String(payload.packageName || "");
+        var mpkBase64 = String(payload.mpkBase64 || "");
+        if (!/^[a-z0-9_.]+$/.test(packageName)) throw new Error("包名不安全");
+        if (!mpkBase64) throw new Error("没有收到 MPK 数据");
+
+        notify("MPOS_INSTALLING");
+        await enterRawRepl();
+        var dir = "/apps/" + packageName;
+        var script = [
+          "import binascii, gc, shutil",
+          "from mpos import AppManager",
+          "from mpos.content.streaming_unzip import StreamingUnzip",
+          "try:",
+          " shutil.rmtree(" + JSON.stringify(dir) + ")",
+          "except OSError:",
+          " pass",
+          "_archive=binascii.a2b_base64(b" + JSON.stringify(mpkBase64) + ")",
+          "_extractor=StreamingUnzip(" + JSON.stringify(dir) + ", expected_app_name=" + JSON.stringify(packageName) + ", free_space_limit=lambda req: AppManager._check_free_space('.', req))",
+          "_extractor.feed(_archive)",
+          "_extractor.finish()",
+          "del _archive",
+          "gc.collect()",
+          "AppManager.refresh_apps()",
+          "assert AppManager.is_installed_by_name(" + JSON.stringify(packageName) + "), 'packaged app was not registered'",
+          "__started=AppManager.start_app(" + JSON.stringify(packageName) + ")",
+          "assert __started, 'packaged app failed to start'",
+          "print('MPOS_GENERATED_APP_RUNNING')"
+        ].join("\n");
+        await rawExec(script);
+        if (terminalText.indexOf("MPOS_GENERATED_APP_RUNNING") === -1) {
+          throw new Error("MPK 安装结束，但没有出现启动标记");
+        }
+        try { FS.syncfs(false, function () {}); } catch (e) {}
+        notify("MPOS_APP_RUNNING");
+      }
+
       function attachBridge() {
         if (bridgeReady || !window.Module || !Module.calledRun ||
             !Module.__webterm || Module.__webterm.ready !== true) return false;
@@ -625,12 +663,17 @@
       }
 
       window.addEventListener("message", function (event) {
+        if (event.source !== window.parent) return;
         var message = event.data || {};
         if (message.source !== "mpos-builder") return;
         if (message.type === "PING") {
           if (bridgeReady) notify("MPOS_READY");
         } else if (message.type === "RUN_APP") {
           runGeneratedApp(message).catch(function (error) {
+            notify("MPOS_ERROR", { message: String(error && error.message || error) });
+          });
+        } else if (message.type === "RUN_MPK") {
+          runPackagedApp(message).catch(function (error) {
             notify("MPOS_ERROR", { message: String(error && error.message || error) });
           });
         }

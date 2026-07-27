@@ -1,0 +1,75 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.blockless.dev/mpos-ai-app/v1/phase-complete.schema.json",
+  "title": "MicroPythonOS AI App phase-complete event",
+  "type": "object",
+  "required": [
+    "protocol_version",
+    "session_id",
+    "stage",
+    "status",
+    "checkpoint_id",
+    "result_path",
+    "artifact_manifest_path"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/protocolVersion"
+    },
+    "event": {
+      "const": "phase_complete"
+    },
+    "session_id": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/sessionId"
+    },
+    "stage": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/canonicalStage"
+    },
+    "status": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/phaseOutcome"
+    },
+    "checkpoint_id": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/checkpointId"
+    },
+    "result_path": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/relativePath"
+    },
+    "artifact_manifest_path": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/relativePath"
+    },
+    "next_stage": {
+      "oneOf": [
+        {
+          "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/canonicalStage"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "warnings": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/warning"
+      }
+    },
+    "structured_errors": {
+      "type": "array",
+      "items": {
+        "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/structuredError"
+      }
+    },
+    "artifacts_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "completed_at": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/timestamp"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}
