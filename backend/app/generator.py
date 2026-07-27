@@ -437,37 +437,38 @@ async def _call_deepseek_legacy(
         ),
     }
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    request_timeout = timeout_seconds or float(
-        os.getenv("DEEPSEEK_REQUEST_TIMEOUT_SECONDS", "19")
+    request_timeout = timeout_seconds
+    if request_timeout is None:
+        request_timeout = _bounded_float_env(
+            "AI_READ_TIMEOUT_SECONDS",
+            default=60.0,
+            minimum=2.0,
+            maximum=600.0,
+            fallbacks=("DEEPSEEK_REQUEST_TIMEOUT_SECONDS",),
+        )
+    request_timeout = max(2.0, min(600.0, float(request_timeout)))
+    connect_timeout = _bounded_float_env(
+        "AI_CONNECT_TIMEOUT_SECONDS",
+        default=5.0,
+        minimum=0.1,
+        maximum=120.0,
     )
-    request_timeout = max(2.0, min(60.0, request_timeout))
     try:
         timeout = httpx.Timeout(
             request_timeout,
-            connect=min(
-                _bounded_float_env(
-                    "AI_CONNECT_TIMEOUT_SECONDS",
-                    default=5.0,
-                    minimum=0.1,
-                    maximum=120.0,
-                ),
-                request_timeout,
-            ),
+            connect=min(connect_timeout, request_timeout),
         )
         async with httpx.AsyncClient(timeout=timeout) as client:
             response = await client.post(
                 f"{base_url}/chat/completions", headers=headers, json=payload
             )
     except httpx.TimeoutException as exc:
-        raise GenerationError(
-            f"DeepSeek 在 {request_timeout:.1f} 秒内没有返回"
-        ) from exc
+        raise GenerationError("AI upstream request timed out") from exc
     except httpx.HTTPError as exc:
-        raise GenerationError(f"无法连接 DeepSeek：{exc}") from exc
+        raise GenerationError("AI upstream connection failed") from exc
 
     if response.status_code >= 400:
-        detail = response.text[:800]
-        raise GenerationError(f"DeepSeek 返回 {response.status_code}：{detail}")
+        raise GenerationError(f"AI upstream returned HTTP {response.status_code}")
 
     try:
         body = response.json()
@@ -1860,7 +1861,7 @@ async def generate_app(
             _emit_generation_attempt(
                 attempt_sink,
                 attempt=attempt,
-                status="model_error",
+                status="upstream_error",
                 error=exc,
                 model_meta=exc.details,
             )

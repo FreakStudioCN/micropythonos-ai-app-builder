@@ -6,6 +6,13 @@ PROTOCOL_VERSION = "mpos-ai-app/v1"
 AIProviderId = Literal["auto", "deepseek_primary", "deepseek_secondary", "aigocode"]
 
 
+class SystemStatusResponse(BaseModel):
+    status: Literal["ready", "maintenance"]
+    maintenance_mode: bool
+    message: str
+    retry_after_seconds: int = Field(ge=1, le=86400)
+
+
 class GenerateRequest(BaseModel):
     prompt: str = Field(min_length=3, max_length=4000)
     package_name: str = "com.example.myapp"
@@ -192,6 +199,9 @@ class DeviceScanRequest(BaseModel):
 class DeviceResultRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=200)
     result: Literal["probe_success", "install_success", "launch_success", "failed"]
+    error_code: str | None = Field(default=None, max_length=100)
+    hardware_available: bool | None = None
+    micropythonos_installed: bool | None = None
     board: str = Field(default="Waveshare ESP32-S3-Touch-LCD-2", max_length=200)
     usb_vendor_id: int | None = Field(default=None, ge=0, le=0xFFFF)
     usb_product_id: int | None = Field(default=None, ge=0, le=0xFFFF)

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import {
   API_BASE_URL,
-  GENERATION_TIMEOUT_MS,
+  GENERATION_IDLE_TIMEOUT_MS,
+  GENERATION_OVERALL_TIMEOUT_MS,
   WASM_RUNTIME_URL,
 } from "./config";
 import { WebSerialDeviceClient, type DeviceConnectionState } from "./deviceSerial";
@@ -13,6 +14,11 @@ import {
   type AiProviderId,
   type AiProviderMetadata,
 } from "./providerRouting";
+import {
+  buildShowcaseRunMessage,
+  encodeShowcaseMpk,
+  isPlatformActionAllowed,
+} from "./platformUpgradeLibrary";
 
 type Status = "idle" | "created" | "running" | "waiting_preview" | "waiting_device" | "completed" | "failed" | "blocked" | "cancelled" | "timeout";
 type Language = "zh" | "en";
@@ -141,6 +147,36 @@ interface ShowcaseApp {
   mpkUrl: string;
   featured: boolean;
 }
+export interface PublicSystemStatus {
+  status: "ready" | "maintenance";
+  maintenance: boolean;
+  message: string;
+  retry_after_seconds: number;
+}
+export const normalizePublicSystemStatus = (value: unknown): PublicSystemStatus | null => {
+  if (!value || typeof value !== "object") return null;
+  const payload = value as Record<string, unknown>;
+  const maintenance = payload.maintenance === true || payload.status === "maintenance";
+  const retry = Number(payload.retry_after_seconds);
+  return {
+    status: maintenance ? "maintenance" : "ready",
+    maintenance,
+    message: typeof payload.message === "string" ? payload.message : "",
+    retry_after_seconds: Number.isFinite(retry) && retry > 0 ? retry : 15,
+  };
+};
+export type GenerationWaitTimeoutKind = "idle" | "overall";
+export const getGenerationWaitTimeoutKind = (
+  now: number,
+  startedAt: number,
+  lastActivityAt: number,
+  idleTimeoutMs: number,
+  overallTimeoutMs: number,
+): GenerationWaitTimeoutKind | null => {
+  if (now - startedAt >= overallTimeoutMs) return "overall";
+  if (now - lastActivityAt >= idleTimeoutMs) return "idle";
+  return null;
+};
 
 const defaultPrompt = "做一个极简四则运算计算器，按钮要大，适合触摸屏";
 const defaultPromptEn = "Build a minimal four-function calculator with large touch-friendly buttons";
@@ -150,23 +186,57 @@ const apiFetch = (input: RequestInfo | URL, init: RequestInit = {}) => fetch(
   input,
   { ...init, credentials: "include" },
 );
-const stages = [
+export const stages = [
   ["analysis", "需求分析"],
+  ["api_check", "MicroPythonOS / LVGL API 校验"],
   ["generation", "AI 生成代码"],
-  ["test", "静态检查 / WASM 测试"],
+  ["test", "桌面 / Web 预览测试"],
   ["package", "生成真实 MPK"],
+  ["deploy", "真实设备部署"],
   ["publish", "发布准备检查"],
 ] as const;
-const stageIndexForError = (stage?: string) => {
+export const stageIndexForError = (stage?: string) => {
   const indexByStage: Record<string, number> = {
     analysis: 0,
-    generation: 1,
-    test: 2,
-    package: 3,
-    deploy: 4,
-    publish: 4,
+    api: 1,
+    api_check: 1,
+    generation: 2,
+    test: 3,
+    package: 4,
+    deploy: 5,
+    publish: 6,
   };
-  return stage ? (indexByStage[stage] ?? 1) : 1;
+  return stage ? (indexByStage[stage] ?? 2) : 2;
+};
+export const stageIndexForCheckpoint = (checkpoint?: string) => {
+  const indexByCheckpoint: Record<string, number> = {
+    session_created: 0,
+    requirements_analyzed: 1,
+    api_checked: 2,
+    code_generated: 3,
+    desktop_test_done: 4,
+    web_preview_done: 4,
+    package_done: 5,
+    device_deploy_done: 6,
+    publish_check_done: 6,
+    completed: 6,
+  };
+  return checkpoint ? (indexByCheckpoint[checkpoint] ?? 0) : 0;
+};
+interface StageSessionSnapshot {
+  status: string;
+  checkpoint_id?: string;
+  last_error?: { stage: string } | null;
+  generation?: unknown;
+}
+export const stageIndexForSession = (session: StageSessionSnapshot) => {
+  if (session.last_error) return stageIndexForError(session.last_error.stage);
+  if (session.status === "waiting_device") return stageIndexForError("deploy");
+  if (session.status === "waiting_preview") return stageIndexForError("test");
+  if (session.status === "completed") return stages.length - 1;
+  const checkpointStage = stageIndexForCheckpoint(session.checkpoint_id);
+  if (checkpointStage > 0) return checkpointStage;
+  return session.generation ? stageIndexForError("test") : 0;
 };
 const isShowcaseApp = (value: unknown): value is ShowcaseApp => {
   if (!value || typeof value !== "object") return false;
@@ -261,6 +331,7 @@ export default function App() {
   const [history, setHistory] = useState<SessionSummary[]>([]);
   const [deviceMessage, setDeviceMessage] = useState("");
   const [serialConnected, setSerialConnected] = useState(false);
+  const [deviceConnectionDetail, setDeviceConnectionDetail] = useState("");
   const [deviceState, setDeviceState] = useState<DeviceConnectionState>("disconnected");
   const [deviceLogs, setDeviceLogs] = useState("");
   const [deviceCommand, setDeviceCommand] = useState("");
@@ -287,8 +358,16 @@ export default function App() {
   const [showcaseQuery, setShowcaseQuery] = useState("");
   const [showcaseCategory, setShowcaseCategory] = useState("all");
   const [showAllShowcase, setShowAllShowcase] = useState(false);
+  const [showcaseAction, setShowcaseAction] = useState("");
   const [wasmReady, setWasmReady] = useState(false);
   const [runtimeStatus, setRuntimeStatus] = useState("正在启动 MicroPythonOS WASM…");
+  const [publicSystemStatus, setPublicSystemStatus] = useState<PublicSystemStatus>({
+    status: "ready",
+    maintenance: false,
+    message: "",
+    retry_after_seconds: 15,
+  });
+  const [systemStatusConfirmed, setSystemStatusConfirmed] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const lastRun = useRef("");
   const requestAbort = useRef<AbortController | null>(null);
@@ -299,6 +378,8 @@ export default function App() {
   const resultRef = useRef<GenerationResult | null>(null);
   const serialClientRef = useRef<WebSerialDeviceClient | null>(null);
   const deviceInfoRef = useRef<{ usbVendorId?: number; usbProductId?: number }>({});
+  const showcasePreviewRef = useRef("");
+  const generationActivityAt = useRef(Date.now());
   const repairAttempts = useRef(0);
   const repairing = useRef(false);
   const repairHandler = useRef<(detail: string) => boolean>(() => false);
@@ -359,6 +440,36 @@ export default function App() {
       eventStream.current?.close();
       releaseSerialPort();
       clearRuntimeTimers();
+    };
+  }, []);
+  useEffect(() => {
+    let stopped = false;
+    let timer: number | null = null;
+    const checkSystemStatus = async () => {
+      let nextDelayMs = 30_000;
+      try {
+        const response = await apiFetch(`${apiUrl}/api/system/status`);
+        if (!response.ok) throw new Error(`system status returned ${response.status}`);
+        const normalized = normalizePublicSystemStatus(await response.json());
+        if (!normalized) throw new Error("invalid system status");
+        if (stopped) return;
+        setPublicSystemStatus(normalized);
+        setSystemStatusConfirmed(true);
+        nextDelayMs = Math.min(60_000, Math.max(3_000, normalized.retry_after_seconds * 1_000));
+        if (normalized.maintenance) void serialClientRef.current?.disconnect();
+      } catch {
+        if (stopped) return;
+        setPublicSystemStatus((current) => current.maintenance
+          ? current
+          : { status: "ready", maintenance: false, message: "", retry_after_seconds: 15 });
+        setSystemStatusConfirmed(true);
+      }
+      if (!stopped) timer = window.setTimeout(checkSystemStatus, nextDelayMs);
+    };
+    void checkSystemStatus();
+    return () => {
+      stopped = true;
+      if (timer !== null) window.clearTimeout(timer);
     };
   }, []);
   useEffect(() => {
@@ -528,15 +639,7 @@ export default function App() {
       resultRef.current = session.generation;
     }
     setStatus(session.status);
-    setCurrentStage(
-      session.status === "completed"
-        ? stages.length - 1
-        : session.last_error
-          ? stageIndexForError(session.last_error.stage)
-          : session.generation
-            ? 3
-            : -1,
-    );
+    setCurrentStage(stageIndexForSession(session));
     setErrorMessage(session.last_error?.message || "");
   };
   const restoreSession = async (sessionId: string) => {
@@ -549,6 +652,60 @@ export default function App() {
     applySession(session);
     setLogs((items) => [...items, tr(`[resume] 已打开 ${session.session_id} ${session.revision_id}`, `[resume] Opened ${session.session_id} ${session.revision_id}`)]);
     setToast(tr("历史会话已恢复", "Session restored"));
+  };
+  const continueWaiting = async () => {
+    const sessionId = localStorage.getItem("mpos-session-id") || sessionState?.session_id;
+    if (!sessionId || publicSystemStatus.maintenance) return;
+    requestAbort.current?.abort();
+    const controller = new AbortController();
+    requestAbort.current = controller;
+    const startedAt = Date.now();
+    generationActivityAt.current = startedAt;
+    let timeoutKind: GenerationWaitTimeoutKind | null = null;
+    const timer = window.setInterval(() => {
+      timeoutKind = getGenerationWaitTimeoutKind(
+        Date.now(),
+        startedAt,
+        generationActivityAt.current,
+        GENERATION_IDLE_TIMEOUT_MS,
+        GENERATION_OVERALL_TIMEOUT_MS,
+      );
+      if (timeoutKind) controller.abort();
+    }, 1_000);
+    setStatus("running");
+    setErrorMessage("");
+    openEventStream(sessionId);
+    try {
+      while (true) {
+        const response = await apiFetch(`${apiUrl}/api/sessions/${sessionId}`, { signal: controller.signal });
+        if (!response.ok) throw new Error(tr("读取会话状态失败", "Could not read session state"));
+        const session = await response.json() as SessionState;
+        generationActivityAt.current = Date.now();
+        setSessionState(session);
+        setCurrentStage(stageIndexForSession(session));
+        if (["waiting_preview", "waiting_device", "completed", "failed", "blocked", "cancelled", "timeout"].includes(session.status)) {
+          applySession(session);
+          setErrorMessage(session.last_error ? `[${session.last_error.code}] ${session.last_error.message}` : "");
+          await refreshHistory();
+          return;
+        }
+        await new Promise((resolve) => window.setTimeout(resolve, 700));
+      }
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError" && requestAbort.current !== controller) return;
+      if (error instanceof DOMException && error.name === "AbortError" && timeoutKind) {
+        setStatus("timeout");
+        setErrorMessage(timeoutKind === "idle"
+          ? tr("后台会话仍在运行，但一段时间没有新状态。任务未取消，可继续等待。", "The backend session is still running but has not reported progress. It was not cancelled; you can keep waiting.")
+          : tr("已达到本次前端等待上限。后台任务未取消，可稍后继续等待。", "The frontend wait limit was reached. The backend task was not cancelled; you can resume later."));
+      } else {
+        setStatus("failed");
+        setErrorMessage(error instanceof Error ? error.message : tr("读取会话状态失败", "Could not read session state"));
+      }
+    } finally {
+      window.clearInterval(timer);
+      if (requestAbort.current === controller) requestAbort.current = null;
+    }
   };
   useEffect(() => {
     if (authStatus !== "signed_in") return;
@@ -591,6 +748,7 @@ export default function App() {
       const seq = Number(item.seq || 0);
       if (seq && seq <= (eventCursors.current[sessionId] || 0)) return;
       if (seq) eventCursors.current[sessionId] = seq;
+      generationActivityAt.current = Date.now();
       const message = item.payload.message || item.payload.status || item.payload.result || item.type;
       setLogs((entries) => [...entries, `[${item.phase}] ${message}`]);
     };
@@ -614,13 +772,26 @@ export default function App() {
         setWasmReady(true);
         setRuntimeStatus(liveText("MicroPythonOS WASM 已就绪", "MicroPythonOS WASM is ready"));
       } else if (message.type === "MPOS_INSTALLING") {
-        setRuntimeStatus(liveText("正在把生成代码安装进 MicroPythonOS…", "Installing generated code into MicroPythonOS…"));
-        setLogs((items) => [...items, liveText("[preview] 正在通过 raw REPL 安装 app.py…", "[preview] Installing app.py through raw REPL…")]);
+        const showcaseName = showcasePreviewRef.current;
+        setRuntimeStatus(showcaseName
+          ? liveText(`正在把 ${showcaseName} MPK 安装进 MicroPythonOS…`, `Installing the ${showcaseName} MPK into MicroPythonOS…`)
+          : liveText("正在把生成代码安装进 MicroPythonOS…", "Installing generated code into MicroPythonOS…"));
+        setLogs((items) => [...items, showcaseName
+          ? liveText(`[showcase] 正在安装 ${showcaseName} MPK…`, `[showcase] Installing the ${showcaseName} MPK…`)
+          : liveText("[preview] 正在通过 raw REPL 安装 app.py…", "[preview] Installing app.py through raw REPL…")]);
       } else if (message.type === "MPOS_LOG" && message.text?.trim()) {
         setLogs((items) => [...items, `[wasm] ${message.text!.trim()}`]);
       } else if (message.type === "MPOS_APP_RUNNING") {
         if (executionTimer.current !== null) window.clearTimeout(executionTimer.current);
         executionTimer.current = null;
+        if (showcasePreviewRef.current) {
+          const showcaseName = showcasePreviewRef.current;
+          showcasePreviewRef.current = "";
+          setShowcaseAction("");
+          setRuntimeStatus(liveText(`${showcaseName} 正在真实 MicroPythonOS WASM 中运行`, `${showcaseName} is running in real MicroPythonOS WASM`));
+          setLogs((items) => [...items, liveText(`[showcase] ${showcaseName} 已在 WASM 中启动 ✓`, `[showcase] ${showcaseName} started in WASM ✓`)]);
+          return;
+        }
         setRuntimeStatus(liveText("App 正在真实 MicroPythonOS WASM 中运行", "App is running in real MicroPythonOS WASM"));
         setCurrentStage(stages.length - 1);
         setStatus("completed");
@@ -641,6 +812,14 @@ export default function App() {
         if (executionTimer.current !== null) window.clearTimeout(executionTimer.current);
         executionTimer.current = null;
         const detail = message.message || liveText("MicroPythonOS WASM 运行失败", "MicroPythonOS WASM failed");
+        if (showcasePreviewRef.current) {
+          showcasePreviewRef.current = "";
+          setShowcaseAction("");
+          setRuntimeStatus(detail);
+          setToast(liveText("样例模拟运行失败，请查看运行日志。", "Showcase preview failed. Check the runtime log."));
+          setLogs((items) => [...items, `[showcase] ${detail}`]);
+          return;
+        }
         if (repairHandler.current(detail)) {
           setRuntimeStatus(liveText(`发现兼容问题，DeepSeek 正在自动修复（${repairAttempts.current}/2）…`, `Compatibility issue found. DeepSeek is repairing it (${repairAttempts.current}/2)…`));
           setLogs((items) => [...items, liveText(`[repair] WASM 发现兼容错误，正在自动修复：${detail}`, `[repair] WASM compatibility error found; repairing: ${detail}`)]);
@@ -648,7 +827,7 @@ export default function App() {
         }
         setRuntimeStatus(detail);
         setErrorMessage(detail);
-        setCurrentStage(2);
+        setCurrentStage(3);
         setStatus("failed");
         setLogs((items) => [...items, `[preview] ${detail}`]);
         const savedSession = localStorage.getItem("mpos-session-id");
@@ -673,8 +852,9 @@ export default function App() {
     if (!result || !wasmReady || !iframeRef.current || !sessionState?.input.targets.includes("web-preview")) return;
     const appCode = result.files.find((file) => file.path === "assets/main.py" || file.path === "app.py")?.content;
     if (!appCode || lastRun.current === result.mpk_base64) return;
+    showcasePreviewRef.current = "";
     lastRun.current = result.mpk_base64;
-    setCurrentStage(2);
+    setCurrentStage(3);
     setRuntimeStatus(tr("正在发送生成代码到 MicroPythonOS WASM…", "Sending generated code to MicroPythonOS WASM…"));
     if (executionTimer.current !== null) window.clearTimeout(executionTimer.current);
     executionTimer.current = window.setTimeout(() => {
@@ -716,6 +896,14 @@ export default function App() {
   }, [result, wasmReady, sessionState]);
 
   const run = async (repair?: { runtimeError: string; previousCode: string }) => {
+    if (!systemStatusConfirmed) {
+      setToast(tr("正在确认系统状态，请稍候。", "Checking system status. Please wait."));
+      return;
+    }
+    if (publicSystemStatus.maintenance) {
+      setToast(tr("系统正在升级，暂时不能生成 App。", "The system is being upgraded. App generation is temporarily unavailable."));
+      return;
+    }
     if (
       !repair
       && billingAccount
@@ -747,13 +935,24 @@ export default function App() {
     } else {
       setLogs((items) => [...items, tr(`[repair] 第 ${repairAttempts.current}/2 次自动修复：正在让 DeepSeek 重写不兼容代码…`, `[repair] Automatic repair ${repairAttempts.current}/2: DeepSeek is rewriting incompatible code…`)]);
     }
-    setCurrentStage(1);
+    setCurrentStage(0);
     const controller = new AbortController();
     requestAbort.current = controller;
-    const requestTimer = window.setTimeout(
-      () => controller.abort(),
-      GENERATION_TIMEOUT_MS,
-    );
+    const startedAt = Date.now();
+    generationActivityAt.current = startedAt;
+    let clientTimeoutKind: GenerationWaitTimeoutKind | null = null;
+    let latestSession: SessionState | null = null;
+    let latestProgressKey = "";
+    const idleTimer = window.setInterval(() => {
+      clientTimeoutKind = getGenerationWaitTimeoutKind(
+        Date.now(),
+        startedAt,
+        generationActivityAt.current,
+        GENERATION_IDLE_TIMEOUT_MS,
+        GENERATION_OVERALL_TIMEOUT_MS,
+      );
+      if (clientTimeoutKind) controller.abort();
+    }, 1_000);
     try {
       let sessionId = repair || continuing || sessionState?.status === "blocked" || sessionState?.status === "created"
         ? localStorage.getItem("mpos-session-id")
@@ -805,6 +1004,8 @@ export default function App() {
         });
         if (!createResponse.ok) throw new Error(tr("无法创建生成会话", "Could not create session"));
         const created = await createResponse.json() as SessionState;
+        latestSession = created;
+        generationActivityAt.current = Date.now();
         sessionId = created.session_id;
         localStorage.setItem("mpos-session-id", sessionId);
         setSessionState(created);
@@ -828,6 +1029,8 @@ export default function App() {
         });
         if (!revisionResponse.ok) throw new Error(tr("无法创建新版本", "Could not create revision"));
         const revised = await revisionResponse.json() as SessionState;
+        latestSession = revised;
+        generationActivityAt.current = Date.now();
         setSessionState(revised);
         setContinuing(false);
       }
@@ -857,15 +1060,22 @@ export default function App() {
       if (!repair) await refreshBilling().catch(() => undefined);
 
       let session = await actionResponse.json() as SessionState;
+      latestSession = session;
+      latestProgressKey = `${session.status}:${session.checkpoint_id}`;
+      generationActivityAt.current = Date.now();
       while (!["waiting_preview", "waiting_device", "completed", "failed", "blocked", "cancelled", "timeout"].includes(session.status)) {
         await new Promise((resolve) => window.setTimeout(resolve, 700));
         const poll = await apiFetch(`${apiUrl}/api/sessions/${sessionId}`, { signal: controller.signal });
         if (!poll.ok) throw new Error(tr("读取会话状态失败", "Could not read session state"));
         session = await poll.json() as SessionState;
+        latestSession = session;
+        const progressKey = `${session.status}:${session.checkpoint_id}`;
+        if (progressKey !== latestProgressKey) {
+          latestProgressKey = progressKey;
+          generationActivityAt.current = Date.now();
+        }
         setSessionState(session);
-        if (session.checkpoint_id === "requirements_analyzed") setCurrentStage(1);
-        if (session.checkpoint_id === "code_generated") setCurrentStage(2);
-        if (session.checkpoint_id === "package_done") setCurrentStage(3);
+        setCurrentStage(stageIndexForCheckpoint(session.checkpoint_id));
       }
       setSessionState(session);
       refreshHistory();
@@ -883,14 +1093,14 @@ export default function App() {
       }
       const generated = session.generation;
       if (!generated) throw new Error(tr("会话完成但没有生成产物", "Session finished without generated artifacts"));
-      setCurrentStage(2);
+      setCurrentStage(3);
       setLogs((items) => [
         ...items,
-        tr(`[generation] ${generated.model} 已返回真实代码 ✓`, `[generation] ${generated.model} returned real code ✓`),
+        tr(`[generation] ${generated.provider || generated.ai_provider || aiProvider} · ${generated.model} 已返回真实代码 ✓`, `[generation] ${generated.provider || generated.ai_provider || aiProvider} · ${generated.model} returned real code ✓`),
         tr("[validation] Python 语法和基础安全检查通过 ✓", "[validation] Python syntax and safety checks passed ✓"),
         tr(`[validation] 已生成 ${generated.acceptance_tests.length} 项功能验收，并将在 WASM 中执行 self_test ✓`, `[validation] Created ${generated.acceptance_tests.length} acceptance checks; self_test will run in WASM ✓`),
       ]);
-      setCurrentStage(3);
+      setCurrentStage(4);
       setLogs((items) => [
         ...items,
         tr(`[package] 已生成 ${generated.mpk_filename} ✓`, `[package] Created ${generated.mpk_filename} ✓`),
@@ -898,7 +1108,7 @@ export default function App() {
       ]);
       setResult(generated);
       resultRef.current = generated;
-      setCurrentStage(session.input.targets.includes("web-preview") ? 2 : stages.length - 1);
+      setCurrentStage(stageIndexForSession(session));
       if (session.status === "completed") setStatus("completed");
       if (session.status === "waiting_device") setStatus("waiting_device");
       setActiveTab("preview");
@@ -906,17 +1116,29 @@ export default function App() {
       if (error instanceof DOMException && error.name === "AbortError" && requestAbort.current !== controller) {
         return;
       }
-      const message = error instanceof DOMException && error.name === "AbortError"
-        ? tr(
-            `生成超过 ${Math.round(GENERATION_TIMEOUT_MS / 1000)} 秒，已停止等待。请重试。`,
-            `Generation took over ${Math.round(GENERATION_TIMEOUT_MS / 1000)} seconds. Please retry.`,
-          )
+      const backendTimedOut = latestSession?.status === "timeout"
+        || Boolean(latestSession?.last_error?.code.includes("TIMEOUT"));
+      const clientTimedOut = error instanceof DOMException
+        && error.name === "AbortError"
+        && clientTimeoutKind !== null;
+      const message = clientTimedOut
+        ? clientTimeoutKind === "idle"
+          ? tr(
+              `后台任务仍在运行，但 ${Math.round(GENERATION_IDLE_TIMEOUT_MS / 1000)} 秒没有新状态。任务未取消，可继续等待。`,
+              `The backend task is still running but reported no progress for ${Math.round(GENERATION_IDLE_TIMEOUT_MS / 1000)} seconds. It was not cancelled; you can keep waiting.`,
+            )
+          : tr(
+              `已达到 ${Math.round(GENERATION_OVERALL_TIMEOUT_MS / 60000)} 分钟前端等待上限。后台任务未取消，可稍后继续等待。`,
+              `The ${Math.round(GENERATION_OVERALL_TIMEOUT_MS / 60000)}-minute frontend wait limit was reached. The backend task was not cancelled; you can resume later.`,
+            )
         : error instanceof Error ? error.message : tr("未知错误", "Unknown error");
       setErrorMessage(message);
-      setStatus(error instanceof DOMException && error.name === "AbortError" ? "timeout" : "failed");
-      setLogs((items) => [...items, tr(`[失败] ${message}`, `[failed] ${message}`)]);
+      setStatus(clientTimedOut || backendTimedOut ? "timeout" : "failed");
+      setLogs((items) => [...items, clientTimedOut || backendTimedOut
+        ? tr(`[等待超时] ${message}`, `[wait timeout] ${message}`)
+        : tr(`[失败] ${message}`, `[failed] ${message}`)]);
     } finally {
-      window.clearTimeout(requestTimer);
+      window.clearInterval(idleTimer);
       if (requestAbort.current === controller) requestAbort.current = null;
       repairing.current = false;
     }
@@ -1111,6 +1333,7 @@ export default function App() {
       onState: (nextState, detail) => {
         setDeviceState(nextState);
         setSerialConnected(nextState === "connected");
+        setDeviceConnectionDetail(nextState === "connected" ? detail || "" : "");
         if (nextState === "connected") {
           setDeviceError("");
           setDeviceMessage(tr(
@@ -1132,12 +1355,12 @@ export default function App() {
       setSerialConnected(false);
       const reason = error instanceof Error ? error.message : String(error);
       if (error instanceof DOMException && error.name === "NotFoundError") {
-        setDeviceMessage(tr("没有选择设备。请重试并选择 COM5。", "No device selected. Try again and choose COM5."));
+        setDeviceMessage(tr("没有选择设备。请重试并选择 ESP32 对应的串口设备。", "No device selected. Try again and choose the serial device for your ESP32."));
       } else {
         setDeviceError(reason);
         setDeviceMessage(tr(
-          `连接失败：${reason}。请关闭占用 COM5 的串口工具后重试。`,
-          `Connection failed: ${reason}. Close any serial tool using COM5 and try again.`,
+          `连接失败：${reason}。请关闭占用所选串口的其他工具后重试。`,
+          `Connection failed: ${reason}. Close any other tool using the selected serial port and try again.`,
         ));
       }
     }
@@ -1194,6 +1417,14 @@ export default function App() {
   };
 
   const runDeviceAction = async (label: string, action: (client: WebSerialDeviceClient) => Promise<void>) => {
+    if (!systemStatusConfirmed) {
+      setDeviceError(tr("正在确认系统状态，请稍候。", "Checking system status. Please wait."));
+      return;
+    }
+    if (publicSystemStatus.maintenance) {
+      setDeviceError(tr("系统升级期间暂不允许设备部署。", "Device deployment is unavailable during maintenance."));
+      return;
+    }
     const client = serialClientRef.current;
     if (!client?.connected) {
       setDeviceError(tr("请先连接 ESP32。", "Connect the ESP32 first."));
@@ -1231,6 +1462,77 @@ export default function App() {
       }
     } finally {
       setDeviceBusy("");
+    }
+  };
+
+  const fetchShowcaseMpkBase64 = async (item: ShowcaseApp) => {
+    const response = await fetch(item.mpkUrl);
+    if (!response.ok) throw new Error(`MPK download returned ${response.status}`);
+    return encodeShowcaseMpk(new Uint8Array(await response.arrayBuffer()));
+  };
+
+  const previewShowcaseApp = async (item: ShowcaseApp) => {
+    if (showcaseAction) return;
+    if (!wasmReady || !iframeRef.current?.contentWindow) {
+      setToast(tr("MicroPythonOS WASM 尚未就绪，请稍后重试。", "MicroPythonOS WASM is not ready yet. Try again shortly."));
+      return;
+    }
+    setShowcaseAction(`preview:${item.fullname}`);
+    setRuntimeStatus(tr(`正在下载并模拟运行 ${item.name}…`, `Downloading and previewing ${item.name}…`));
+    setActiveTab("preview");
+    try {
+      const mpkBase64 = await fetchShowcaseMpkBase64(item);
+      showcasePreviewRef.current = item.name;
+      if (executionTimer.current !== null) window.clearTimeout(executionTimer.current);
+      executionTimer.current = window.setTimeout(() => {
+        showcasePreviewRef.current = "";
+        setShowcaseAction("");
+        setRuntimeStatus(tr("样例 WASM 模拟运行超时", "Showcase WASM preview timed out"));
+      }, 60_000);
+      iframeRef.current.contentWindow.postMessage(
+        buildShowcaseRunMessage(item.fullname, mpkBase64),
+        "*",
+      );
+    } catch (error) {
+      showcasePreviewRef.current = "";
+      setShowcaseAction("");
+      const message = error instanceof Error
+        ? error.message
+        : tr("样例 MPK 下载失败", "Could not download the showcase MPK");
+      setRuntimeStatus(message);
+      setToast(message);
+    }
+  };
+
+  const deployShowcaseApp = async (item: ShowcaseApp) => {
+    if (showcaseAction) return;
+    if (!isPlatformActionAllowed(systemStatusConfirmed, publicSystemStatus.maintenance)) {
+      const message = systemStatusConfirmed
+        ? tr("系统升级期间暂不允许设备部署。", "Device deployment is unavailable during maintenance.")
+        : tr("正在确认系统状态，请稍候。", "Checking system status. Please wait.");
+      setDeviceError(message);
+      setToast(message);
+      return;
+    }
+    if (!serialClientRef.current?.connected) {
+      const message = tr("请先在上方连接 ESP32，再点击“下载并部署”。", "Connect the ESP32 above before choosing Download and deploy.");
+      setDeviceError(message);
+      setDeviceMessage(message);
+      setToast(message);
+      return;
+    }
+    setShowcaseAction(`deploy:${item.fullname}`);
+    try {
+      await runDeviceAction("install", async (client) => {
+        setDeviceProgress(0);
+        setDeviceMessage(tr(`正在下载并部署 ${item.name}…`, `Downloading and deploying ${item.name}…`));
+        const mpkBase64 = await fetchShowcaseMpkBase64(item);
+        await client.installMpkBase64(item.fullname, mpkBase64, setDeviceProgress);
+        setDeviceProgress(100);
+        setDeviceMessage(tr(`${item.name} 已安装到设备。`, `${item.name} was installed on the device.`));
+      });
+    } finally {
+      setShowcaseAction("");
     }
   };
 
@@ -1438,6 +1740,28 @@ export default function App() {
     setToast(tr("已把 AI 整理的完整需求填入输入框", "The refined requirement was added to the prompt"));
   };
 
+  if (publicSystemStatus.maintenance) {
+    return (
+      <div className="auth-page">
+        <section className="auth-card">
+          <div className="auth-brand"><span>BM</span><div><strong>Blockless-Make-APP</strong><small>MicroPythonOS AI Builder</small></div></div>
+          <div className="auth-heading">
+            <span>{tr("维护模式", "MAINTENANCE")}</span>
+            <h1>{tr("系统正在升级", "System upgrade in progress")}</h1>
+            <p>{publicSystemStatus.message || tr(
+              "生成和设备部署已暂时关闭。页面会自动检查，服务恢复后无需重新登录。",
+              "Generation and device deployment are temporarily unavailable. This page checks automatically and restores access without another sign-in.",
+            )}</p>
+          </div>
+          <div className="auth-loading">{tr(
+            `约 ${publicSystemStatus.retry_after_seconds} 秒后再次检查…`,
+            `Checking again in about ${publicSystemStatus.retry_after_seconds} seconds…`,
+          )}</div>
+        </section>
+      </div>
+    );
+  }
+
   if (authStatus !== "signed_in") {
     return (
       <div className="auth-page">
@@ -1604,7 +1928,7 @@ export default function App() {
               <label><input type="checkbox" checked={packageTarget} onChange={(event) => setPackageTarget(event.target.checked)} /> Package only<small>{tr("生成可以下载的 _rN.mpk", "Create a downloadable _rN.mpk")}</small></label>
             </div>
             <div className="device-guide">
-              <div><strong>{tr("要在真实设备上运行？", "Want to run on a real device?")}</strong><span>{tr("请使用 Chrome、Edge 或 Brave，点击连接后在系统窗口中选择 COM5。", "Use Chrome, Edge, or Brave, then choose COM5 in the system dialog.")}</span></div>
+              <div><strong>{tr("要在真实设备上运行？", "Want to run on a real device?")}</strong><span>{tr("请使用 Chrome、Edge 或 Brave，点击连接后选择 ESP32 对应的串口设备。", "Use Chrome, Edge, or Brave, then choose the serial device for your ESP32.")}</span></div>
               <button onClick={() => void (serialConnected ? disconnectDevice() : scanDevices())}>
                 {serialConnected ? tr("断开设备", "Disconnect") : tr("连接 ESP32", "Connect ESP32")}
               </button>
@@ -1620,7 +1944,7 @@ export default function App() {
                     <small>{deviceState === "connecting"
                       ? tr("正在连接", "Connecting")
                       : deviceState === "connected"
-                        ? tr("COM5 · 115200 · 已连接", "COM5 · 115200 · connected")
+                        ? `${deviceConnectionDetail || tr("USB 串口设备", "USB serial device")} · ${tr("已连接", "connected")}`
                         : tr("连接异常", "Connection error")}</small>
                   </div>
                   <button disabled={!serialConnected || Boolean(deviceBusy)} onClick={() => void probeDevice()}>
@@ -1667,7 +1991,7 @@ export default function App() {
             <div className="actions">
               {status === "running"
                 ? <button className="danger-button" onClick={stop}>{tr("停止任务", "Stop")}</button>
-                : <button className="main-button" disabled={!providerReady || !prompt.trim() || !(desktopTarget || webTarget || physicalTarget || packageTarget)} onClick={() => void run()}>{continuing ? tr("生成新版本", "Generate revision") : ["completed", "failed", "cancelled", "timeout"].includes(status) ? tr("重新生成 App", "Regenerate App") : tr("开始生成 App", "Generate App")}</button>}
+                : <button className="main-button" disabled={!providerReady || !systemStatusConfirmed || !prompt.trim() || !(desktopTarget || webTarget || physicalTarget || packageTarget)} onClick={() => void run()}>{continuing ? tr("生成新版本", "Generate revision") : ["completed", "failed", "cancelled", "timeout"].includes(status) ? tr("重新生成 App", "Regenerate App") : tr("开始生成 App", "Generate App")}</button>}
               <span className="real-badge">{tr("真实调用 AI Provider", "Real AI provider")}</span>
             </div>
           </section>
@@ -1690,7 +2014,8 @@ export default function App() {
               <span>{errorMessage}</span>
               <div>
                 {status === "blocked" && sessionState?.permissions.some((item) => item.required && item.decision === "pending") && <button onClick={() => setPermissionOpen(true)}>{tr("处理权限", "Review permissions")}</button>}
-                <button onClick={retry}>{tr("从失败检查点重试", "Retry from checkpoint")}</button>
+                {status === "timeout" && sessionState?.status !== "timeout" && <button onClick={() => void continueWaiting()}>{tr("继续等待后台结果", "Keep waiting for backend")}</button>}
+                {(status !== "timeout" || sessionState?.status === "timeout") && <button onClick={retry}>{tr("从失败检查点重试", "Retry from checkpoint")}</button>}
               </div>
             </div>}
             {sessionState?.warnings.length ? <div className="warning-box"><strong>{tr("警告（不等于失败）", "Warnings (not failures)")}</strong>{sessionState.warnings.map((warning) => <span key={warning}>⚠ {warning}</span>)}</div> : null}
@@ -1702,14 +2027,14 @@ export default function App() {
           <div className="history-list">{history.slice(0, 5).map((item) => <button key={item.session_id} onClick={() => void restoreSession(item.session_id)}><strong>{item.input.display_name}</strong><span>{item.revision_id} · {item.status} · {item.checkpoint_id}</span><small>{item.input.prompt_original}</small></button>)}</div>
         </section>}
 
-        <section className="card showcase-library" id="showcase">
-          <div className="section-heading">
+        <details className="card showcase-library" id="showcase">
+          <summary className="section-heading">
             <div>
               <span>{tr("更多创作灵感", "More ideas to explore")}</span>
               <h2>{tr("100 App 样例库", "100-App Showcase")}</h2>
             </div>
-            <p>{tr("从界面截图快速发现灵感，按名称或类别查找，并下载对应的 MPK。", "Browse interface ideas, search by name or category, and download the matching MPK.")}</p>
-          </div>
+            <p>{tr("展开后可模拟运行、下载 MPK，或直接部署到已连接的板子。", "Expand to preview, download an MPK, or deploy directly to a connected board.")}</p>
+          </summary>
 
           <div className="showcase-toolbar">
             <label className="showcase-field showcase-search">
@@ -1800,13 +2125,29 @@ export default function App() {
                         <p title={item.longDescription}>{item.shortDescription}</p>
                         <div className="showcase-footer">
                           <code>{item.fullname}</code>
-                          <a
-                            href={item.mpkUrl}
-                            download
-                            aria-label={tr(`下载 ${item.name} MPK`, `Download ${item.name} MPK`)}
-                          >
-                            {tr("下载 MPK", "Download MPK")}
-                          </a>
+                          <div className="showcase-actions">
+                            <button
+                              type="button"
+                              disabled={Boolean(showcaseAction)}
+                              onClick={() => void previewShowcaseApp(item)}
+                            >
+                              {showcaseAction === `preview:${item.fullname}` ? tr("模拟中…", "Previewing…") : tr("模拟运行", "Preview")}
+                            </button>
+                            <button
+                              type="button"
+                              disabled={Boolean(showcaseAction) || Boolean(deviceBusy)}
+                              onClick={() => void deployShowcaseApp(item)}
+                            >
+                              {showcaseAction === `deploy:${item.fullname}` ? tr("部署中…", "Deploying…") : tr("下载并部署", "Download and deploy")}
+                            </button>
+                            <a
+                              href={item.mpkUrl}
+                              download
+                              aria-label={tr(`下载 ${item.name} MPK`, `Download ${item.name} MPK`)}
+                            >
+                              {tr("下载 MPK", "Download MPK")}
+                            </a>
+                          </div>
                         </div>
                       </div>
                     </article>
@@ -1820,7 +2161,7 @@ export default function App() {
               )}
             </>
           )}
-        </section>
+        </details>
 
         <section className="card ecosystem-card" id="devices">
           <div className="section-heading">

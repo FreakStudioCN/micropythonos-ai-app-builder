@@ -194,7 +194,8 @@ class ProtocolTests(unittest.TestCase):
             ),
         )
         self.assertTrue(recorded["hardware_verified"])
-        self.assertEqual(recorded["checkpoint_id"], "completed")
+        self.assertEqual(recorded["status"], "blocked")
+        self.assertEqual(recorded["checkpoint_id"], "publish_check_done")
         deploy = next(
             item for item in recorded["artifacts"] if item["role"] == "deploy_result"
         )
@@ -202,6 +203,93 @@ class ProtocolTests(unittest.TestCase):
         self.assertTrue(
             json.loads(payload.read_text(encoding="utf-8"))["app_launched"]
         )
+
+    def test_device_failure_codes_preserve_safe_hardware_facts(self) -> None:
+        cases = {
+            "DEVICE_NOT_CONNECTED": (False, None),
+            "DEVICE_BOOTLOADER_NOT_FOUND": (True, None),
+            "MPOS_NOT_INSTALLED_ON_DEVICE": (True, False),
+            "DEVICE_PROBE_FAILED": (True, None),
+            "SCRIPT_TIMEOUT": (None, None),
+            "DEVICE_DEPLOY_FAILED": (None, None),
+        }
+        for index, (code, expected_facts) in enumerate(cases.items(), start=1):
+            with self.subTest(code=code):
+                state = self.service.create(
+                    SessionCreateRequest(
+                        idempotency_key=f"device-failure-create-{index:02d}",
+                        prompt="做一个设备状态面板",
+                        package_name=f"com.example.device_failure_{index}",
+                        targets=["physical-device", "package-only"],
+                    )
+                )
+                recorded = self.service.record_device_result(
+                    state["session_id"],
+                    DeviceResultRequest(
+                        idempotency_key=f"device-failure-result-{index:02d}",
+                        result="failed",
+                        error_code=code,
+                        message=f"{code} test",
+                    ),
+                )
+                deploy = next(
+                    item
+                    for item in recorded["artifacts"]
+                    if item["role"] == "deploy_result"
+                )
+                payload = json.loads(
+                    Path(
+                        self.temp.name,
+                        state["session_id"],
+                        deploy["path"],
+                    ).read_text(encoding="utf-8")
+                )
+                self.assertEqual(
+                    payload["structured_errors"][0]["code"], code
+                )
+                self.assertEqual(
+                    (
+                        payload["hardware_available"],
+                        payload["micropythonos_installed"],
+                    ),
+                    expected_facts,
+                )
+                self.assertFalse(recorded["hardware_verified"])
+
+    def test_device_failure_unknown_code_uses_safe_fallback(self) -> None:
+        state = self.service.create(
+            SessionCreateRequest(
+                idempotency_key="device-fallback-create-01",
+                prompt="做一个设备状态面板",
+                package_name="com.example.device_fallback",
+                targets=["physical-device", "package-only"],
+            )
+        )
+        recorded = self.service.record_device_result(
+            state["session_id"],
+            DeviceResultRequest(
+                idempotency_key="device-fallback-result-01",
+                result="failed",
+                error_code="UNRECOGNIZED_DEVICE_ERROR",
+            ),
+        )
+        deploy = next(
+            item
+            for item in recorded["artifacts"]
+            if item["role"] == "deploy_result"
+        )
+        payload = json.loads(
+            Path(
+                self.temp.name,
+                state["session_id"],
+                deploy["path"],
+            ).read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            payload["structured_errors"][0]["code"], "DEVICE_DEPLOY_FAILED"
+        )
+        self.assertIsNone(payload["hardware_available"])
+        self.assertIsNone(payload["micropythonos_installed"])
 
     def test_publish_screenshot_upload_validates_and_registers_png(self) -> None:
         state = self.service.create(
@@ -242,7 +330,7 @@ class ProtocolTests(unittest.TestCase):
         first = self.service.create_demo(request)
         second = self.service.create_demo(request)
         self.assertEqual(first["session_id"], second["session_id"])
-        self.assertEqual(first["status"], "completed")
+        self.assertEqual(first["status"], "blocked")
         self.assertEqual(first["generation"]["model"], "deterministic-demo-seed")
         roles = {item["role"] for item in first["artifacts"]}
         self.assertIn("mpk", roles)
@@ -257,6 +345,113 @@ class ProtocolTests(unittest.TestCase):
             self.assertIn("session_summary.json", names)
             self.assertIn("activity_log.redacted.jsonl", names)
             self.assertTrue(any(name.endswith("_r1.mpk") for name in names))
+
+    def test_final_artifact_gate_requires_screenshot_fresh_mpk_and_upload_metadata(
+        self,
+    ) -> None:
+        state = self.service.create_demo(
+            DemoSessionRequest(
+                idempotency_key="final-artifact-demo-01",
+                seed="calendar",
+            )
+        )
+        self.assertEqual(state["status"], "blocked")
+        self.assertTrue(
+            any(
+                error.get("details", {}).get("artifact_role")
+                == "publish_screenshot"
+                for error in state["structured_errors"]
+            )
+        )
+        png = base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk"
+            "YAAAAAYAAjCB0C8AAAAASUVORK5CYII="
+        )
+        ready = self.service.upload_screenshot(
+            state["session_id"],
+            ScreenshotUploadRequest(
+                idempotency_key="final-artifact-screenshot-01",
+                filename="calendar.png",
+                media_type="image/png",
+                data_base64=base64.b64encode(png).decode(),
+                source="manual",
+            ),
+        )
+        self.assertEqual(ready["status"], "completed")
+        publish_artifact = next(
+            item
+            for item in ready["artifacts"]
+            if item["role"] == "publish_result"
+        )
+        publish_path = Path(
+            self.temp.name,
+            state["session_id"],
+            publish_artifact["path"],
+        )
+        publish_result = json.loads(publish_path.read_text(encoding="utf-8"))
+        self.assertTrue(publish_result["publish_ready"])
+
+        mpk_artifact = next(
+            item for item in ready["artifacts"] if item["role"] == "mpk"
+        )
+        source_artifact = next(
+            item for item in ready["artifacts"] if item["role"] == "app_source"
+        )
+        mpk_path = Path(
+            self.temp.name, state["session_id"], mpk_artifact["path"]
+        )
+        source_path = Path(
+            self.temp.name, state["session_id"], source_artifact["path"]
+        )
+        mpk_mtime = mpk_path.stat().st_mtime_ns
+        os.utime(
+            source_path,
+            ns=(mpk_mtime + 1_000_000_000, mpk_mtime + 1_000_000_000),
+        )
+        ready["status"] = "completed"
+        stale = self.service._apply_final_artifact_gate(
+            ready, completion_requested=True
+        )
+        self.assertFalse(stale["ready"])
+        self.assertEqual(ready["status"], "blocked")
+        self.assertTrue(
+            any(
+                error["code"] == "FINAL_ARTIFACT_STALE"
+                for error in stale["errors"]
+            )
+        )
+
+        os.utime(
+            source_path,
+            ns=(mpk_mtime - 1_000_000_000, mpk_mtime - 1_000_000_000),
+        )
+        bundle_artifact = next(
+            item
+            for item in ready["artifacts"]
+            if item["role"] == "publish_materials_bundle"
+        )
+        bundle_path = Path(
+            self.temp.name,
+            state["session_id"],
+            bundle_artifact["path"],
+        )
+        bundle_path.unlink()
+        ready["artifacts"] = [
+            item
+            for item in ready["artifacts"]
+            if item["role"] != "publish_materials_bundle"
+        ]
+        ready["status"] = "completed"
+        missing_upload = self.service._apply_final_artifact_gate(
+            ready, completion_requested=True
+        )
+        self.assertFalse(missing_upload["ready"])
+        self.assertTrue(
+            any(
+                error["details"]["artifact_role"] == "upload_metadata"
+                for error in missing_upload["errors"]
+            )
+        )
 
     def test_activity_log_export_redacts_secrets_paths_and_serial_ports(self) -> None:
         state = self.service.create(
@@ -438,6 +633,109 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             "deepseek_secondary",
         )
 
+    async def test_revision_and_action_provider_reach_generate_request(self) -> None:
+        async def run_case(
+            *,
+            suffix: str,
+            revision_provider: str | None,
+            action_provider: str | None,
+            expected_provider: str,
+        ) -> None:
+            package_name = f"com.example.provider_{suffix}"
+            state = self.service.create(
+                SessionCreateRequest(
+                    idempotency_key=f"provider-create-{suffix}-0001",
+                    prompt="Build a provider routing test app",
+                    package_name=package_name,
+                    targets=["package-only"],
+                    ai_provider="deepseek_primary",
+                )
+            )
+            if revision_provider is not None:
+                state = self.service.create_revision(
+                    state["session_id"],
+                    RevisionRequest(
+                        idempotency_key=f"provider-revision-{suffix}-0001",
+                        prompt="Revise the provider routing test app",
+                        prompt_language="en-US",
+                        ai_provider=revision_provider,
+                    ),
+                )
+            for permission in state["permissions"]:
+                if permission["required"]:
+                    state = self.service.decide_permission(
+                        permission["permission_id"],
+                        PermissionDecisionRequest(
+                            idempotency_key=f"allow-{suffix}-{permission['permission_id']}",
+                            decision="allow_once",
+                        ),
+                    )
+
+            manifest = {
+                "fullname": package_name,
+                "name": "ProviderRouting",
+                "publisher": "erkou111",
+                "version": "0.1.0",
+                "activities": [
+                    {
+                        "entrypoint": "assets/main.py",
+                        "classname": "GeneratedApp",
+                    }
+                ],
+            }
+            app_code = "print('provider routing')\n"
+            generated = GenerateResponse(
+                package_name=package_name,
+                summary="Provider routing test app",
+                manifest=manifest,
+                files=[
+                    GeneratedFile(
+                        path="MANIFEST.JSON",
+                        content=json.dumps(manifest),
+                    ),
+                    GeneratedFile(path="assets/main.py", content=app_code),
+                    GeneratedFile(
+                        path="generation_result.json",
+                        content=json.dumps({"result": "success"}),
+                    ),
+                ],
+                mpk_base64=_build_mpk(package_name, manifest, app_code),
+                model="test-model",
+                provider=expected_provider,
+                acceptance_tests=["provider is forwarded"],
+                mpk_filename=(
+                    f"{package_name}_{state['revision_id']}.mpk"
+                ),
+                revision=int(state["revision_id"].removeprefix("r")),
+            )
+            generate_mock = AsyncMock(return_value=generated)
+            with patch.object(session_module, "generate_app", new=generate_mock):
+                self.service.start_generation(
+                    state["session_id"],
+                    SessionActionRequest(
+                        idempotency_key=f"provider-run-{suffix}-0001",
+                        ai_provider=action_provider,
+                    ),
+                )
+                await self.service._tasks[state["session_id"]]
+
+            self.assertEqual(generate_mock.await_count, 1)
+            generate_request = generate_mock.await_args.args[0]
+            self.assertEqual(generate_request.ai_provider, expected_provider)
+
+        await run_case(
+            suffix="revision",
+            revision_provider="aigocode",
+            action_provider=None,
+            expected_provider="aigocode",
+        )
+        await run_case(
+            suffix="action",
+            revision_provider=None,
+            action_provider="deepseek_secondary",
+            expected_provider="deepseek_secondary",
+        )
+
     async def test_pipeline_writes_required_protocol_artifacts(self) -> None:
         state = self.service.create(
             SessionCreateRequest(
@@ -514,7 +812,14 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             )
             await self.service._tasks[state["session_id"]]
         completed = self.service.get(state["session_id"])
-        self.assertEqual(completed["status"], "completed")
+        self.assertEqual(completed["status"], "blocked")
+        self.assertTrue(
+            any(
+                error.get("details", {}).get("artifact_role")
+                == "publish_screenshot"
+                for error in completed["structured_errors"]
+            )
+        )
         roles = {item["role"] for item in completed["artifacts"]}
         self.assertTrue(
             {

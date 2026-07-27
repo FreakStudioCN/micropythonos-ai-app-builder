@@ -575,6 +575,7 @@ class GeneratedApp(Activity):
                 {
                     "result": "success",
                     "status": "ready_for_manual_upload",
+                    "publish_ready": False,
                     "upystore": {
                         "home_url": "https://upystore.io/",
                         "developer_url": "https://upystore.io/developer",
@@ -605,8 +606,8 @@ class GeneratedApp(Activity):
         }
         state["input"]["prompt_normalized_zh"] = seed["prompt_zh"]
         state["input"]["prompt_normalized_en"] = seed["prompt_en"]
-        state["status"] = "completed"
-        state["checkpoint_id"] = "completed"
+        state["status"] = "running"
+        state["checkpoint_id"] = "publish_check_done"
         state["current_phase"] = "mpos-publish-app-web"
         state["next_phase"] = None
         state["completed_phases"] = list(STAGE_SKILLS.values())
@@ -615,6 +616,9 @@ class GeneratedApp(Activity):
         state["structured_errors"] = []
         self._write_manifest(state)
         self._write_publish_bundle(state)
+        state["status"] = "completed"
+        state["checkpoint_id"] = "completed"
+        self._apply_final_artifact_gate(state, completion_requested=True)
         self._write_session_bundle(state)
         self._write_manifest(state)
         self._write_state(state)
@@ -623,7 +627,7 @@ class GeneratedApp(Activity):
             "status_update",
             "mpos-publish-app-web",
             {
-                "status": "completed",
+                "status": state["status"],
                 "message": f"已恢复固定演示：{seed['display_name_zh']}",
                 "demo_seed": request.seed,
             },
@@ -1564,6 +1568,13 @@ class GeneratedApp(Activity):
                             if screenshots
                             else "needs_preview_and_screenshot"
                         ),
+                        "publish_ready": False,
+                        "upystore": {
+                            "home_url": "https://upystore.io/",
+                            "developer_url": "https://upystore.io/developer",
+                            "mode": "manual_guidance",
+                            "version_status": "unknown_unverified",
+                        },
                         "app_metadata": generation.get("store_metadata", {}),
                         "mpk": {
                             "filename": generation["mpk_filename"],
@@ -1592,30 +1603,42 @@ class GeneratedApp(Activity):
                 state["status"] = "completed"
                 state["current_phase"] = phase
                 state["next_phase"] = None
+                if action == "publish-check":
+                    self._apply_final_artifact_gate(
+                        state, completion_requested=True
+                    )
                 self._write_state(state)
             except (GenerationError, OSError, ValueError) as exc:
                 state = self._read(session_id)
                 message = str(exc)
-                error = {
-                    "code": (
+                code = getattr(
+                    exc,
+                    "code",
+                    (
                         message.split(":", 1)[0]
                         if re.match(r"^[A-Z][A-Z0-9_]+:", message)
                         else "STAGE_EXECUTION_FAILED"
                     ),
-                    "message": message.split(":", 1)[-1].strip(),
+                )
+                resume_checkpoint_id = state.get("checkpoint_id")
+                error = {
+                    "code": code,
+                    "message": getattr(
+                        exc, "message", message.split(":", 1)[-1].strip()
+                    ),
                     "stage": action,
                     "phase": phase,
-                    "owner": (
-                        "external"
-                        if str(getattr(exc, "code", "")).startswith("AI_UPSTREAM_")
-                        else "app"
-                    ),
-                    "retryable": bool(getattr(exc, "retryable", True)),
-                    "details": getattr(exc, "details", {}),
+                    "owner": "external" if code.startswith("AI_UPSTREAM_") else "app",
+                    "retryable": getattr(exc, "retryable", True),
+                    "details": {
+                        "resume_checkpoint_id": resume_checkpoint_id,
+                        **getattr(exc, "details", {}),
+                    },
                     "logs": ["activity_log.jsonl"],
                 }
                 state["status"] = "failed"
                 state["checkpoint_id"] = "failed"
+                state["resume_checkpoint_id"] = resume_checkpoint_id
                 state["next_phase"] = phase
                 state["last_error"] = error
                 state["structured_errors"].append(error)
@@ -2182,6 +2205,7 @@ class GeneratedApp(Activity):
                     "phase": "mpos-publish-app-web",
                     "result": "partial",
                     "status": "needs_preview_and_screenshot",
+                    "publish_ready": False,
                     "upystore": {
                         "home_url": "https://upystore.io/",
                         "developer_url": "https://upystore.io/developer",
@@ -2250,6 +2274,9 @@ class GeneratedApp(Activity):
                     else None
                 )
                 state["warnings"] = test_result["warnings"] + publish_result["warnings"]
+                self._apply_final_artifact_gate(
+                    state, completion_requested=state["status"] == "completed"
+                )
                 self._write_manifest(state)
                 self._write_session_bundle(state)
                 self._write_manifest(state)
@@ -2263,6 +2290,8 @@ class GeneratedApp(Activity):
                         "message": (
                             "源码和 MPK 已生成，等待浏览器 WASM 验证"
                             if web_requested
+                            else "最终发布产物不完整，请按错误详情补齐"
+                            if state["status"] == "blocked"
                             else "所选生成、检查和打包阶段已完成"
                         ),
                     },
@@ -2282,28 +2311,35 @@ class GeneratedApp(Activity):
             except (GenerationError, OSError, ValueError) as exc:
                 state = self._read(session_id)
                 message = str(exc)
-                code = (
-                    message.split(":", 1)[0]
-                    if re.match(r"^[A-Z][A-Z0-9_]+:", message)
-                    else "APP_GENERATION_FAILED"
+                code = getattr(
+                    exc,
+                    "code",
+                    (
+                        message.split(":", 1)[0]
+                        if re.match(r"^[A-Z][A-Z0-9_]+:", message)
+                        else "APP_GENERATION_FAILED"
+                    ),
                 )
+                resume_checkpoint_id = state.get("checkpoint_id")
                 error = {
                     "code": code,
-                    "message": message.split(":", 1)[-1].strip(),
+                    "message": getattr(
+                        exc, "message", message.split(":", 1)[-1].strip()
+                    ),
                     "stage": "generation",
                     "phase": "mpos-gen-app-web",
-                    "owner": (
-                        "external" if code.startswith("AI_UPSTREAM_") else "app"
-                    ),
-                    "retryable": bool(getattr(exc, "retryable", True)),
+                    "owner": "external" if code.startswith("AI_UPSTREAM_") else "app",
+                    "retryable": getattr(exc, "retryable", True),
                     "details": {
                         "attempt": state["attempts"].get("mpos-gen-app-web", 1),
+                        "resume_checkpoint_id": resume_checkpoint_id,
                         **getattr(exc, "details", {}),
                     },
                     "logs": ["activity_log.jsonl"],
                 }
                 state["status"] = "failed"
                 state["checkpoint_id"] = "failed"
+                state["resume_checkpoint_id"] = resume_checkpoint_id
                 state["next_phase"] = "mpos-gen-app-web"
                 state["last_error"] = error
                 state["structured_errors"].append(error)
@@ -2509,6 +2545,281 @@ class GeneratedApp(Activity):
             "session_bundle",
         )
 
+    def _final_artifact_path(
+        self, state: dict[str, Any], artifact: dict[str, Any] | None
+    ) -> Path | None:
+        if not artifact:
+            return None
+        root = self._root(state["session_id"])
+        path = (root / str(artifact.get("path", ""))).resolve()
+        if root not in path.parents or not path.is_file():
+            return None
+        return path
+
+    @staticmethod
+    def _valid_publish_screenshot(path: Path, mime: str) -> bool:
+        suffix = path.suffix.lower()
+        try:
+            with path.open("rb") as handle:
+                signature = handle.read(12)
+        except OSError:
+            return False
+        if mime == "image/png":
+            return suffix == ".png" and signature.startswith(b"\x89PNG\r\n\x1a\n")
+        if mime == "image/jpeg":
+            return suffix in {".jpg", ".jpeg"} and signature.startswith(b"\xff\xd8\xff")
+        if mime == "image/webp":
+            return (
+                suffix == ".webp"
+                and signature.startswith(b"RIFF")
+                and len(signature) >= 12
+                and signature[8:12] == b"WEBP"
+            )
+        return False
+
+    @staticmethod
+    def _is_final_artifact_error(error: dict[str, Any] | None) -> bool:
+        return bool(
+            error
+            and isinstance(error.get("details"), dict)
+            and error["details"].get("gate") == "final_artifacts_only"
+        )
+
+    def _apply_final_artifact_gate(
+        self,
+        state: dict[str, Any],
+        *,
+        completion_requested: bool,
+    ) -> dict[str, Any]:
+        """Enforce the final_artifacts_only evidence contract before completion."""
+        artifacts = state.get("artifacts", [])
+        package_name = state["input"]["package_name"]
+        revision_id = state["revision_id"]
+        expected_mpk = f"{package_name}_{revision_id}.mpk"
+
+        mpk_artifact = next(
+            (
+                item
+                for item in reversed(artifacts)
+                if item.get("role") == "mpk"
+                and Path(str(item.get("path", ""))).name == expected_mpk
+            ),
+            None,
+        )
+        mpk_path = self._final_artifact_path(state, mpk_artifact)
+        source_paths = [
+            path
+            for item in artifacts
+            if item.get("role") in {"app_manifest", "app_source"}
+            for path in [self._final_artifact_path(state, item)]
+            if path is not None
+        ]
+        mpk_fresh = bool(mpk_path)
+        if mpk_path and source_paths:
+            try:
+                mpk_fresh = mpk_path.stat().st_mtime_ns >= max(
+                    path.stat().st_mtime_ns for path in source_paths
+                )
+            except OSError:
+                mpk_fresh = False
+
+        screenshot_artifact = next(
+            (
+                item
+                for item in reversed(artifacts)
+                if item.get("role") in {"desktop_screenshot", "publish_screenshot"}
+                and (
+                    (path := self._final_artifact_path(state, item)) is not None
+                )
+                and self._valid_publish_screenshot(path, str(item.get("mime", "")))
+            ),
+            None,
+        )
+        screenshot_ready = screenshot_artifact is not None
+
+        upload_manifest_artifact = next(
+            (
+                item
+                for item in reversed(artifacts)
+                if item.get("role") == "upystore_upload_manifest"
+                and self._final_artifact_path(state, item) is not None
+            ),
+            None,
+        )
+        publish_artifact = next(
+            (
+                item
+                for item in reversed(artifacts)
+                if item.get("role") == "publish_result"
+            ),
+            None,
+        )
+        publish_path = self._final_artifact_path(state, publish_artifact)
+        publish_result: dict[str, Any] = {}
+        if publish_path:
+            try:
+                publish_result = _json_load(publish_path)
+            except (OSError, json.JSONDecodeError):
+                publish_result = {}
+        publish_bundle_artifact = next(
+            (
+                item
+                for item in reversed(artifacts)
+                if item.get("role") == "publish_materials_bundle"
+                and self._final_artifact_path(state, item) is not None
+            ),
+            None,
+        )
+        manual_guidance_ready = (
+            publish_result.get("upystore", {}).get("mode") == "manual_guidance"
+        )
+        upload_metadata_ready = bool(upload_manifest_artifact) or bool(
+            publish_result and manual_guidance_ready and publish_bundle_artifact
+        )
+
+        errors: list[dict[str, Any]] = []
+
+        def missing_error(
+            artifact_role: str,
+            message: str,
+            *,
+            code: str = "FINAL_ARTIFACT_MISSING",
+            owner: str = "backend",
+            expected: str | None = None,
+        ) -> None:
+            errors.append(
+                {
+                    "code": code,
+                    "message": message,
+                    "stage": "publish",
+                    "phase": "mpos-publish-app-web",
+                    "owner": owner,
+                    "retryable": True,
+                    "details": {
+                        "gate": "final_artifacts_only",
+                        "artifact_role": artifact_role,
+                        "expected": expected,
+                    },
+                    "logs": ["artifact_manifest.json"],
+                }
+            )
+
+        if not mpk_path:
+            missing_error(
+                "mpk",
+                f"缺少当前 revision 的 MPK：{expected_mpk}",
+                expected=expected_mpk,
+            )
+        elif not mpk_fresh:
+            missing_error(
+                "mpk",
+                f"MPK 早于当前 App 源码，必须重新打包：{expected_mpk}",
+                code="FINAL_ARTIFACT_STALE",
+                expected=expected_mpk,
+            )
+        if not screenshot_ready:
+            missing_error(
+                "publish_screenshot",
+                "缺少有效的 PNG、JPEG 或 WebP 发布截图",
+                owner="user",
+                expected="PNG/JPEG/WebP",
+            )
+        if not upload_metadata_ready:
+            missing_error(
+                "upload_metadata",
+                "缺少 upystore_upload_manifest，或 publish_result/manual guidance/publish bundle",
+                expected=(
+                    "upystore_upload_manifest or "
+                    "publish_result+manual_guidance+publish_materials_bundle"
+                ),
+            )
+
+        previous_errors = state.get("structured_errors", [])
+        state["structured_errors"] = [
+            error
+            for error in previous_errors
+            if not self._is_final_artifact_error(error)
+        ] + errors
+        ready = not errors
+        if not ready:
+            state["last_error"] = errors[0]
+            if completion_requested:
+                state["status"] = "blocked"
+                state["checkpoint_id"] = "publish_check_done"
+                state["current_phase"] = "mpos-publish-app-web"
+                state["next_phase"] = (
+                    "mpos-package-app-web"
+                    if any(
+                        error["details"]["artifact_role"] == "mpk"
+                        for error in errors
+                    )
+                    else "mpos-test-app-web"
+                    if any(
+                        error["details"]["artifact_role"] == "publish_screenshot"
+                        for error in errors
+                    )
+                    else "mpos-publish-app-web"
+                )
+                state["final_artifact_gate_blocked"] = True
+        else:
+            if self._is_final_artifact_error(state.get("last_error")):
+                state["last_error"] = None
+            if completion_requested or state.get("final_artifact_gate_blocked"):
+                state["status"] = "completed"
+                state["checkpoint_id"] = "completed"
+                state["current_phase"] = "mpos-publish-app-web"
+                state["next_phase"] = None
+            state["final_artifact_gate_blocked"] = False
+
+        if publish_result and publish_path:
+            gate_blockers = {"mpk", "publish_screenshot", "upload_metadata"}
+            blockers = [
+                blocker
+                for blocker in publish_result.get("blockers", [])
+                if blocker not in gate_blockers
+            ]
+            blockers.extend(
+                error["details"]["artifact_role"] for error in errors
+            )
+            publish_result["blockers"] = list(dict.fromkeys(blockers))
+            publish_result["structured_errors"] = [
+                error
+                for error in publish_result.get("structured_errors", [])
+                if not self._is_final_artifact_error(error)
+            ] + errors
+            publish_result["publish_ready"] = ready
+            publish_result["result"] = "success" if ready else "partial"
+            publish_result["status"] = (
+                "ready_for_manual_upload" if ready else "partial"
+            )
+            gate_checks = {
+                "final_mpk": "passed" if mpk_fresh else "failed",
+                "final_screenshot": "passed" if screenshot_ready else "failed",
+                "upload_metadata": (
+                    "passed" if upload_metadata_ready else "failed"
+                ),
+            }
+            publish_result["checks"] = [
+                check
+                for check in publish_result.get("checks", [])
+                if check.get("name") not in gate_checks
+            ] + [
+                {"name": name, "status": status}
+                for name, status in gate_checks.items()
+            ]
+            _json_dump(publish_path, publish_result)
+            self._register_artifact(
+                state,
+                publish_path,
+                "mpos-publish-app-web",
+                "result",
+                "publish_result",
+            )
+            if publish_bundle_artifact:
+                self._write_publish_bundle(state)
+
+        return {"ready": ready, "errors": errors}
+
     def _write_publish_bundle(self, state: dict[str, Any]) -> None:
         root = self._root(state["session_id"])
         bundle = (
@@ -2597,6 +2908,16 @@ class GeneratedApp(Activity):
                 "checkpoint_id": "failed",
                 "structured_errors": [error],
             }
+        if request.result == "success":
+            gate = self._apply_final_artifact_gate(
+                state, completion_requested=True
+            )
+            if not gate["ready"]:
+                payload = {
+                    "result": "partial",
+                    "checkpoint_id": state["checkpoint_id"],
+                    "structured_errors": gate["errors"],
+                }
         self._write_state(state)
         self._event(state, "phase_complete", "mpos-test-app-web", payload)
         return self.get(session_id)
@@ -2611,11 +2932,47 @@ class GeneratedApp(Activity):
         success = request.result != "failed"
         installed = request.result in {"install_success", "launch_success"}
         launched = request.result == "launch_success"
+        allowed_error_codes = {
+            "DEVICE_NOT_CONNECTED",
+            "DEVICE_BOOTLOADER_NOT_FOUND",
+            "MPOS_NOT_INSTALLED_ON_DEVICE",
+            "DEVICE_PROBE_FAILED",
+            "SCRIPT_TIMEOUT",
+            "DEVICE_DEPLOY_FAILED",
+        }
+        error_code = (
+            request.error_code
+            if request.error_code in allowed_error_codes
+            else "DEVICE_DEPLOY_FAILED"
+        )
+        inferred_facts: dict[str, tuple[bool | None, bool | None]] = {
+            "DEVICE_NOT_CONNECTED": (False, None),
+            "DEVICE_BOOTLOADER_NOT_FOUND": (True, None),
+            "MPOS_NOT_INSTALLED_ON_DEVICE": (True, False),
+            "DEVICE_PROBE_FAILED": (True, None),
+            "SCRIPT_TIMEOUT": (None, None),
+            "DEVICE_DEPLOY_FAILED": (None, None),
+        }
+        inferred_hardware, inferred_mpos = inferred_facts[error_code]
+        hardware_available = (
+            request.hardware_available
+            if request.hardware_available is not None
+            else True
+            if success
+            else inferred_hardware
+        )
+        micropythonos_installed = (
+            request.micropythonos_installed
+            if request.micropythonos_installed is not None
+            else True
+            if success
+            else inferred_mpos
+        )
         structured_errors = []
         if not success:
             structured_errors.append(
                 {
-                    "code": "DEVICE_DEPLOY_FAILED",
+                    "code": error_code,
                     "message": request.message or "浏览器设备操作失败",
                     "stage": "deploy",
                     "phase": "mpos-deploy-app-web",
@@ -2626,6 +2983,8 @@ class GeneratedApp(Activity):
                         "board": request.board,
                         "usb_vendor_id": request.usb_vendor_id,
                         "usb_product_id": request.usb_product_id,
+                        "hardware_available": hardware_available,
+                        "micropythonos_installed": micropythonos_installed,
                     },
                     "logs": ["activity_log.jsonl"],
                 }
@@ -2635,12 +2994,16 @@ class GeneratedApp(Activity):
             "phase": "mpos-deploy-app-web",
             "result": "success" if installed else "partial" if success else "failed",
             "mode": "mpk-install" if installed else request.transport,
-            "hardware_available": True,
+            "hardware_available": hardware_available,
             "board": request.board,
             "usb_vendor_id": request.usb_vendor_id,
             "usb_product_id": request.usb_product_id,
-            "serial_port": "browser-selected",
-            "micropythonos_installed": True,
+            "serial_port": (
+                "browser-selected"
+                if request.transport == "webserial" and hardware_available is True
+                else None
+            ),
+            "micropythonos_installed": micropythonos_installed,
             "app_installed": installed,
             "app_launched": launched,
             "installed_path": request.installed_path,
@@ -2661,6 +3024,8 @@ class GeneratedApp(Activity):
                 []
                 if launched
                 else ["设备已连接，但尚未记录 App 在真机成功启动。"]
+                if success
+                else ["设备操作失败；硬件与 MicroPythonOS 状态按实际探测结果记录。"]
             ),
             "structured_errors": structured_errors,
             "handoff": {"next_phase": "mpos-publish-app-web"},
@@ -2711,7 +3076,12 @@ class GeneratedApp(Activity):
                 state["checkpoint_id"] = "completed"
                 state["current_phase"] = "mpos-publish-app-web"
                 state["next_phase"] = None
+                self._apply_final_artifact_gate(
+                    state, completion_requested=True
+                )
         else:
+            state["hardware_verified"] = False
+            state["last_device_result"] = request.result
             state["structured_errors"].extend(structured_errors)
             state["last_error"] = structured_errors[0]
             self._event(
@@ -2818,6 +3188,10 @@ class GeneratedApp(Activity):
                 publish_result,
             )
         self._write_publish_bundle(state)
+        self._apply_final_artifact_gate(
+            state,
+            completion_requested=bool(state.get("final_artifact_gate_blocked")),
+        )
         self._write_session_bundle(state)
         self._write_manifest(state)
         self._write_state(state)
