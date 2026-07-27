@@ -45,12 +45,50 @@ from .models import (
     ScreenshotUploadRequest,
     SessionActionRequest,
     SessionCreateRequest,
+    SystemStatusResponse,
 )
 from .session_service import SessionNotFound, session_service
 
 
 def _enabled(name: str) -> bool:
     return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _system_status_payload() -> dict[str, Any]:
+    maintenance = _enabled("MAINTENANCE_MODE")
+    try:
+        retry_after = int(
+            os.getenv("MAINTENANCE_RETRY_AFTER_SECONDS", "300").strip()
+        )
+    except ValueError:
+        retry_after = 300
+    retry_after = max(1, min(86400, retry_after))
+    message = os.getenv(
+        "MAINTENANCE_MESSAGE",
+        "系统正在升级，请稍后重试。",
+    ).strip()
+    return {
+        "status": "maintenance" if maintenance else "ready",
+        "maintenance_mode": maintenance,
+        "message": message if maintenance else "",
+        "retry_after_seconds": retry_after,
+    }
+
+
+def _maintenance_blocks(method: str, path: str) -> bool:
+    if not _enabled("MAINTENANCE_MODE") or method not in {
+        "POST",
+        "PUT",
+        "PATCH",
+        "DELETE",
+    }:
+        return False
+    return (
+        path in {"/api/generate", "/api/requirements/chat"}
+        or "/actions/" in path
+        or path.endswith(("/retry", "/resume"))
+        or "/devices/" in path
+    )
 
 
 if _enabled("MPOS_REQUIRE_DURABLE_STORAGE"):
@@ -160,12 +198,39 @@ class AuthenticatedUserMiddleware:
 
         public_paths = {
             "/api/health",
+            "/api/system/status",
             "/api/capabilities",
             "/api/auth/register",
             "/api/auth/login",
         }
         if scope["method"] == "OPTIONS" or scope["path"] in public_paths:
             await self.app(scope, receive, send)
+            return
+
+        if _maintenance_blocks(scope["method"], scope["path"]):
+            status = _system_status_payload()
+            response = JSONResponse(
+                status_code=503,
+                content={
+                    "error": {
+                        "code": "SYSTEM_MAINTENANCE",
+                        "message": status["message"],
+                        "stage": "system",
+                        "owner": "backend",
+                        "retryable": True,
+                        "details": {
+                            "retry_after_seconds": status[
+                                "retry_after_seconds"
+                            ]
+                        },
+                        "logs": [],
+                    }
+                },
+                headers={
+                    "Retry-After": str(status["retry_after_seconds"])
+                },
+            )
+            await response(scope, receive, send)
             return
 
         request = Request(scope, receive=receive)
@@ -220,6 +285,11 @@ def health() -> dict[str, Any]:
         "object_storage_enabled": session_service.object_storage_enabled,
         "durable_storage_required": _enabled("MPOS_REQUIRE_DURABLE_STORAGE"),
     }
+
+
+@app.get("/api/system/status", response_model=SystemStatusResponse)
+def system_status() -> dict[str, Any]:
+    return _system_status_payload()
 
 
 @app.get("/api/capabilities")
@@ -669,15 +739,26 @@ async def generate(payload: GenerateRequest, request: Request) -> GenerateRespon
             },
         ) from exc
     except GenerationError as exc:
-        code = getattr(exc, "code", "AI_GENERATION_FAILED")
-        status_code = 504 if code == "AI_UPSTREAM_TIMEOUT" else 503 if code == "AI_UPSTREAM_UNAVAILABLE" else 502
+        code = getattr(exc, "code", "APP_GENERATION_FAILED")
+        status_code = (
+            504
+            if code == "AI_UPSTREAM_TIMEOUT"
+            else 503
+            if code == "AI_UPSTREAM_UNAVAILABLE"
+            else 502
+        )
         raise HTTPException(
             status_code=status_code,
             detail={
-                "code": code,
-                "message": getattr(exc, "message", str(exc)),
-                "retryable": bool(getattr(exc, "retryable", False)),
-                "details": getattr(exc, "details", {}),
+                "error": {
+                    "code": code,
+                    "message": getattr(exc, "message", str(exc)),
+                    "stage": "generation",
+                    "owner": "external" if code.startswith("AI_UPSTREAM_") else "app",
+                    "retryable": getattr(exc, "retryable", True),
+                    "details": getattr(exc, "details", {}),
+                    "logs": [],
+                }
             },
         ) from exc
 
