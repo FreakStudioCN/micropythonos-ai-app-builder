@@ -6,6 +6,7 @@ import json
 import os
 import re
 import struct
+import threading
 import time
 import zipfile
 import zlib
@@ -453,22 +454,19 @@ async def _call_deepseek_legacy(
         minimum=0.1,
         maximum=120.0,
     )
-    try:
-        timeout = httpx.Timeout(
-            request_timeout,
-            connect=min(connect_timeout, request_timeout),
+    timeout = httpx.Timeout(
+        request_timeout,
+        connect=min(connect_timeout, request_timeout),
+    )
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        response = await client.post(
+            f"{base_url}/chat/completions", headers=headers, json=payload
         )
-        async with httpx.AsyncClient(timeout=timeout) as client:
-            response = await client.post(
-                f"{base_url}/chat/completions", headers=headers, json=payload
-            )
-    except httpx.TimeoutException as exc:
-        raise GenerationError("AI upstream request timed out") from exc
-    except httpx.HTTPError as exc:
-        raise GenerationError("AI upstream connection failed") from exc
-
-    if response.status_code >= 400:
-        raise GenerationError(f"AI upstream returned HTTP {response.status_code}")
+    if response.is_error:
+        raise _ProviderHTTPStatusError(
+            response.status_code,
+            _safe_upstream_request_id(response),
+        )
 
     try:
         body = response.json()
@@ -1297,6 +1295,26 @@ AI_PROVIDER_IDS = (
 )
 
 
+class _ProviderHTTPStatusError(Exception):
+    """HTTP failure stripped of response body, URL, and headers."""
+
+    def __init__(self, status_code: int, request_id: str | None = None) -> None:
+        self.status_code = status_code
+        self.request_id = request_id
+        message = f"AI provider returned HTTP {status_code}"
+        if request_id:
+            message += f" (request_id={request_id})"
+        super().__init__(message)
+
+
+def _safe_upstream_request_id(response: httpx.Response) -> str | None:
+    for header_name in ("x-request-id", "request-id"):
+        value = response.headers.get(header_name, "").strip()
+        if value and re.fullmatch(r"[A-Za-z0-9._:-]{1,200}", value):
+            return value
+    return None
+
+
 @dataclass(frozen=True)
 class AIProviderConfig:
     id: str
@@ -1322,6 +1340,7 @@ _ACTIVE_PROVIDER_CONFIG: ContextVar[AIProviderConfig | None] = ContextVar(
     default=None,
 )
 _PROVIDER_CIRCUITS: dict[str, dict[str, float]] = {}
+_PROVIDER_CIRCUITS_LOCK = threading.RLock()
 
 
 def _first_env(*names: str, default: str = "") -> str:
@@ -1459,14 +1478,39 @@ def _provider_order() -> list[str]:
 
 
 def _circuit_open(provider_id: str) -> bool:
-    state = _PROVIDER_CIRCUITS.get(provider_id)
-    if not state:
-        return False
-    open_until = state.get("open_until", 0.0)
-    if open_until <= time.monotonic():
-        _PROVIDER_CIRCUITS.pop(provider_id, None)
-        return False
-    return True
+    with _PROVIDER_CIRCUITS_LOCK:
+        state = _PROVIDER_CIRCUITS.get(provider_id)
+        if not state:
+            return False
+        if state.get("half_open_in_flight", 0.0):
+            return True
+        open_until = state.get("open_until", 0.0)
+        return open_until > time.monotonic()
+
+
+def _claim_provider_slot(provider_id: str) -> bool:
+    """Atomically admit a normal call or the sole half-open probe."""
+
+    with _PROVIDER_CIRCUITS_LOCK:
+        state = _PROVIDER_CIRCUITS.get(provider_id)
+        if not state:
+            return True
+        open_until = state.get("open_until", 0.0)
+        if open_until > time.monotonic():
+            return False
+        if open_until <= 0:
+            return True
+        if state.get("half_open_in_flight", 0.0):
+            return False
+        state["half_open_in_flight"] = 1.0
+        return True
+
+
+def _release_provider_probe(provider_id: str) -> None:
+    with _PROVIDER_CIRCUITS_LOCK:
+        state = _PROVIDER_CIRCUITS.get(provider_id)
+        if state:
+            state["half_open_in_flight"] = 0.0
 
 
 def _record_provider_failure(provider_id: str) -> None:
@@ -1476,29 +1520,37 @@ def _record_provider_failure(provider_id: str) -> None:
         minimum=1,
         maximum=20,
     )
-    state = _PROVIDER_CIRCUITS.setdefault(
-        provider_id,
-        {"failures": 0.0, "open_until": 0.0},
+    cooldown = _bounded_float_env(
+        "AI_PROVIDER_CIRCUIT_COOLDOWN_SECONDS",
+        default=30.0,
+        minimum=0.1,
+        maximum=3600.0,
     )
-    state["failures"] += 1.0
-    if state["failures"] >= threshold:
-        cooldown = _bounded_float_env(
-            "AI_PROVIDER_CIRCUIT_COOLDOWN_SECONDS",
-            default=30.0,
-            minimum=0.1,
-            maximum=3600.0,
+    with _PROVIDER_CIRCUITS_LOCK:
+        state = _PROVIDER_CIRCUITS.setdefault(
+            provider_id,
+            {
+                "failures": 0.0,
+                "open_until": 0.0,
+                "half_open_in_flight": 0.0,
+            },
         )
-        state["open_until"] = time.monotonic() + cooldown
+        state["half_open_in_flight"] = 0.0
+        state["failures"] += 1.0
+        if state["failures"] >= threshold:
+            state["open_until"] = time.monotonic() + cooldown
 
 
 def _record_provider_success(provider_id: str) -> None:
-    _PROVIDER_CIRCUITS.pop(provider_id, None)
+    with _PROVIDER_CIRCUITS_LOCK:
+        _PROVIDER_CIRCUITS.pop(provider_id, None)
 
 
 def _reset_provider_circuits() -> None:
     """Reset process-local circuit state; intended for isolated tests."""
 
-    _PROVIDER_CIRCUITS.clear()
+    with _PROVIDER_CIRCUITS_LOCK:
+        _PROVIDER_CIRCUITS.clear()
 
 
 def _provider_candidates(requested_provider: str) -> tuple[list[AIProviderConfig], bool]:
@@ -1600,6 +1652,7 @@ async def _call_provider_with_retries(
 
         attempts_remaining = retries + 2 - attempt
         attempt_timeout = min(read_timeout, remaining / attempts_remaining)
+        upstream_request_id: str | None = None
         token = _ACTIVE_PROVIDER_CONFIG.set(config)
         try:
             generated, model, model_meta = await asyncio.wait_for(
@@ -1610,20 +1663,20 @@ async def _call_provider_with_retries(
                 ),
                 timeout=attempt_timeout,
             )
-        except asyncio.TimeoutError:
+        except (asyncio.TimeoutError, httpx.TimeoutException):
             outcome = "timeout"
             status_code = None
             upstream_code = "AI_UPSTREAM_TIMEOUT"
-        except GenerationError as exc:
-            message = str(exc)
-            status_code = _status_from_generation_error(message)
+        except _ProviderHTTPStatusError as exc:
+            status_code = exc.status_code
+            upstream_request_id = exc.request_id
             if status_code == 429:
                 outcome = "http_429"
                 upstream_code = "AI_UPSTREAM_UNAVAILABLE"
-            elif status_code is not None and status_code >= 500:
+            elif status_code >= 500:
                 outcome = f"http_{status_code}"
                 upstream_code = "AI_UPSTREAM_UNAVAILABLE"
-            elif status_code is not None:
+            else:
                 if status_code in {401, 403}:
                     error_code = "AI_UPSTREAM_AUTH_FAILED"
                     error_message = (
@@ -1637,14 +1690,15 @@ async def _call_provider_with_retries(
                 else:
                     error_code = "AI_UPSTREAM_REJECTED"
                     error_message = f"AI provider {config.id} rejected the request"
-                attempts.append(
-                    {
-                        "provider": config.id,
-                        "attempt": attempt,
-                        "outcome": f"http_{status_code}",
-                        "status_code": status_code,
-                    }
-                )
+                attempt_record: dict[str, Any] = {
+                    "provider": config.id,
+                    "attempt": attempt,
+                    "outcome": f"http_{status_code}",
+                    "status_code": status_code,
+                }
+                if upstream_request_id:
+                    attempt_record["request_id"] = upstream_request_id
+                attempts.append(attempt_record)
                 raise UpstreamGenerationError(
                     error_code,
                     error_message,
@@ -1657,16 +1711,10 @@ async def _call_provider_with_retries(
                         "provider_attempts": attempts,
                     },
                 ) from exc
-            elif "没有返回" in message or "timeout" in message.lower():
-                outcome = "timeout"
-                upstream_code = "AI_UPSTREAM_TIMEOUT"
-            elif "无法连接" in message or "connect" in message.lower():
-                outcome = "connection_error"
-                upstream_code = "AI_UPSTREAM_UNAVAILABLE"
-            else:
-                # Parse/content/validation errors are deterministic and must not
-                # silently switch providers.
-                raise
+        except httpx.HTTPError:
+            outcome = "connection_error"
+            status_code = None
+            upstream_code = "AI_UPSTREAM_UNAVAILABLE"
         else:
             attempts.append(
                 {
@@ -1679,13 +1727,15 @@ async def _call_provider_with_retries(
         finally:
             _ACTIVE_PROVIDER_CONFIG.reset(token)
 
-        attempt_record: dict[str, Any] = {
+        attempt_record = {
             "provider": config.id,
             "attempt": attempt,
             "outcome": outcome,
         }
         if status_code is not None:
             attempt_record["status_code"] = status_code
+        if upstream_request_id:
+            attempt_record["request_id"] = upstream_request_id
         attempts.append(attempt_record)
         if attempt > retries:
             message = (
@@ -1744,6 +1794,20 @@ async def _call_deepseek(
             break
         providers_remaining = len(candidates) - index
         provider_deadline = time.monotonic() + (remaining / providers_remaining)
+        if not _claim_provider_slot(config.id):
+            if explicit:
+                raise UpstreamGenerationError(
+                    "AI_UPSTREAM_UNAVAILABLE",
+                    f"AI provider {config.id} is temporarily unavailable",
+                    retryable=True,
+                    failover_allowed=False,
+                    details={
+                        "provider": config.id,
+                        "attempted_providers": attempted_providers,
+                        "provider_attempts": provider_attempts,
+                    },
+                )
+            continue
         attempted_providers.append(config.id)
         try:
             generated, model, model_meta, attempts = await _call_provider_with_retries(
@@ -1759,6 +1823,8 @@ async def _call_deepseek(
                 provider_attempts.extend(safe_attempts)
             if exc.retryable:
                 _record_provider_failure(config.id)
+            else:
+                _record_provider_success(config.id)
             if explicit or not exc.failover_allowed:
                 exc.details = {
                     **exc.details,
@@ -1768,6 +1834,9 @@ async def _call_deepseek(
                 }
                 raise
             continue
+        except BaseException:
+            _release_provider_probe(config.id)
+            raise
 
         _record_provider_success(config.id)
         provider_attempts.extend(attempts)

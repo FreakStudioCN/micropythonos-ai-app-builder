@@ -115,7 +115,7 @@ class DeepSeekResilienceTests(unittest.IsolatedAsyncioTestCase):
                     GenerateRequest(prompt="Build a calculator"),
                     timeout_seconds=10,
                 )
-        self.assertEqual(raised.exception.code, "AI_UPSTREAM_UNAVAILABLE")
+        self.assertEqual(raised.exception.code, "AI_UPSTREAM_REJECTED")
         self.assertFalse(raised.exception.retryable)
         self.assertEqual(client.post.await_count, 1)
 
@@ -165,6 +165,7 @@ class RecoverableSessionTests(unittest.IsolatedAsyncioTestCase):
                 "AI_UPSTREAM_TIMEOUT",
                 "upstream timed out",
                 retryable=True,
+                failover_allowed=False,
                 details={"attempts": 3},
             )
 

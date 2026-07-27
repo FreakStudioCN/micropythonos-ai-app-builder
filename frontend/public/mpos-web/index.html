@@ -509,10 +509,16 @@
       var terminalText = "";
       var waiters = [];
       var utf8 = new TextEncoder();
+      var parentOrigin = "";
+      try {
+        parentOrigin = document.referrer ? new URL(document.referrer).origin : "";
+      } catch (_) {
+        parentOrigin = "";
+      }
 
       function notify(type, extra) {
-        if (window.parent === window) return;
-        window.parent.postMessage(Object.assign({ source: "mpos-web", type: type }, extra || {}), "*");
+        if (window.parent === window || !parentOrigin) return;
+        window.parent.postMessage(Object.assign({ source: "mpos-web", type: type }, extra || {}), parentOrigin);
       }
 
       function flushWaiters() {
@@ -663,7 +669,7 @@
       }
 
       window.addEventListener("message", function (event) {
-        if (event.source !== window.parent) return;
+        if (event.source !== window.parent || !parentOrigin || event.origin !== parentOrigin) return;
         var message = event.data || {};
         if (message.source !== "mpos-builder") return;
         if (message.type === "PING") {
