@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.blockless.dev/mpos-ai-app/v1/permission-request.schema.json",
+  "title": "MicroPythonOS AI App permission request",
+  "type": "object",
+  "required": [
+    "permission_id",
+    "session_id",
+    "type",
+    "title",
+    "description",
+    "risk",
+    "expires_at"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/protocolVersion"
+    },
+    "permission_id": {
+      "type": "string",
+      "pattern": "^perm_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"
+    },
+    "session_id": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/sessionId"
+    },
+    "stage": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/canonicalStage"
+    },
+    "type": {
+      "enum": [
+        "requirements_confirm",
+        "file_create",
+        "file_write",
+        "file_overwrite",
+        "file_operation",
+        "script_run",
+        "dependency_install",
+        "package_build",
+        "serial_scan",
+        "device_connect",
+        "device_write",
+        "device_command",
+        "firmware_flash",
+        "web_build",
+        "web_serve",
+        "publish_prepare",
+        "remote_upload",
+        "open_external_url",
+        "session_delete"
+      ]
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 2000
+    },
+    "risk": {
+      "enum": [
+        "low",
+        "medium",
+        "high",
+        "critical"
+      ]
+    },
+    "command_preview": {
+      "type": "string",
+      "maxLength": 2000
+    },
+    "resource": {
+      "type": "object",
+      "required": [
+        "kind",
+        "identifier"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "file",
+            "directory",
+            "script",
+            "dependency",
+            "package",
+            "serial_port",
+            "device",
+            "firmware",
+            "url",
+            "session"
+          ]
+        },
+        "identifier": {
+          "type": "string",
+          "minLength": 1
+        },
+        "display_name": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "created_at": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/timestamp"
+    },
+    "expires_at": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/timestamp"
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": true
+    }
+  },
+  "additionalProperties": false
+}

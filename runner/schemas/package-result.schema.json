@@ -1,0 +1,103 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.blockless.dev/mpos-ai-app/v1/package-result.schema.json",
+  "title": "mpos-package-app-web package result",
+  "allOf": [
+    {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/resultBase"
+    },
+    {
+      "type": "object",
+      "required": [
+        "app",
+        "package",
+        "checks"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "mpos-package-app-web-v1"
+        },
+        "phase": {
+          "const": "mpos-package-app-web"
+        },
+        "stage": {
+          "const": "package"
+        },
+        "app": {
+          "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/app"
+        },
+        "package": {
+          "type": "object",
+          "required": [
+            "revision",
+            "mpk_path",
+            "filename_policy"
+          ],
+          "properties": {
+            "revision": {
+              "oneOf": [
+                {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                {
+                  "type": "string",
+                  "pattern": "^r[1-9][0-9]*$"
+                }
+              ]
+            },
+            "mpk_path": {
+              "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/relativePath"
+            },
+            "filename_policy": {
+              "type": "string",
+              "minLength": 1
+            },
+            "sha256": {
+              "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/sha256"
+            },
+            "size_bytes": {
+              "type": "integer",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/gate"
+          }
+        },
+        "handoff": {
+          "type": "object",
+          "required": [
+            "next_phase"
+          ],
+          "properties": {
+            "next_phase": {
+              "enum": [
+                "mpos-deploy-app-web",
+                "mpos-gen-app-web",
+                null
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "required_artifacts": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "unevaluatedProperties": false
+}

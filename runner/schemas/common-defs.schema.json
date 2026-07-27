@@ -1,0 +1,563 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json",
+  "title": "MicroPythonOS AI App protocol common definitions",
+  "$defs": {
+    "protocolVersion": {
+      "const": "mpos-ai-app/v1"
+    },
+    "sessionId": {
+      "type": "string",
+      "pattern": "^sess_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"
+    },
+    "checkpointId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "canonicalStage": {
+      "enum": [
+        "analyze",
+        "prepare_deps",
+        "generate",
+        "test",
+        "package",
+        "deploy",
+        "publish_check"
+      ]
+    },
+    "errorStage": {
+      "enum": [
+        "analyze",
+        "prepare_deps",
+        "generate",
+        "test",
+        "package",
+        "deploy",
+        "publish_check",
+        "analysis",
+        "generation",
+        "publish"
+      ]
+    },
+    "skillPhase": {
+      "enum": [
+        "mpos-analyze-app-web",
+        "mpos-prepare-deps-web",
+        "mpos-gen-app-web",
+        "mpos-test-app-web",
+        "mpos-package-app-web",
+        "mpos-deploy-app-web",
+        "mpos-publish-app-web"
+      ]
+    },
+    "envelopeStatus": {
+      "enum": [
+        "created",
+        "running",
+        "blocked",
+        "waiting_preview",
+        "waiting_device",
+        "partial",
+        "completed",
+        "failed",
+        "cancelled",
+        "timeout"
+      ]
+    },
+    "resultOutcome": {
+      "enum": [
+        "success",
+        "partial",
+        "failed",
+        "blocked",
+        "cancelled",
+        "timeout",
+        "skipped"
+      ]
+    },
+    "phaseOutcome": {
+      "enum": [
+        "success",
+        "completed",
+        "partial",
+        "failed",
+        "blocked",
+        "cancelled",
+        "timeout",
+        "skipped"
+      ]
+    },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)\\.\\.(?:/|$)).+"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[a-f0-9]{64}$"
+    },
+    "warning": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "required": [
+            "code",
+            "message"
+          ],
+          "properties": {
+            "code": {
+              "type": "string",
+              "pattern": "^[A-Z][A-Z0-9_]{2,127}$"
+            },
+            "message": {
+              "type": "string",
+              "minLength": 1
+            },
+            "stage": {
+              "$ref": "#/$defs/errorStage"
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": true
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "structuredError": {
+      "type": "object",
+      "required": [
+        "code",
+        "message",
+        "stage",
+        "retryable",
+        "owner"
+      ],
+      "properties": {
+        "code": {
+          "type": "string",
+          "pattern": "^[A-Z][A-Z0-9_]{2,127}$"
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1
+        },
+        "stage": {
+          "$ref": "#/$defs/errorStage"
+        },
+        "retryable": {
+          "type": "boolean"
+        },
+        "owner": {
+          "enum": [
+            "app",
+            "skill",
+            "backend",
+            "frontend",
+            "toolchain",
+            "micropythonos",
+            "device",
+            "external",
+            "user"
+          ]
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "logs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "artifact_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "permission_id": {
+          "type": "string",
+          "pattern": "^perm_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "artifactKind": {
+      "enum": [
+        "result",
+        "source",
+        "manifest",
+        "image",
+        "package",
+        "preview",
+        "log",
+        "bundle",
+        "metadata",
+        "report"
+      ]
+    },
+    "artifactRole": {
+      "enum": [
+        "analysis_result",
+        "dependency_handoff",
+        "generation_result",
+        "app_test_result",
+        "package_result",
+        "app_index_entry",
+        "deploy_result",
+        "publish_result",
+        "plan_state",
+        "activity_log",
+        "session_state",
+        "app_manifest",
+        "app_source",
+        "app_icon",
+        "desktop_screenshot",
+        "web_preview",
+        "web_screenshot",
+        "store_screenshot",
+        "screenshot_manifest",
+        "mpk",
+        "upystore_upload_manifest",
+        "manual_upload_guidance",
+        "publish_bundle",
+        "session_bundle",
+        "session_summary"
+      ]
+    },
+    "artifact": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "path",
+        "mime",
+        "role",
+        "sha256",
+        "size_bytes",
+        "stage"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^art_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"
+        },
+        "kind": {
+          "$ref": "#/$defs/artifactKind"
+        },
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "mime": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9.+-]+/[A-Za-z0-9.+-]+$"
+        },
+        "role": {
+          "$ref": "#/$defs/artifactRole"
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "stage": {
+          "$ref": "#/$defs/canonicalStage"
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "created_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "app": {
+      "type": "object",
+      "properties": {
+        "fullname": {
+          "type": "string",
+          "pattern": "^[a-z][a-z0-9_]*(?:\\.[a-z][a-z0-9_]*)+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "publisher": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$"
+        },
+        "description": {
+          "type": "string"
+        },
+        "short_description": {
+          "type": "string"
+        },
+        "long_description": {
+          "type": "string"
+        },
+        "hardware_tags": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "handoff": {
+      "type": "object",
+      "required": [
+        "next_phase"
+      ],
+      "properties": {
+        "next_phase": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/skillPhase"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "reason": {
+          "type": "string"
+        },
+        "required_artifacts": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "resultBase": {
+      "$comment": "Concrete result schemas use unevaluatedProperties=false after composing this base.",
+      "type": "object",
+      "required": [
+        "schema_version",
+        "phase",
+        "result",
+        "warnings",
+        "structured_errors",
+        "handoff"
+      ],
+      "properties": {
+        "protocol_version": {
+          "$ref": "#/$defs/protocolVersion"
+        },
+        "session_id": {
+          "$ref": "#/$defs/sessionId"
+        },
+        "checkpoint_id": {
+          "$ref": "#/$defs/checkpointId"
+        },
+        "schema_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "phase": {
+          "$ref": "#/$defs/skillPhase"
+        },
+        "stage": {
+          "$ref": "#/$defs/canonicalStage"
+        },
+        "result": {
+          "$ref": "#/$defs/resultOutcome"
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/warning"
+          }
+        },
+        "structured_errors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/structuredError"
+          }
+        },
+        "handoff": {
+          "$ref": "#/$defs/handoff"
+        },
+        "artifacts": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/artifact"
+          }
+        },
+        "started_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "completed_at": {
+          "$ref": "#/$defs/timestamp"
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      }
+    },
+    "gate": {
+      "oneOf": [
+        {
+          "type": "string",
+          "minLength": 1
+        },
+        {
+          "type": "object",
+          "required": [
+            "name",
+            "status"
+          ],
+          "properties": {
+            "name": {
+              "type": "string",
+              "minLength": 1
+            },
+            "status": {
+              "enum": [
+                "passed",
+                "failed",
+                "warning",
+                "skipped",
+                "blocked"
+              ]
+            },
+            "details": {
+              "type": "object",
+              "additionalProperties": true
+            },
+            "logs": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "fileRecord": {
+      "type": "object",
+      "required": [
+        "path",
+        "operation"
+      ],
+      "properties": {
+        "path": {
+          "$ref": "#/$defs/relativePath"
+        },
+        "operation": {
+          "enum": [
+            "create",
+            "update",
+            "delete",
+            "unchanged"
+          ]
+        },
+        "sha256": {
+          "$ref": "#/$defs/sha256"
+        },
+        "size_bytes": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "additionalProperties": false
+    },
+    "testTargetResult": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "warning",
+            "skipped",
+            "blocked"
+          ]
+        },
+        "duration_ms": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "logs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "details": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "permissionDecision": {
+      "type": "object",
+      "required": [
+        "permission_id",
+        "decision"
+      ],
+      "properties": {
+        "permission_id": {
+          "type": "string",
+          "pattern": "^perm_[A-Za-z0-9][A-Za-z0-9_-]{2,127}$"
+        },
+        "decision": {
+          "enum": [
+            "granted",
+            "denied",
+            "expired",
+            "cancelled"
+          ]
+        },
+        "decided_at": {
+          "$ref": "#/$defs/timestamp"
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

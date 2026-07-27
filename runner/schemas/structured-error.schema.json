@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.blockless.dev/mpos-ai-app/v1/structured-error.schema.json",
+  "title": "MicroPythonOS AI App structured error envelope",
+  "type": "object",
+  "required": [
+    "error"
+  ],
+  "properties": {
+    "protocol_version": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/protocolVersion"
+    },
+    "session_id": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/sessionId"
+    },
+    "checkpoint_id": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/checkpointId"
+    },
+    "idempotency_key": {
+      "type": "string",
+      "minLength": 8,
+      "maxLength": 128
+    },
+    "error": {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/structuredError"
+    }
+  },
+  "additionalProperties": false
+}

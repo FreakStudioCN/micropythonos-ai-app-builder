@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.blockless.dev/mpos-ai-app/v1/analysis-result.schema.json",
+  "title": "mpos-analyze-app-web analysis result",
+  "allOf": [
+    {
+      "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/resultBase"
+    },
+    {
+      "type": "object",
+      "required": [
+        "app",
+        "manifest_draft",
+        "requirements",
+        "api_plan",
+        "dependency_plan",
+        "test_plan",
+        "deploy_plan"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "mpos-analyze-app-web-v1"
+        },
+        "phase": {
+          "const": "mpos-analyze-app-web"
+        },
+        "stage": {
+          "const": "analyze"
+        },
+        "app": {
+          "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/app"
+        },
+        "manifest_draft": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "requirements": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "api_plan": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "dependency_plan": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "test_plan": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "deploy_plan": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "handoff": {
+          "type": "object",
+          "required": [
+            "next_phase"
+          ],
+          "properties": {
+            "next_phase": {
+              "enum": [
+                "mpos-prepare-deps-web",
+                "mpos-gen-app-web",
+                null
+              ]
+            },
+            "reason": {
+              "type": "string"
+            },
+            "required_artifacts": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "uniqueItems": true
+            }
+          },
+          "additionalProperties": false
+        }
+      }
+    }
+  ],
+  "unevaluatedProperties": false
+}
