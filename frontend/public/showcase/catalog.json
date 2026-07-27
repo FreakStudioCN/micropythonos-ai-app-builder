@@ -9,7 +9,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo001.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo001_r1.mpk",
-    "featured": true
+    "featured": true,
+    "sha256": "fdeafd379e824937302402fdb17f9ee4a8df6060f987d162fb23a9f2f3342f6b"
   },
   {
     "fullname": "com.blockless.demo002",
@@ -21,7 +22,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo002.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo002_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "52e5260697089c54cb1e9457e7f62382ed31e0b9fddfc0ffc4911223c1fa6e1a"
   },
   {
     "fullname": "com.blockless.demo003",
@@ -33,7 +35,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo003.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo003_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "a8b758b61a7f14e0fb8f1c4e9780321c3742e64436d64b93e6f3bca4ee388229"
   },
   {
     "fullname": "com.blockless.demo004",
@@ -45,7 +48,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo004.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo004_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "8af00ebe92abd4a0c3281a4a7cbd31510c1afc5e552ecc247539d596a03008a1"
   },
   {
     "fullname": "com.blockless.demo005",
@@ -57,7 +61,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo005.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo005_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "ac7776590361686357032726d38e3c83263a5d487a81658bdae4f618ff61744a"
   },
   {
     "fullname": "com.blockless.demo006",
@@ -69,7 +74,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo006.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo006_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "667170f6bc50a6da04a2551a40382b46f7f7d777da2cfba890056c4fb682591d"
   },
   {
     "fullname": "com.blockless.demo007",
@@ -81,7 +87,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo007.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo007_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "ce307c69757fd06c5bd21687a9bb711689a0617389eab80d84ed1604a164a9cf"
   },
   {
     "fullname": "com.blockless.demo008",
@@ -93,7 +100,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo008.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo008_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "070aa84e6d784f032d5a0cd3cf896535c9f729748df1b3c83b9732e2ec5b733d"
   },
   {
     "fullname": "com.blockless.demo009",
@@ -105,7 +113,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo009.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo009_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "570e78ae3c5859e5afc4340e6ec926a3e3daccc56346dfc812c0aeb772852347"
   },
   {
     "fullname": "com.blockless.demo010",
@@ -117,7 +126,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo010.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo010_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "2f56cfb61ca1be7f4c39174b7357a1f0b822f3430012c0cd50ec17da50373cd0"
   },
   {
     "fullname": "com.blockless.demo011",
@@ -129,7 +139,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo011.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo011_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "1e80d619a80cbc016f7d808dd22d5e695a0e7b9bdcfabf484eb78a3207a1c3e3"
   },
   {
     "fullname": "com.blockless.demo012",
@@ -141,7 +152,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo012.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo012_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "2037980c008684e9f5815e625255a72342c5f4b70d9c5e95b8809fe08f79f42f"
   },
   {
     "fullname": "com.blockless.demo013",
@@ -153,7 +165,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo013.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo013_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "f9b4a5e2f81d0b9b42f7a4feb2b3cd9d46a3a41baf5cc66a32623854307c5a85"
   },
   {
     "fullname": "com.blockless.demo014",
@@ -165,7 +178,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo014.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo014_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "47c17c97dd10bdd31a827164d8a5fa78aea4a529268e6e425a855f8c4a7d0099"
   },
   {
     "fullname": "com.blockless.demo015",
@@ -177,7 +191,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo015.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo015_r1.mpk",
-    "featured": true
+    "featured": true,
+    "sha256": "fe7491c364d8b5d96e41e80a079f98f18e2a31ecb92b31f589b4205c1b393d35"
   },
   {
     "fullname": "com.blockless.demo016",
@@ -189,7 +204,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo016.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo016_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "05b46c0561b09278fa26c85e2b8f000b209e33d5845b49112b322ec94bdb83ae"
   },
   {
     "fullname": "com.blockless.demo017",
@@ -201,7 +217,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo017.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo017_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "47c44e4b32518b7837ea00d4b9a51b08c6e320fd729278f3934c04bf885ea450"
   },
   {
     "fullname": "com.blockless.demo018",
@@ -213,7 +230,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo018.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo018_r1.mpk",
-    "featured": true
+    "featured": true,
+    "sha256": "2d0394cfcdd7a9f7721000291934b45f6b317e4544adb3f354f52ae988eafa56"
   },
   {
     "fullname": "com.blockless.demo019",
@@ -225,7 +243,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo019.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo019_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "de2ba7f67885e2af130f3b542366a019b9de0bb2d997fbcbc550fb807c817036"
   },
   {
     "fullname": "com.blockless.demo020",
@@ -237,7 +256,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo020.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo020_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "27be93ea864850bc1f770160a28ccd1d35c3a93ce1267a40839827d7bf99e067"
   },
   {
     "fullname": "com.blockless.demo021",
@@ -249,7 +269,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo021.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo021_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "84bbed4bcda73f470b33e3ba5251d5b9dc493b96593ea15450e6b53a897eb586"
   },
   {
     "fullname": "com.blockless.demo022",
@@ -261,7 +282,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo022.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo022_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "9ee42acc703eafdcdc7bcc186b0d03cf8f6f018c0d2394f65b9b4da38201a339"
   },
   {
     "fullname": "com.blockless.demo023",
@@ -273,7 +295,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo023.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo023_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "a6130bed9ef38ead2912ec948bbaa8262548ed398bcf20f92d53a9dec7e372ea"
   },
   {
     "fullname": "com.blockless.demo024",
@@ -285,7 +308,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo024.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo024_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "152394c031df8ff9b79d572130fb419f345af2dfa3d7d7b7debd435612e20469"
   },
   {
     "fullname": "com.blockless.demo025",
@@ -297,7 +321,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo025.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo025_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "3509fce0c187182f52d6dbb2bce466dd5db63e6dd3de6ca676c2e70c5d5278bc"
   },
   {
     "fullname": "com.blockless.demo026",
@@ -309,7 +334,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo026.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo026_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "08c582b50f85d4f4b1400f856b098b911aa42d87ec35e3e55a9c10e947e1d980"
   },
   {
     "fullname": "com.blockless.demo027",
@@ -321,7 +347,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo027.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo027_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "efc354513e79b8411bc095e7bc0c6c562841bc1f7a689fd6709551b96b58017b"
   },
   {
     "fullname": "com.blockless.demo028",
@@ -333,7 +360,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo028.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo028_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "cdad3ea3b1f644cab82e883e63d4938d8ccef02faf1422c48482220f145f2bb9"
   },
   {
     "fullname": "com.blockless.demo029",
@@ -345,7 +373,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo029.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo029_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "7d09fb7dd848b59134a00b665f8cf4aa2b923cea5a00361ff032f717c124eac4"
   },
   {
     "fullname": "com.blockless.demo030",
@@ -357,7 +386,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo030.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo030_r1.mpk",
-    "featured": true
+    "featured": true,
+    "sha256": "ae003b417caa7c474dd9974a059b3b5ce8fd65789dd0368d7effb2a1a9c1f79f"
   },
   {
     "fullname": "com.blockless.demo031",
@@ -369,7 +399,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo031.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo031_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "1a056bb72faebdfbb6c1892155efa9626ea393f2c07110a189d9a52412334995"
   },
   {
     "fullname": "com.blockless.demo032",
@@ -381,7 +412,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo032.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo032_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "2ec82ad3bc38de7463727670586fbaa57065cbf443aedebc39520d732cb2afcb"
   },
   {
     "fullname": "com.blockless.demo033",
@@ -393,7 +425,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo033.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo033_r1.mpk",
-    "featured": true
+    "featured": true,
+    "sha256": "948610eba8bda0f99cf7175b7c232ce82b1b689c981b4b4c8544f1e1a0ceaf14"
   },
   {
     "fullname": "com.blockless.demo034",
@@ -405,7 +438,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo034.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo034_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "54164a4f503f0f6f2688db8359a837d3aaea9d7042a932ad361aed28ad082603"
   },
   {
     "fullname": "com.blockless.demo035",
@@ -417,7 +451,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo035.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo035_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "765dc7fb4e668b8f244c3ba49149347acfe2e81a356adb9ce016185d16e327fc"
   },
   {
     "fullname": "com.blockless.demo036",
@@ -429,7 +464,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo036.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo036_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "005e5f046ecdefbd570ef064405be899551c339f7aca0e13809521c6b5051b6e"
   },
   {
     "fullname": "com.blockless.demo037",
@@ -441,7 +477,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo037.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo037_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "8394bb5decebb4740b62fa08248c644ae5220f8a2e4ec8709e746e45213f9ef1"
   },
   {
     "fullname": "com.blockless.demo038",
@@ -453,7 +490,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo038.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo038_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "8daebc17e7719b9df48157152fdc965d4532cfb7e684b51b388f2f798a3c6a86"
   },
   {
     "fullname": "com.blockless.demo039",
@@ -465,7 +503,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo039.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo039_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "2e0d8ff84790d35960dc10895f75af32c4b4322be31994fe948fd68840cc49da"
   },
   {
     "fullname": "com.blockless.demo040",
@@ -477,7 +516,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo040.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo040_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "1e700862134e04f752bfb697389ce87edbf12d5d4b3f36656550863a21d13a15"
   },
   {
     "fullname": "com.blockless.demo041",
@@ -489,7 +529,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo041.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo041_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "2146d52343b6fd4679aa919c3156f7a74dff66491a3f330fb31fef08c0cafd91"
   },
   {
     "fullname": "com.blockless.demo042",
@@ -501,7 +542,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo042.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo042_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "3d14ee430b8ad50b625fb50f6f0a7ead61ed747ec8e89f8d69df8c6e8e530461"
   },
   {
     "fullname": "com.blockless.demo043",
@@ -513,7 +555,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo043.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo043_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "c55702c758d1f29aaefdce9589d927de201eedfa4c8ac09ab4e6cb400fcaec46"
   },
   {
     "fullname": "com.blockless.demo044",
@@ -525,7 +568,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo044.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo044_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "011176e1f61b21753aa0aac7ea8ff735a608fdc9738aabc2fb9a480cda858393"
   },
   {
     "fullname": "com.blockless.demo045",
@@ -537,7 +581,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo045.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo045_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "71d6e38eb210bf378a3e74c97e9874eac418652b5e8d8a44e735a507a1c549f6"
   },
   {
     "fullname": "com.blockless.demo046",
@@ -549,7 +594,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo046.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo046_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "d00d4b72fb7aad0f2d91070412f3ca023434506f81d8ec59360f157a8d10c80b"
   },
   {
     "fullname": "com.blockless.demo047",
@@ -561,7 +607,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo047.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo047_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "0f5a477f5f0e4164befc23a2b40384998a7e2bad7f886e8ac931c9c5e32637cd"
   },
   {
     "fullname": "com.blockless.demo048",
@@ -573,7 +620,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo048.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo048_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "2e6a7d6343aecf10fbbf0137d9b1486f77856b2330187602dd05b18f3d22e922"
   },
   {
     "fullname": "com.blockless.demo049",
@@ -585,7 +633,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo049.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo049_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "9d3fcff20764b2f773461f48c2bed788c6cbfc6a8444a8d4928d331a155029c8"
   },
   {
     "fullname": "com.blockless.demo050",
@@ -597,7 +646,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo050.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo050_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "08d89a77d1ca62f144599cf4544410327cc3eba127c1347c5c5c652afd6339cb"
   },
   {
     "fullname": "com.blockless.demo051",
@@ -609,7 +659,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo051.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo051_r1.mpk",
-    "featured": true
+    "featured": true,
+    "sha256": "5502d041aff9928e6f0e4a487b96199de8a337925b5aa19c31a24e17dbe8acc4"
   },
   {
     "fullname": "com.blockless.demo052",
@@ -621,7 +672,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo052.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo052_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "8e60c1d7aea533deddd4a96c5f91ac845d7a435f5e05f315d71583ed5b67caf5"
   },
   {
     "fullname": "com.blockless.demo053",
@@ -633,7 +685,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo053.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo053_r1.mpk",
-    "featured": true
+    "featured": true,
+    "sha256": "305c0321bdba63be2e6b8a45064a1c8c3ce9263308e1b3ad4203803b71c3116e"
   },
   {
     "fullname": "com.blockless.demo054",
@@ -645,7 +698,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo054.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo054_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "279d38922dd0bcbce7b525f31c14af4fc0ff94d8f8b3d3eadea2da19226f2735"
   },
   {
     "fullname": "com.blockless.demo055",
@@ -657,7 +711,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo055.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo055_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "cecefac168ec6e36aa148e612d90fad10e4dc4039af16ea5cab803717a5ddb65"
   },
   {
     "fullname": "com.blockless.demo056",
@@ -669,7 +724,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo056.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo056_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "11242bf51658b6017026a0530a803a1ac4f8096b2dce8ad6e97ab88b18b03f6d"
   },
   {
     "fullname": "com.blockless.demo057",
@@ -681,7 +737,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo057.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo057_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "d85226c48246230eb055782044f4c23c767f1792535738de57b6018ea1fc2b94"
   },
   {
     "fullname": "com.blockless.demo058",
@@ -693,7 +750,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo058.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo058_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "fa8b9680c2092da06846b3224082ce118b80dace6a6e761a38b6f23087934687"
   },
   {
     "fullname": "com.blockless.demo059",
@@ -705,7 +763,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo059.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo059_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "3d7921508ed5d01d592d1703ee7c33b2c5690215962e563a30f5ebd35e3c2187"
   },
   {
     "fullname": "com.blockless.demo060",
@@ -717,7 +776,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo060.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo060_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "caf3591b177c9c8d239b4b87dc72efd24b626aae87d77a901cd52949094bed54"
   },
   {
     "fullname": "com.blockless.demo061",
@@ -729,7 +789,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo061.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo061_r1.mpk",
-    "featured": true
+    "featured": true,
+    "sha256": "c285f3622f5be246dc6b75a49ac62ffcee9e5caec62532b4643c8764576d258a"
   },
   {
     "fullname": "com.blockless.demo062",
@@ -741,7 +802,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo062.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo062_r1.mpk",
-    "featured": true
+    "featured": true,
+    "sha256": "ebfa365c60150ab9687acde4bbf150aff731cefed0656654502ca3f8c56ccee3"
   },
   {
     "fullname": "com.blockless.demo063",
@@ -753,7 +815,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo063.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo063_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "1e36984c4108d3208e2ebcfb406faf9e6c1f6b71a3e0806147a063efe76f8b89"
   },
   {
     "fullname": "com.blockless.demo064",
@@ -765,7 +828,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo064.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo064_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "3099b067d118b53c866969c8520ca67f9f1497b2548131c26287731bd81448e0"
   },
   {
     "fullname": "com.blockless.demo065",
@@ -777,7 +841,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo065.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo065_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "c4ac9c5045a6ad7be0216c141deccfaf9fb84dcadc1facb1100d4dbd1d01b925"
   },
   {
     "fullname": "com.blockless.demo066",
@@ -789,7 +854,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo066.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo066_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "47aa2a22d24229dd25c3c8da0931342f4233dc4a9a2ed7dcd3e0aae93ddcdd3a"
   },
   {
     "fullname": "com.blockless.demo067",
@@ -801,7 +867,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo067.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo067_r1.mpk",
-    "featured": true
+    "featured": true,
+    "sha256": "372bf07576e546603976248fd81e439ccb7364118fb94a1dd315bd64c21d3043"
   },
   {
     "fullname": "com.blockless.demo068",
@@ -813,7 +880,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo068.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo068_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "257147e7f5ecb48822600ba90769e1cb28d5771d36a0a4299be50e3c42c6141e"
   },
   {
     "fullname": "com.blockless.demo069",
@@ -825,7 +893,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo069.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo069_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "9c1b6a50a8e27b024b4a508c1f7249b8b03e10f363eaf978fc694975fe6b8f35"
   },
   {
     "fullname": "com.blockless.demo070",
@@ -837,7 +906,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo070.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo070_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "e384c93e97b757a31ca308450c97e3999368a5c9142f0826dd0bf55439fba69f"
   },
   {
     "fullname": "com.blockless.demo071",
@@ -849,7 +919,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo071.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo071_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "78f00e79a3b0cd4c38c8b9717d4263bad37f7847f3f00fb4ca6cb009bc8a00c6"
   },
   {
     "fullname": "com.blockless.demo072",
@@ -861,7 +932,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo072.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo072_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "1c5baeaa292076d8edf739de4768b42fa4824ad710005b1f2d407e26f0a2ba79"
   },
   {
     "fullname": "com.blockless.demo073",
@@ -873,7 +945,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo073.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo073_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "b0543038402a6c4c064b8a89f82c6915c2e9daec3e4f6799f2ac97e066f5c828"
   },
   {
     "fullname": "com.blockless.demo074",
@@ -885,7 +958,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo074.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo074_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "25d74e106a738aa9c2f2f8b473b04edca46871a004a57d54ca918a7a0477f8f2"
   },
   {
     "fullname": "com.blockless.demo075",
@@ -897,7 +971,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo075.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo075_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "2f0b448b07152328f25361cfb2b79fc53ebd8194c30907ae0b0bcb4dee95a8cb"
   },
   {
     "fullname": "com.blockless.demo076",
@@ -909,7 +984,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo076.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo076_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "8353c1244ce2e8e0a6f57542726247276bd3c83e9fe49cf73dddc5e7a76256d8"
   },
   {
     "fullname": "com.blockless.demo077",
@@ -921,7 +997,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo077.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo077_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "f86d5b497a11f6f937a8da072a90f7feff1bc097fc3cdd488f117d9f8d2483fc"
   },
   {
     "fullname": "com.blockless.demo078",
@@ -933,7 +1010,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo078.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo078_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "fe95d5b11dd341b85a4c86822ddfabecaa1289ccf0e5a1521a571c87383aa66c"
   },
   {
     "fullname": "com.blockless.demo079",
@@ -945,7 +1023,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo079.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo079_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "3721c8a651470a3f06a42621344b2180e9e7d807d7c13c92556ff51c2e7882f6"
   },
   {
     "fullname": "com.blockless.demo080",
@@ -957,7 +1036,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo080.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo080_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "bf4dfdaf33315e0706d7e9d15247a306fdf1c067ba998db77b8b32c9dfaec1dd"
   },
   {
     "fullname": "com.blockless.demo081",
@@ -969,7 +1049,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo081.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo081_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "a9b6907f67809c5fd89f8c09c1663e9c9b4bfd5078bd2dea9215fcb10c76f1d9"
   },
   {
     "fullname": "com.blockless.demo082",
@@ -981,7 +1062,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo082.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo082_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "47650b599bc0c561bfee628a74a712b536e94bd1252bd803887453925bdbe4d4"
   },
   {
     "fullname": "com.blockless.demo083",
@@ -993,7 +1075,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo083.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo083_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "acbf7f894e86f4495389837426d939e67b975dea2ff45482e0f46c34a6dd5848"
   },
   {
     "fullname": "com.blockless.demo084",
@@ -1005,7 +1088,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo084.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo084_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "31417b1c75a1932819ffeb3af7e81df75ea5f91cbb43db7d33fc2dceec3b0bd0"
   },
   {
     "fullname": "com.blockless.demo085",
@@ -1017,7 +1101,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo085.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo085_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "f5bd7505071f8510fb8a8cb1aaac7f7fa4a717e527b7d7e9d027d06c20eadd08"
   },
   {
     "fullname": "com.blockless.demo086",
@@ -1029,7 +1114,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo086.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo086_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "c209aa8d3a3a9ab8c935fbda60a060595fdce870f8307f1dac094c9cb838e362"
   },
   {
     "fullname": "com.blockless.demo087",
@@ -1041,7 +1127,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo087.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo087_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "d120ed05cf59d9cc0f2bbb822f51fc1ef6959ab1b6266c2af18a746c19d07f76"
   },
   {
     "fullname": "com.blockless.demo088",
@@ -1053,7 +1140,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo088.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo088_r1.mpk",
-    "featured": true
+    "featured": true,
+    "sha256": "c2db4617cf7fc5c596b0cfe153874a809f092fdd5851f873848c3607207303ae"
   },
   {
     "fullname": "com.blockless.demo089",
@@ -1065,7 +1153,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo089.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo089_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "c5d4098eb5f9498481414ec774bb457b105ac12ac215f5e1c8e753e48d5c4902"
   },
   {
     "fullname": "com.blockless.demo090",
@@ -1077,7 +1166,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo090.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo090_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "7a5a321a656cd5480a63ad1f9cb9f593c85b1fe0c00fdb2a970b097215c0f833"
   },
   {
     "fullname": "com.blockless.demo091",
@@ -1089,7 +1179,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo091.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo091_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "bed0c00dddf407316b03ebf16f01ce05ca88df21fcf42d6f57933acfffa71643"
   },
   {
     "fullname": "com.blockless.demo092",
@@ -1101,7 +1192,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo092.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo092_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "129cca62545dc2970cc9c90a7300aab559fe696880389cc2538947539a661e8c"
   },
   {
     "fullname": "com.blockless.demo093",
@@ -1113,7 +1205,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo093.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo093_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "f91c35a9a4a3c4e20ab9a1f76a9fc95b2473c0d00186d3ab079001eff4cd539d"
   },
   {
     "fullname": "com.blockless.demo094",
@@ -1125,7 +1218,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo094.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo094_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "789cf4ba6180583398e37ba1200ef39e797193b531dbd4e9923ebe0c758e5c03"
   },
   {
     "fullname": "com.blockless.demo095",
@@ -1137,7 +1231,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo095.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo095_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "6331ef70db6ef2d6984b56aaae69c8c9465219ab255e334bf5746a2ff6f13092"
   },
   {
     "fullname": "com.blockless.demo096",
@@ -1149,7 +1244,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo096.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo096_r1.mpk",
-    "featured": true
+    "featured": true,
+    "sha256": "e331a11fced5e797ef4aa00b809048d676df749398178253ad3ca9f71ee744d2"
   },
   {
     "fullname": "com.blockless.demo097",
@@ -1161,7 +1257,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo097.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo097_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "83c4e8e236193eb1d2a8795e74270b3413dab8b2024abeeab792d676fc918dd7"
   },
   {
     "fullname": "com.blockless.demo098",
@@ -1173,7 +1270,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo098.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo098_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "083d45e216b9d2f9f320d7930b3524cab263d26a187e6d398b57565fb45bb39e"
   },
   {
     "fullname": "com.blockless.demo099",
@@ -1185,7 +1283,8 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo099.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo099_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "3aca57db3bab5e2f7b4b9ba0dfed8a2292086c28f652bb6da78bd029978cb00b"
   },
   {
     "fullname": "com.blockless.demo100",
@@ -1197,6 +1296,7 @@
     "entrypoint": "assets/main.py",
     "screenshotUrl": "/showcase/screenshots/com.blockless.demo100.png",
     "mpkUrl": "/showcase/mpks/com.blockless.demo100_r1.mpk",
-    "featured": false
+    "featured": false,
+    "sha256": "46bde74befed25cc1c9e60c76c3c18b1f7668ec403cb60f89a8f4e2bd601ab13"
   }
 ]

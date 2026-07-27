@@ -193,16 +193,61 @@ class ProtocolTests(unittest.TestCase):
                 log_excerpt="Installed\nStarted: True",
             ),
         )
-        self.assertTrue(recorded["hardware_verified"])
+        self.assertFalse(recorded["hardware_verified"])
+        self.assertTrue(recorded["hardware_client_attested"])
         self.assertEqual(recorded["status"], "blocked")
         self.assertEqual(recorded["checkpoint_id"], "publish_check_done")
         deploy = next(
             item for item in recorded["artifacts"] if item["role"] == "deploy_result"
         )
         payload = Path(self.temp.name, state["session_id"], deploy["path"])
-        self.assertTrue(
-            json.loads(payload.read_text(encoding="utf-8"))["app_launched"]
+        deploy_result = json.loads(payload.read_text(encoding="utf-8"))
+        self.assertTrue(deploy_result["app_launched"])
+        self.assertTrue(deploy_result["client_attested"])
+        self.assertFalse(deploy_result["server_verified"])
+        self.assertIn("permission_decisions", deploy_result)
+
+    def test_publish_bundle_redacts_device_diagnostics(self) -> None:
+        state = self.service.create_demo(
+            DemoSessionRequest(
+                idempotency_key="publish-redaction-demo-0001",
+                seed="countdown",
+            )
         )
+        recorded = self.service.record_device_result(
+            state["session_id"],
+            DeviceResultRequest(
+                idempotency_key="publish-redaction-device-0001",
+                result="launch_success",
+                installed_path="C:\\Users\\demo\\private\\apps\\secret",
+                log_excerpt=(
+                    "Authorization: Bearer sk-publish-secret-token-123456 "
+                    "COM5 C:\\Users\\demo\\private\\device.log"
+                ),
+            ),
+        )
+        bundle_artifact = next(
+            item
+            for item in recorded["artifacts"]
+            if item["role"] == "publish_materials_bundle"
+        )
+        bundle_path = Path(
+            self.temp.name,
+            state["session_id"],
+            bundle_artifact["path"],
+        )
+        with zipfile.ZipFile(bundle_path) as archive:
+            deploy_text = archive.read("deploy_result.json").decode("utf-8")
+        publish_deploy = json.loads(deploy_text)
+        self.assertNotIn("installed_path", publish_deploy)
+        self.assertIsNone(publish_deploy.get("serial_port"))
+        self.assertEqual(publish_deploy["logs"], [])
+        self.assertEqual(publish_deploy["commands"], [])
+        self.assertTrue(publish_deploy["client_attested"])
+        self.assertFalse(publish_deploy["server_verified"])
+        self.assertNotIn("sk-publish-secret", deploy_text)
+        self.assertNotIn("COM5", deploy_text)
+        self.assertNotIn("C:\\Users\\demo", deploy_text)
 
     def test_device_failure_codes_preserve_safe_hardware_facts(self) -> None:
         cases = {

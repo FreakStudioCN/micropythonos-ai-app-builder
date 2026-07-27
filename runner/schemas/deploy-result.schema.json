@@ -32,6 +32,9 @@
           "enum": [
             "desktop-preview",
             "web-preview",
+            "browser-device-handoff",
+            "webserial",
+            "mpremote",
             "device-copy",
             "mpk-install",
             "install-site",
@@ -39,7 +42,10 @@
           ]
         },
         "hardware_available": {
-          "type": "boolean"
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "board": {
           "type": [
@@ -59,6 +65,9 @@
               "type": "boolean"
             },
             {
+              "type": "null"
+            },
+            {
               "const": "unknown"
             }
           ]
@@ -72,13 +81,88 @@
         "commands": {
           "type": "array",
           "items": {
-            "type": "string"
+            "oneOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "object",
+                "required": [
+                  "transport",
+                  "summary"
+                ],
+                "properties": {
+                  "transport": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "summary": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                },
+                "additionalProperties": false
+              }
+            ]
           }
         },
         "logs": {
           "type": "array",
           "items": {
             "type": "string"
+          }
+        },
+        "client_attested": {
+          "type": "boolean"
+        },
+        "server_verified": {
+          "type": "boolean"
+        },
+        "usb_vendor_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "usb_product_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "app_installed": {
+          "type": "boolean"
+        },
+        "app_launched": {
+          "type": "boolean"
+        },
+        "installed_path": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "install_url": {
+          "type": "string",
+          "format": "uri"
+        },
+        "permissions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": {
+                "type": "string"
+              },
+              "decision": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
           }
         },
         "handoff": {

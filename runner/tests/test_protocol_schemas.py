@@ -1,13 +1,25 @@
 import copy
 import json
+import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 from referencing import Registry, Resource
 
 
 SCHEMA_DIR = Path(__file__).resolve().parents[1] / "schemas"
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_ROOT = PROJECT_ROOT / "backend"
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
+from app.models import DemoSessionRequest, DeviceResultRequest, SessionCreateRequest
+import app.session_service as session_module
+
+
 EXPECTED_SCHEMAS = {
     "analysis-result.schema.json",
     "app-test-result.schema.json",
@@ -82,6 +94,7 @@ class ProtocolSchemaTests(unittest.TestCase):
                 "code": "LVGL_API_MISSING",
                 "message": "The requested LVGL API is unavailable",
                 "stage": "generation",
+                "phase": "mpos-publish-app-web",
                 "retryable": True,
                 "owner": "app",
                 "details": {"symbol": "lv.obj.missing"},
@@ -89,6 +102,10 @@ class ProtocolSchemaTests(unittest.TestCase):
             }
         }
         self.assert_valid("structured-error.schema.json", error)
+        invalid_phase = copy.deepcopy(error)
+        invalid_phase["error"]["phase"] = "publish"
+        with self.assertRaises(ValidationError):
+            self.assert_valid("structured-error.schema.json", invalid_phase)
 
         permission = {
             "protocol_version": "mpos-ai-app/v1",
@@ -145,6 +162,67 @@ class ProtocolSchemaTests(unittest.TestCase):
             invalid["unexpected"] = True
             with self.assertRaises(ValidationError, msg=name):
                 self.assert_valid(name, invalid)
+
+    def test_session_service_writers_match_result_schemas(self):
+        with tempfile.TemporaryDirectory() as temp_root, patch.object(
+            session_module, "SESSION_ROOT", Path(temp_root).resolve()
+        ):
+            service = session_module.SessionService()
+            state = service.create(
+                SessionCreateRequest(
+                    idempotency_key="runner-writer-deploy-0001",
+                    prompt="Build a device status panel",
+                    package_name="com.example.runnerwriter",
+                    targets=["physical-device", "package-only"],
+                )
+            )
+            recorded = service.record_device_result(
+                state["session_id"],
+                DeviceResultRequest(
+                    idempotency_key="runner-writer-result-0001",
+                    result="launch_success",
+                    message="Browser client reports launch success",
+                ),
+            )
+            deploy_artifact = next(
+                item
+                for item in recorded["artifacts"]
+                if item["role"] == "deploy_result"
+            )
+            deploy_result = json.loads(
+                Path(
+                    temp_root,
+                    state["session_id"],
+                    deploy_artifact["path"],
+                ).read_text(encoding="utf-8")
+            )
+            self.assert_valid("deploy-result.schema.json", deploy_result)
+            self.assertTrue(deploy_result["client_attested"])
+            self.assertFalse(deploy_result["server_verified"])
+
+            demo = service.create_demo(
+                DemoSessionRequest(
+                    idempotency_key="runner-writer-publish-0001",
+                    seed="countdown",
+                )
+            )
+            publish_artifact = next(
+                item
+                for item in demo["artifacts"]
+                if item["role"] == "publish_result"
+            )
+            publish_result = json.loads(
+                Path(
+                    temp_root,
+                    demo["session_id"],
+                    publish_artifact["path"],
+                ).read_text(encoding="utf-8")
+            )
+            self.assert_valid("publish-result.schema.json", publish_result)
+            self.assertIn("release_readiness", publish_result)
+            self.assertIn("app", publish_result)
+            self.assertIn("screenshot_readiness", publish_result)
+            self.assertIn("upystore_comparison", publish_result)
 
     def test_all_seven_stage_results(self):
         base = {
@@ -224,6 +302,8 @@ class ProtocolSchemaTests(unittest.TestCase):
                 "permission_decisions": [],
                 "commands": [],
                 "logs": [],
+                "client_attested": False,
+                "server_verified": False,
                 "handoff": {"next_phase": "mpos-publish-app-web"},
             },
             "publish-result.schema.json": {

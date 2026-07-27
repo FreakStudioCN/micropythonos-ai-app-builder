@@ -31,6 +31,10 @@
         "publish_ready": {
           "type": "boolean"
         },
+        "status": {
+          "type": "string",
+          "minLength": 1
+        },
         "release_readiness": {
           "enum": [
             "ready_for_manual_upload",
@@ -99,6 +103,10 @@
             "size_bytes": {
               "type": "integer",
               "minimum": 0
+            },
+            "revision": {
+              "type": "integer",
+              "minimum": 1
             }
           },
           "additionalProperties": false
@@ -190,6 +198,72 @@
             }
           },
           "additionalProperties": false
+        },
+        "upystore": {
+          "type": "object",
+          "properties": {
+            "home_url": {
+              "type": "string",
+              "format": "uri"
+            },
+            "developer_url": {
+              "type": "string",
+              "format": "uri"
+            },
+            "mode": {
+              "type": "string"
+            },
+            "version_status": {
+              "type": "string"
+            }
+          },
+          "additionalProperties": false
+        },
+        "app_metadata": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "screenshots": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": true
+          }
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name",
+              "status"
+            ],
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "enum": [
+                  "passed",
+                  "failed",
+                  "warning",
+                  "skipped",
+                  "blocked",
+                  "pending"
+                ]
+              },
+              "details": {
+                "type": "object",
+                "additionalProperties": true
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "hardware_validation": {
+          "type": "object",
+          "additionalProperties": true
         },
         "handoff": {
           "type": "object",

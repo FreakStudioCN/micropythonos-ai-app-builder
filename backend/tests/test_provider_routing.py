@@ -10,6 +10,7 @@ import httpx
 from app.generator import (
     UpstreamGenerationError,
     _call_deepseek,
+    _record_provider_failure,
     _reset_provider_circuits,
     provider_metadata,
 )
@@ -53,6 +54,7 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
             return httpx.Response(
                 status_code,
                 request=request,
+                headers={"x-request-id": "request-safe"},
                 json={"error": {"message": "private upstream body"}},
             )
         generated = {
@@ -169,6 +171,10 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
                     ["deepseek_primary"],
                 )
                 self.assertEqual(client.post.await_count, 1)
+                self.assertEqual(
+                    error.details["provider_attempts"][0]["request_id"],
+                    "request-safe",
+                )
                 self.assertNotIn("private upstream body", str(error))
                 self.assertNotIn(
                     "private upstream body",
@@ -235,6 +241,50 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
             second_client.post.await_args.args[0],
             "https://secondary.invalid/v1/chat/completions",
         )
+
+    async def test_half_open_circuit_allows_only_one_probe(self) -> None:
+        env = self._env(
+            AI_PROVIDER_ORDER="deepseek_primary,deepseek_secondary",
+            AI_PROVIDER_CIRCUIT_FAILURE_THRESHOLD="1",
+            AI_PROVIDER_CIRCUIT_COOLDOWN_SECONDS="0.1",
+        )
+        probe_started = asyncio.Event()
+        release_probe = asyncio.Event()
+        primary_calls = 0
+
+        async def post(url: str, **_: object) -> httpx.Response:
+            nonlocal primary_calls
+            if "primary.invalid" in url:
+                primary_calls += 1
+                probe_started.set()
+                await release_probe.wait()
+                return self._response(200, model="primary-recovered")
+            return self._response(200, model="secondary-served")
+
+        client = self._client()
+        client.post.side_effect = post
+        with patch.dict(os.environ, env, clear=True), patch(
+            "app.generator.httpx.AsyncClient", return_value=client
+        ):
+            _record_provider_failure("deepseek_primary")
+            await asyncio.sleep(0.11)
+            first = asyncio.create_task(
+                _call_deepseek(
+                    GenerateRequest(prompt="first probe", ai_provider="auto")
+                )
+            )
+            await asyncio.wait_for(probe_started.wait(), timeout=1)
+            try:
+                _, _, second_meta = await _call_deepseek(
+                    GenerateRequest(prompt="concurrent call", ai_provider="auto")
+                )
+            finally:
+                release_probe.set()
+            _, _, first_meta = await first
+
+        self.assertEqual(primary_calls, 1)
+        self.assertEqual(first_meta["provider"], "deepseek_primary")
+        self.assertEqual(second_meta["provider"], "deepseek_secondary")
 
     async def test_explicit_unconfigured_provider_never_falls_back(self) -> None:
         env = self._env()
