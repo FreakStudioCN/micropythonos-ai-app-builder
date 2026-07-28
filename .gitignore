@@ -18,6 +18,7 @@ artifacts/
 sessions/
 
 *.mpk
+!frontend/public/showcase/mpks/*.mpk
 *.bin
 *.uf2
 

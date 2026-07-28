@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import ast
+import hashlib
 import io
 import json
 import os
@@ -12,7 +14,6 @@ import re
 import shutil
 import stat
 import struct
-import tempfile
 import uuid
 import zipfile
 
@@ -108,6 +109,7 @@ def _read_mpk(mpk_data: bytes, expected_fullname: str) -> dict[str, object]:
                 )
 
             manifest_bytes = mpk.read(entries[f"{expected_fullname}/MANIFEST.JSON"])
+            app_code_bytes = mpk.read(entries[f"{expected_fullname}/assets/main.py"])
     except zipfile.BadZipFile as exc:
         raise BundleError(f"{expected_fullname}: invalid MPK ZIP") from exc
 
@@ -119,6 +121,11 @@ def _read_mpk(mpk_data: bytes, expected_fullname: str) -> dict[str, object]:
         raise BundleError(f"{expected_fullname}: MANIFEST.JSON must be an object")
     if manifest.get("fullname") != expected_fullname:
         raise BundleError(f"{expected_fullname}: Manifest fullname does not match the MPK filename")
+    try:
+        app_code = app_code_bytes.decode("utf-8")
+        ast.parse(app_code, filename=f"{expected_fullname}/assets/main.py")
+    except (UnicodeDecodeError, SyntaxError) as exc:
+        raise BundleError(f"{expected_fullname}: assets/main.py is not valid UTF-8 Python") from exc
     return manifest
 
 
@@ -126,8 +133,10 @@ def _catalog_entry(
     manifest: dict[str, object],
     fullname: str,
     release: int,
+    sha256: str,
+    source_description: object,
 ) -> dict[str, object]:
-    short_description = manifest.get("short_description") or manifest.get("description")
+    short_description = source_description or manifest.get("short_description") or manifest.get("description")
     long_description = manifest.get("long_description") or short_description
     if not isinstance(short_description, str) or not short_description.strip():
         raise BundleError(f"{fullname}: MANIFEST.JSON requires short_description")
@@ -151,10 +160,16 @@ def _catalog_entry(
         "screenshotUrl": f"/showcase/screenshots/{fullname}.png",
         "mpkUrl": f"/showcase/mpks/{fullname}_r{release}.mpk",
         "featured": fullname in FEATURED_IDS,
+        "sha256": sha256,
     }
 
 
-def import_bundle(source: Path, output: Path, expected_count: int) -> None:
+def import_bundle(
+    source: Path,
+    output: Path,
+    expected_count: int,
+    replace_existing: bool = False,
+) -> None:
     if not source.is_file():
         raise BundleError(f"Bundle not found: {source}")
 
@@ -163,13 +178,19 @@ def import_bundle(source: Path, output: Path, expected_count: int) -> None:
             entries = _file_entries(outer, source.name)
             mpks: dict[str, tuple[int, zipfile.ZipInfo]] = {}
             screenshots: dict[str, zipfile.ZipInfo] = {}
+            upload_manifest_info: zipfile.ZipInfo | None = None
 
             for name, info in entries.items():
                 path = PurePosixPath(name)
+                if len(path.parts) == 1 and path.name.startswith("upystore_upload_manifest_"):
+                    if upload_manifest_info is not None:
+                        raise BundleError(f"{source.name}: multiple upload manifests found")
+                    upload_manifest_info = info
+                    continue
                 if len(path.parts) != 2:
                     raise BundleError(f"{source.name}: unexpected nested path: {name}")
                 folder, filename = path.parts
-                if folder == "mpks":
+                if folder in {"mpk", "mpks"}:
                     match = MPK_NAME_RE.fullmatch(filename)
                     if not match:
                         raise BundleError(f"{source.name}: invalid MPK filename: {filename}")
@@ -197,34 +218,122 @@ def import_bundle(source: Path, output: Path, expected_count: int) -> None:
                 )
             if len(mpks) != expected_count:
                 raise BundleError(f"Expected {expected_count} packages, found {len(mpks)}")
+            if upload_manifest_info is None:
+                raise BundleError(f"{source.name}: upload manifest is required")
+
+            try:
+                upload_manifest = json.loads(outer.read(upload_manifest_info).decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+                raise BundleError(f"{source.name}: invalid upload manifest") from exc
+            if not isinstance(upload_manifest, dict) or not isinstance(upload_manifest.get("apps"), list):
+                raise BundleError(f"{source.name}: upload manifest requires an apps list")
+            if upload_manifest.get("total") != expected_count:
+                raise BundleError(
+                    f"{source.name}: upload manifest total does not equal {expected_count}"
+                )
+            manifest_apps: dict[str, dict[str, object]] = {}
+            for item in upload_manifest["apps"]:
+                if not isinstance(item, dict) or not isinstance(item.get("fullname"), str):
+                    raise BundleError(f"{source.name}: invalid upload manifest app entry")
+                fullname = item["fullname"]
+                if fullname in manifest_apps:
+                    raise BundleError(f"{source.name}: duplicate upload manifest app: {fullname}")
+                manifest_apps[fullname] = item
+            if set(manifest_apps) != set(mpks):
+                raise BundleError(f"{source.name}: upload manifest packages do not match MPKs")
+
+            existing_catalog: list[dict[str, object]] = []
+            existing_catalog_path = output / "catalog.json"
+            if existing_catalog_path.is_file():
+                try:
+                    existing_catalog = json.loads(
+                        existing_catalog_path.read_text(encoding="utf-8")
+                    )
+                except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                    raise BundleError(f"Cannot read existing catalog: {existing_catalog_path}") from exc
+                if not isinstance(existing_catalog, list):
+                    raise BundleError("Existing catalog must be a list")
+            existing_fullnames = {
+                item.get("fullname")
+                for item in existing_catalog
+                if isinstance(item, dict)
+            }
+            overlap = sorted(set(mpks) & existing_fullnames)
+            if overlap and not replace_existing:
+                raise BundleError(f"Imported packages already exist: {overlap[:5]}")
+            if overlap:
+                existing_catalog = [
+                    item
+                    for item in existing_catalog
+                    if not isinstance(item, dict) or item.get("fullname") not in set(mpks)
+                ]
 
             output_parent = output.parent.resolve()
             output_parent.mkdir(parents=True, exist_ok=True)
-            temporary = Path(
-                tempfile.mkdtemp(prefix=f".{output.name}.import-", dir=output_parent)
-            )
+            # tempfile.mkdtemp can create an inaccessible ACL when invoked through
+            # the Microsoft Store Python shim on Windows.  Creating the directory
+            # normally preserves the repository parent's inherited permissions.
+            temporary = output_parent / f".{output.name}.import-{uuid.uuid4().hex}"
+            temporary.mkdir()
             try:
-                (temporary / "mpks").mkdir()
-                (temporary / "screenshots").mkdir()
-                catalog: list[dict[str, object]] = []
+                if output.exists():
+                    shutil.copytree(output, temporary, dirs_exist_ok=True)
+                (temporary / "mpks").mkdir(exist_ok=True)
+                (temporary / "screenshots").mkdir(exist_ok=True)
+                catalog: list[dict[str, object]] = list(existing_catalog)
 
                 for fullname in sorted(mpks):
                     release, mpk_info = mpks[fullname]
                     mpk_data = outer.read(mpk_info)
+                    mpk_sha256 = hashlib.sha256(mpk_data).hexdigest()
                     manifest = _read_mpk(mpk_data, fullname)
                     screenshot_data = outer.read(screenshots[fullname])
+                    screenshot_sha256 = hashlib.sha256(screenshot_data).hexdigest()
                     width, height = _png_dimensions(screenshot_data, fullname)
                     if (width, height) != (320, 240):
                         raise BundleError(
                             f"{fullname}: expected a 320x240 screenshot, found {width}x{height}"
                         )
+                    upload_entry = manifest_apps[fullname]
+                    expected_mpk_name = f"{fullname}_r{release}.mpk"
+                    expected_screenshot_name = f"{fullname}.png"
+                    validations = {
+                        "mpk_filename": expected_mpk_name,
+                        "mpk_sha256": mpk_sha256,
+                        "mpk_size_bytes": len(mpk_data),
+                        "screenshot_filename": expected_screenshot_name,
+                        "screenshot_sha256": screenshot_sha256,
+                        "screenshot_size_bytes": len(screenshot_data),
+                    }
+                    for key, actual in validations.items():
+                        if upload_entry.get(key) != actual:
+                            raise BundleError(
+                                f"{fullname}: upload manifest {key} does not match the file"
+                            )
+                    for key in ("name", "version", "category"):
+                        if str(upload_entry.get(key, "")).strip() != _required_text(
+                            manifest, key, fullname
+                        ):
+                            raise BundleError(
+                                f"{fullname}: upload manifest {key} does not match MANIFEST.JSON"
+                            )
 
-                    mpk_name = f"{fullname}_r{release}.mpk"
+                    mpk_name = expected_mpk_name
                     (temporary / "mpks" / mpk_name).write_bytes(mpk_data)
                     (temporary / "screenshots" / f"{fullname}.png").write_bytes(
                         screenshot_data
                     )
-                    catalog.append(_catalog_entry(manifest, fullname, release))
+                    catalog.append(
+                        _catalog_entry(
+                            manifest,
+                            fullname,
+                            release,
+                            mpk_sha256,
+                            upload_entry.get("description"),
+                        )
+                    )
+
+                catalog.sort(key=lambda item: str(item["fullname"]))
 
                 (temporary / "catalog.json").write_text(
                     json.dumps(catalog, ensure_ascii=False, indent=2) + "\n",
@@ -249,7 +358,10 @@ def import_bundle(source: Path, output: Path, expected_count: int) -> None:
     except zipfile.BadZipFile as exc:
         raise BundleError(f"Invalid showcase ZIP: {source}") from exc
 
-    print(f"Imported {expected_count} showcase apps into {output}")
+    print(
+        f"Imported {expected_count} public apps into {output}; "
+        f"catalog now contains {len(existing_catalog) + expected_count} apps"
+    )
 
 
 def _asset_path(asset_root: Path, url: str) -> Path:
@@ -278,6 +390,7 @@ def check_catalog(catalog_path: Path, asset_root: Path, expected_count: int) -> 
         "entrypoint",
         "screenshotUrl",
         "mpkUrl",
+        "sha256",
     }
     fullnames: set[str] = set()
     featured_count = 0
@@ -302,12 +415,17 @@ def check_catalog(catalog_path: Path, asset_root: Path, expected_count: int) -> 
                 raise BundleError(f"{fullname}: unsafe {key}: {url}")
             if not _asset_path(asset_root, url).is_file():
                 raise BundleError(f"{fullname}: missing asset for {key}: {url}")
+        mpk_path = _asset_path(asset_root, raw_entry["mpkUrl"])
+        if not re.fullmatch(r"[0-9a-f]{64}", raw_entry["sha256"]):
+            raise BundleError(f"{fullname}: invalid sha256")
+        if hashlib.sha256(mpk_path.read_bytes()).hexdigest() != raw_entry["sha256"]:
+            raise BundleError(f"{fullname}: MPK sha256 does not match the catalog")
 
     if featured_count != len(FEATURED_IDS):
         raise BundleError(
             f"Expected {len(FEATURED_IDS)} featured entries, found {featured_count}"
         )
-    print(f"Catalog check passed for {expected_count} showcase apps")
+    print(f"Catalog check passed for {expected_count} public apps")
 
 
 def main() -> int:
@@ -327,6 +445,11 @@ def main() -> int:
     )
     parser.add_argument("--expected-count", type=int, default=100)
     parser.add_argument("--check", action="store_true", help="Check an existing catalog")
+    parser.add_argument(
+        "--replace-existing",
+        action="store_true",
+        help="Replace matching packages that are already present in the destination",
+    )
     args = parser.parse_args()
 
     try:
@@ -339,7 +462,12 @@ def main() -> int:
         else:
             if args.asset_root is not None:
                 parser.error("asset_root is only valid with --check")
-            import_bundle(args.source, args.output, args.expected_count)
+            import_bundle(
+                args.source,
+                args.output,
+                args.expected_count,
+                replace_existing=args.replace_existing,
+            )
     except BundleError as exc:
         parser.exit(1, f"error: {exc}\n")
     return 0

@@ -834,7 +834,7 @@ export default function App() {
           showcasePreviewRef.current = "";
           setShowcaseAction("");
           setRuntimeStatus(detail);
-          setToast(liveText("样例模拟运行失败，请查看运行日志。", "Showcase preview failed. Check the runtime log."));
+          setToast(liveText("公开 App 模拟运行失败，请查看运行日志。", "Public app preview failed. Check the runtime log."));
           setLogs((items) => [...items, `[showcase] ${detail}`]);
           return;
         }
@@ -1500,7 +1500,7 @@ export default function App() {
       executionTimer.current = window.setTimeout(() => {
         showcasePreviewRef.current = "";
         setShowcaseAction("");
-        setRuntimeStatus(tr("样例 WASM 模拟运行超时", "Showcase WASM preview timed out"));
+        setRuntimeStatus(tr("公开 App WASM 模拟运行超时", "Public app WASM preview timed out"));
       }, 60_000);
       iframeRef.current.contentWindow.postMessage(
         buildShowcaseRunMessage(item.fullname, mpkBase64),
@@ -1511,7 +1511,7 @@ export default function App() {
       setShowcaseAction("");
       const message = error instanceof Error
         ? error.message
-        : tr("样例 MPK 下载失败", "Could not download the showcase MPK");
+        : tr("公开 App MPK 下载失败", "Could not download the public app MPK");
       setRuntimeStatus(message);
       setToast(message);
     }
@@ -1565,7 +1565,7 @@ export default function App() {
     } catch (error) {
       const message = error instanceof Error
         ? error.message
-        : tr("样例 MPK 下载失败", "Could not download the showcase MPK");
+        : tr("公开 App MPK 下载失败", "Could not download the public app MPK");
       setToast(message);
     } finally {
       setShowcaseAction("");
@@ -2066,15 +2066,15 @@ export default function App() {
         <details className="card showcase-library" id="showcase">
           <summary className="section-heading">
             <div>
-              <span>{tr("更多创作灵感", "More ideas to explore")}</span>
-              <h2>{tr("100 App 样例库", "100-App Showcase")}</h2>
+              <span>{tr("探索、运行与部署社区作品", "Explore, run, and deploy community apps")}</span>
+              <h2>{tr("公开 App 库", "Public App Library")}</h2>
             </div>
             <p>{tr("展开后可模拟运行、下载 MPK，或直接部署到已连接的板子。", "Expand to preview, download an MPK, or deploy directly to a connected board.")}</p>
           </summary>
 
           <div className="showcase-toolbar">
             <label className="showcase-field showcase-search">
-              <span>{tr("搜索样例", "Search apps")}</span>
+              <span>{tr("搜索公开 App", "Search public apps")}</span>
               <input
                 type="search"
                 value={showcaseQuery}
@@ -2121,11 +2121,11 @@ export default function App() {
           </div>
 
           {showcaseStatus === "loading" && (
-            <div className="showcase-state"><strong>{tr("正在载入样例库…", "Loading showcase…")}</strong></div>
+            <div className="showcase-state"><strong>{tr("正在载入公开 App 库…", "Loading public app library…")}</strong></div>
           )}
           {showcaseStatus === "error" && (
             <div className="showcase-state error">
-              <strong>{tr("样例库暂时无法载入", "Showcase unavailable")}</strong>
+              <strong>{tr("公开 App 库暂时无法载入", "Public app library unavailable")}</strong>
               <span>{tr("请刷新页面后重试。", "Refresh the page to try again.")}</span>
             </div>
           )}
@@ -2134,8 +2134,8 @@ export default function App() {
               <div className="showcase-results">
                 <span>
                   {showAllShowcase
-                    ? tr(`显示 ${visibleShowcaseApps.length} / ${showcaseApps.length} 个样例`, `Showing ${visibleShowcaseApps.length} of ${showcaseApps.length} apps`)
-                    : tr(`精选 ${visibleShowcaseApps.length} 个样例`, `${visibleShowcaseApps.length} featured apps`)}
+                    ? tr(`显示 ${visibleShowcaseApps.length} / ${showcaseApps.length} 个 App`, `Showing ${visibleShowcaseApps.length} of ${showcaseApps.length} apps`)
+                    : tr(`精选 ${visibleShowcaseApps.length} 个 App`, `${visibleShowcaseApps.length} featured apps`)}
                 </span>
               </div>
               {visibleShowcaseApps.length > 0 ? (
@@ -2192,7 +2192,7 @@ export default function App() {
                 </div>
               ) : (
                 <div className="showcase-state">
-                  <strong>{tr("没有匹配的样例", "No matching apps")}</strong>
+                  <strong>{tr("没有匹配的 App", "No matching apps")}</strong>
                   <span>{tr("换个关键词或类别试试。", "Try another keyword or category.")}</span>
                 </div>
               )}
