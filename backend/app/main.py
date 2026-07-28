@@ -26,6 +26,7 @@ from .auth import (
 from .billing import InsufficientCredits, billing_service
 from .database import database_engine
 from .generator import GenerationError, generate_app, provider_metadata
+from .cors import compute_frontend_origins
 from .requirements_chat import RequirementChatError, clarify_requirements
 from .models import (
     AuthCredentials,
@@ -47,48 +48,8 @@ from .models import (
     SessionCreateRequest,
     SystemStatusResponse,
 )
+from .runtime_flags import _enabled, _maintenance_blocks, _system_status_payload
 from .session_service import SessionNotFound, session_service
-
-
-def _enabled(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _system_status_payload() -> dict[str, Any]:
-    maintenance = _enabled("MAINTENANCE_MODE")
-    try:
-        retry_after = int(
-            os.getenv("MAINTENANCE_RETRY_AFTER_SECONDS", "300").strip()
-        )
-    except ValueError:
-        retry_after = 300
-    retry_after = max(1, min(86400, retry_after))
-    message = os.getenv(
-        "MAINTENANCE_MESSAGE",
-        "系统正在升级，请稍后重试。",
-    ).strip()
-    return {
-        "status": "maintenance" if maintenance else "ready",
-        "maintenance_mode": maintenance,
-        "message": message if maintenance else "",
-        "retry_after_seconds": retry_after,
-    }
-
-
-def _maintenance_blocks(method: str, path: str) -> bool:
-    if not _enabled("MAINTENANCE_MODE") or method not in {
-        "POST",
-        "PUT",
-        "PATCH",
-        "DELETE",
-    }:
-        return False
-    return (
-        path in {"/api/generate", "/api/requirements/chat"}
-        or "/actions/" in path
-        or path.endswith(("/retry", "/resume"))
-        or "/devices/" in path
-    )
 
 
 if _enabled("MPOS_REQUIRE_DURABLE_STORAGE"):
@@ -103,20 +64,7 @@ if _enabled("MPOS_REQUIRE_DURABLE_STORAGE"):
         )
 
 app = FastAPI(title="Blockless-Make-APP API", version="0.1.0")
-local_frontend_origins = [
-    "http://localhost:5173",
-    "http://localhost:5174",
-    "http://127.0.0.1:5173",
-    "http://127.0.0.1:5174",
-]
-configured_frontend_origins = os.getenv(
-    "FRONTEND_ORIGINS",
-    os.getenv("FRONTEND_ORIGIN", ""),
-)
-frontend_origins = list(dict.fromkeys(
-    local_frontend_origins
-    + [origin.strip() for origin in configured_frontend_origins.split(",") if origin.strip()]
-))
+frontend_origins = compute_frontend_origins()
 project_root = Path(__file__).resolve().parents[2]
 frontend_dist_root = project_root / "frontend" / "dist"
 wasm_web_root = (

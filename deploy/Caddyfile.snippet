@@ -1,0 +1,6 @@
+# Add this block to the host Caddyfile, then reload Caddy.
+# `mpos-app` resolves over the shared Docker network (see networks.edge in compose.yml).
+# Confirm the final hostname with the ops owner before going live.
+mpos.upypi.net {
+    reverse_proxy mpos-app:10000
+}
