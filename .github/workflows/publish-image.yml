@@ -177,8 +177,12 @@ jobs:
           printf 'MPOS_IMAGE=%s\n' "${IMAGE}" > .env
           deploy_ok=""
           if docker compose up -d --wait; then
-            RUNNING=$(docker inspect "$(docker compose ps -q mpos-app)" --format '{{.Config.Image}}')
-            if [ "${RUNNING}" = "${IMAGE}" ]; then deploy_ok=1; fi
+            # Assignment inside the condition so an inspect failure counts as a
+            # failed verification instead of killing the shell under set -e.
+            if RUNNING=$(docker inspect "$(docker compose ps -q mpos-app)" --format '{{.Config.Image}}') \
+               && [ "${RUNNING}" = "${IMAGE}" ]; then
+              deploy_ok=1
+            fi
           fi
           if [ -z "${deploy_ok}" ]; then
             echo "deploy or digest verification failed — rolling back to previous pin: ${OLD_LINE}"
