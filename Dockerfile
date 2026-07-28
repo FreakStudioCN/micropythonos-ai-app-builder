@@ -32,9 +32,16 @@ RUN --mount=type=cache,target=/root/.cache/pip \
 COPY backend/ backend/
 COPY runner/ runner/
 COPY vendor/MicroPython_Skills/ vendor/MicroPython_Skills/
+COPY scripts/provision_superadmin.py scripts/provision_superadmin.py
 COPY --from=frontend-build /app/frontend/dist/ frontend/dist/
 
-RUN mkdir -p /tmp/mpos-sessions
+# Non-root runtime user. Only the session root and the local sqlite fallback
+# directory are writable; code and vendored assets stay root-owned read-only.
+RUN useradd --uid 10001 --create-home --shell /usr/sbin/nologin mpos \
+    && mkdir -p /tmp/mpos-sessions backend/sessions \
+    && chown -R mpos:mpos /tmp/mpos-sessions backend/sessions
+
+USER mpos
 
 EXPOSE 10000
 CMD ["sh", "-c", "uvicorn app.main:app --app-dir backend --host 0.0.0.0 --port ${PORT:-10000}"]

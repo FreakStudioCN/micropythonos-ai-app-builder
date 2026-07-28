@@ -1,0 +1,179 @@
+name: publish-image
+
+# Build the production image and push it to GHCR; deploy it on the self-hosted
+# production runner. Modeled on cursor_for_hardware's publish-image.yml, hardened:
+#
+#   - deploy is gated on CI: the main-branch path triggers via `workflow_run` on a
+#     SUCCESSFUL CI run and builds exactly `workflow_run.head_sha` (source_sha) —
+#     a plain checkout here would silently build the current main HEAD, which may
+#     be a newer, untested commit.
+#   - `workflow_dispatch` is restricted to main and verifies that CI succeeded for
+#     the resolved sha before building.
+#   - push to deploy/domestic and v* tags: image build + smoke only, NO deploy.
+#   - the deploy job updates /srv/mpos/.env transactionally (restores the previous
+#     pin and stack on failure) and audits `source_sha` + digest in the job summary.
+#
+# SECURITY (red line): NEVER add `pull_request` or `pull_request_target` triggers —
+# the deploy job runs on a self-hosted runner ON the production host; a PR trigger
+# would hand fork code execution on that machine. The self-hosted job must never
+# check out the repository or run repository scripts.
+
+on:
+  push:
+    branches: [deploy/domestic]
+    tags: ['v*']
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions: {}
+
+env:
+  IMAGE_NAME: ghcr.io/freakstudiocn/micropythonos-ai-app-builder
+
+jobs:
+  image:
+    name: build + smoke + push image
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+      actions: read   # workflow_dispatch path queries CI run conclusions
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      source_sha: ${{ steps.src.outputs.sha }}
+    steps:
+      - name: Resolve source_sha (the commit that passed CI)
+        id: src
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          case "${{ github.event_name }}" in
+            workflow_run)
+              sha="${{ github.event.workflow_run.head_sha }}"
+              ;;
+            workflow_dispatch)
+              test "${{ github.ref }}" = "refs/heads/main"
+              sha=$(gh api "repos/${{ github.repository }}/commits/main" --jq .sha)
+              conclusion=$(gh api \
+                "repos/${{ github.repository }}/actions/workflows/ci.yml/runs?head_sha=${sha}&status=completed&per_page=1" \
+                --jq '.workflow_runs[0].conclusion')
+              test "${conclusion}" = "success"
+              ;;
+            *)
+              sha="${{ github.sha }}"
+              ;;
+          esac
+          echo "sha=${sha}" >> "${GITHUB_OUTPUT}"
+          echo "building source_sha=${sha}" >> "${GITHUB_STEP_SUMMARY}"
+
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ steps.src.outputs.sha }}
+          submodules: false
+
+      # The image only needs MicroPython_Skills (vendor/MicroPythonOS is excluded
+      # by .dockerignore); skip the huge recursive OS checkout.
+      - name: Check out the skills submodule only
+        run: git submodule update --init vendor/MicroPython_Skills
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Image tags
+        id: meta
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE_NAME }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' }}
+            type=raw,value=sha-${{ steps.src.outputs.sha }}
+            type=semver,pattern={{version}}
+
+      - name: Build image for smoke test
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: mpos-smoke:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # Default env = local sqlite + filesystem sessions: the container must start,
+      # serve /api/health, and run as a non-root user.
+      - name: Container smoke test (non-root + health)
+        run: |
+          set -euo pipefail
+          docker run -d --name mpos-smoke -p 18080:10000 mpos-smoke:ci
+          ok=""
+          for _ in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:18080/api/health >/dev/null; then ok=1; break; fi
+            sleep 2
+          done
+          if [ -z "${ok}" ]; then docker logs mpos-smoke; exit 1; fi
+          uid=$(docker exec mpos-smoke id -u)
+          echo "container uid=${uid}"
+          test "${uid}" != "0"
+          curl -fsS http://127.0.0.1:18080/api/health | jq -e '.status == "ok"'
+          docker rm -f mpos-smoke
+
+      - name: Push image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: deploy on production host
+    needs: image
+    if: github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch'
+    runs-on: [self-hosted, Linux, X64, upypi]
+    timeout-minutes: 15
+    environment: production
+    concurrency:
+      group: production-deploy
+      cancel-in-progress: false
+    permissions:
+      contents: none
+      packages: read
+    steps:
+      - name: Pull, pin, deploy (transactional)
+        env:
+          DIGEST: ${{ needs.image.outputs.digest }}
+          SOURCE_SHA: ${{ needs.image.outputs.source_sha }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/freakstudiocn/micropythonos-ai-app-builder@${DIGEST}"
+          export DOCKER_CONFIG="$(mktemp -d)"
+          trap 'rm -rf "${DOCKER_CONFIG}"' EXIT
+          echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          docker pull "${IMAGE}"
+          cd /srv/mpos
+          OLD_LINE=$(cat .env)
+          printf 'MPOS_IMAGE=%s\n' "${IMAGE}" > .env
+          if ! docker compose up -d --wait; then
+            echo "deploy failed — rolling back to previous pin: ${OLD_LINE}"
+            printf '%s\n' "${OLD_LINE}" > .env
+            docker compose up -d --wait
+            exit 1
+          fi
+          RUNNING=$(docker inspect "$(docker compose ps -q mpos-app)" --format '{{.Config.Image}}')
+          test "${RUNNING}" = "${IMAGE}"
+          echo "deployed source_sha=${SOURCE_SHA} digest=${DIGEST}" >> "${GITHUB_STEP_SUMMARY}"
