@@ -174,9 +174,19 @@ services:
         }
         POLICY
         mc admin policy create root mpos-app-rw /tmp/mpos-app-policy.json
-        if ! mc admin user info root "$$MPOS_INIT_APP_KEY" | grep -q mpos-app-rw; then
-          mc admin policy attach root mpos-app-rw --user "$$MPOS_INIT_APP_KEY"
-        fi
+        # Reconcile attachments: attach is additive, so detach anything else the
+        # user may have accumulated — least privilege must survive reruns.
+        current=$$(mc admin user info root "$$MPOS_INIT_APP_KEY" | sed -n 's/^PolicyName[:] *//p' | tr ',' ' ')
+        for p in $$current; do
+          if [ "$$p" != "mpos-app-rw" ]; then
+            echo "detaching unexpected policy: $$p"
+            mc admin policy detach root "$$p" --user "$$MPOS_INIT_APP_KEY"
+          fi
+        done
+        case " $$current " in
+          *" mpos-app-rw "*) echo "policy already attached" ;;
+          *) mc admin policy attach root mpos-app-rw --user "$$MPOS_INIT_APP_KEY" ;;
+        esac
         mc alias set appverify http://minio:9000 "$$MPOS_INIT_APP_KEY" "$$MPOS_INIT_APP_SECRET"
         mc ls appverify/mpos-sessions
         echo "minio-init converged OK"

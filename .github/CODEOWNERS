@@ -1,0 +1,6 @@
+# CI/CD and deployment machinery control the production host through the
+# self-hosted runner — changes here require owner review. Enforcement needs the
+# branch-protection setting "require review from Code Owners" to be enabled.
+/.github/ @leezisheng
+/deploy/ @leezisheng
+/Dockerfile @leezisheng
