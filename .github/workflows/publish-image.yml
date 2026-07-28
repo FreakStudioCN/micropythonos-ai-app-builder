@@ -98,14 +98,21 @@ jobs:
             type=raw,value=latest,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' }}
             type=raw,value=sha-${{ steps.src.outputs.sha }}
             type=semver,pattern={{version}}
+          # On workflow_run GITHUB_SHA is the current main HEAD, not the commit
+          # that passed CI — pin the revision label to source_sha explicitly.
+          labels: |
+            org.opencontainers.image.revision=${{ steps.src.outputs.sha }}
 
+      # Same tags/labels as the push build below so the second build is a pure
+      # cache hit producing the IDENTICAL image — what we smoke is what we ship.
       - name: Build image for smoke test
         uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           file: ./Dockerfile
           load: true
-          tags: mpos-smoke:ci
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -114,7 +121,7 @@ jobs:
       - name: Container smoke test (non-root + health)
         run: |
           set -euo pipefail
-          docker run -d --name mpos-smoke -p 18080:10000 mpos-smoke:ci
+          docker run -d --name mpos-smoke -p 18080:10000 "${IMAGE_NAME}:sha-${{ steps.src.outputs.sha }}"
           ok=""
           for _ in $(seq 1 30); do
             if curl -fsS http://127.0.0.1:18080/api/health >/dev/null; then ok=1; break; fi
@@ -168,12 +175,15 @@ jobs:
           cd /srv/mpos
           OLD_LINE=$(cat .env)
           printf 'MPOS_IMAGE=%s\n' "${IMAGE}" > .env
-          if ! docker compose up -d --wait; then
-            echo "deploy failed — rolling back to previous pin: ${OLD_LINE}"
+          deploy_ok=""
+          if docker compose up -d --wait; then
+            RUNNING=$(docker inspect "$(docker compose ps -q mpos-app)" --format '{{.Config.Image}}')
+            if [ "${RUNNING}" = "${IMAGE}" ]; then deploy_ok=1; fi
+          fi
+          if [ -z "${deploy_ok}" ]; then
+            echo "deploy or digest verification failed — rolling back to previous pin: ${OLD_LINE}"
             printf '%s\n' "${OLD_LINE}" > .env
             docker compose up -d --wait
             exit 1
           fi
-          RUNNING=$(docker inspect "$(docker compose ps -q mpos-app)" --format '{{.Config.Image}}')
-          test "${RUNNING}" = "${IMAGE}"
           echo "deployed source_sha=${SOURCE_SHA} digest=${DIGEST}" >> "${GITHUB_STEP_SUMMARY}"
