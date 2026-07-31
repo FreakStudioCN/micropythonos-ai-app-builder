@@ -242,7 +242,12 @@ jobs:
           if docker compose up -d --wait mpos-app; then
             # Assignment inside the condition so an inspect failure counts as a
             # failed verification instead of killing the shell under set -e.
-            if RUNNING=$(docker inspect "$(docker compose ps -q mpos-app)" --format '{{.Config.Image}}') \
+            # head -1 because `ps -q` returns newline-separated IDs: a leftover
+            # container for this service would make the substitution one quoted
+            # multi-line argument, docker inspect would reject it, and a healthy
+            # deployment would roll itself back on every run until someone
+            # removed the orphan by hand.
+            if RUNNING=$(docker inspect "$(docker compose ps -q mpos-app | head -1)" --format '{{.Config.Image}}') \
                && [ "${RUNNING}" = "${IMAGE}" ]; then
               deploy_ok=1
             fi
