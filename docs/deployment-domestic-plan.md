@@ -17,10 +17,25 @@ v1–v4 假设新开 `/srv/mpos` 独立栈。**v5 改为把 mpos 的四个服务
 | `minio` / `minio-init` | `mpos-minio` / `mpos-minio-init` | 防御性，宿主文件将来可能有 |
 | `internal` | `mpos_internal` | 与 `internal: name: mpyhw_internal` 碰撞 |
 | `pgdata` | `mpos_pgdata` | 与 `pgdata: name: mpyhw_pgdata` 碰撞 |
-| `edge` | 不再定义，只引用 | 宿主文件已有；重复定义会替换掉它 |
-| `name: mpos` | 删除 | 宿主文件已有 `name: mpyhw` |
+| `edge`（external `caddy_net`） | 改为 `default` | **该网络不存在**，见下 |
+| `name: mpos` | 删除 | 宿主文件无顶层 `name:`，项目名取自目录名 |
 
-验证方式：把块与插件后端 compose 合并后 `docker compose config` 通过，且 6 个服务齐全、`db` 未被改动。
+### 宿主实际架构（2026-07-31 拿到真文件后更正，v1–v4 全部搞错了）
+
+**Caddy 是这个 stack 内的一个服务**，`ports: 80/443`，挂载 `./Caddyfile` —— 不是外部反代。**整份文件没有任何 `networks:` 段**，四个服务全在 compose 的隐式 `default` 网络上，Caddy 靠服务名解析。所以：
+
+- **没有 `caddy_net`**，`edge` 引用会直接报错；
+- 一旦某服务声明了 `networks:`，它就**脱离 `default`**，Caddy 再也解析不到它。故 `mpos-app` 必须显式列 `default`；`mpos-db`/`mpos-minio`/`mpos-minio-init` 只在 `mpos_internal`，隔壁服务够不到。
+
+实跑的服务是 `db`(postgres:16-alpine)、`mpyhw-api`、**`upypi`**（`ghcr.io/freakstudiocn/upypi:main`，服务 upypi.net 包索引，此前不知道）、`caddy`；卷是 `postgres-data`、`upypi-db`、`upypi-pkgs`、`caddy-config`、`caddy-data`。
+
+验证方式：与**真文件**合并后无键碰撞，`docker compose config` 通过，8 服务 / 7 卷齐全，他四个服务的 image 与网络均未变。
+
+### ⚠️ 未决：镜像源可能拉不动
+
+他 stack 里**每一个 Docker Hub 镜像都走了华为云镜像站**（`swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/{postgres,caddy}`），只有自家 GHCR 镜像直连。强烈提示那台机拉不动 Docker Hub。
+
+本方案钉的 `postgres:16.14@sha256:…` 与 `minio/minio@sha256:…` **都是 Docker Hub digest，大概率拉不下来**。`ddn-k8s/docker.io/minio/minio` 是否存在**未经验证**，不要当成事实。落地前必须由 ops owner 实测 `docker pull`。附带后果：走镜像站则 digest 与 Docker Hub 不同，v4 的"digest pin"供应链要求需要重新取值。
 
 ### 保留独立 postgres 容器（推翻"复用现有 pg"）
 
@@ -83,7 +98,7 @@ workflow_dispatch（仅 main + 审批）─→ 同上
   mpos-db          postgres:16.<pin>（mpos_pgdata 卷）
   mpos-minio       minio/minio:<pin>（mpos_miniodata 卷，仅内网）
   mpos-minio-init  一次性 mc 容器（建桶 + app 专用 key，幂等）
-入口: 现有 Caddy（caddy_net）→ mpos.upypi.net → mpos-app:10000
+入口: 栈内 caddy 服务（default 网络）→ mpos.upypi.net → mpos-app:10000
 ```
 
 实施时所有 pin 必须落成**具体值**：postgres/minio 解析到 digest、GitHub Actions 各 action 按 commit SHA 引用、`MPOS_IMAGE` 永远是 `@sha256:` digest。
@@ -196,7 +211,8 @@ mpos.upypi.net {
 
 - **同意把四个服务并进现有 compose.yml**（而不是另起独立栈），以及随之而来的爆炸半径合并。
 - **现有 compose.yml 与 Caddyfile 的当前内容**——仓库里那份是模板不是实跑文件，我们无法读取生产机。粘贴前需据实核对是否已有同名 service/network/volume。
-- 现有栈目录的绝对路径（填进仓库变量 `MPOS_STACK_DIR`）；`caddy_net` 真实名。
+- 现有栈目录的绝对路径（填进仓库变量 `MPOS_STACK_DIR`）。（`caddy_net` 一项作废：无此网络，见 v5。）
+- **实测 `docker pull` 这两个镜像**：`postgres:16.14@sha256:…`、`minio/minio@sha256:…`。拉不动则需给出可用的镜像站路径（他 postgres/caddy 走的是 `swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/...`）。
 - 新服务上机同意；磁盘预算（镜像+Postgres+MinIO 随生成量涨）。
 - 子域名定名 + DNS（切换前压 TTL）。
 - runner 限定到本仓库（label 只是路由不是边界）。
@@ -206,7 +222,7 @@ mpos.upypi.net {
 
 1. **自托管 runner 对共享宿主机是 root 级通道**：允许的 workflow 一旦被攻破即可控整机（含隔壁 mpyhw-api 栈）。缓解：runner 仅限本仓库、deploy job 不 checkout 不跑仓库脚本、无 PR 触发、workflows 目录 CODEOWNERS+保护、dispatch 限 main+审批。接受理由：与插件后端同一既有模式，且部署面已收到最小。
 2. **compose 内联 env 密钥对任何 docker-capable 用户可见**（`docker inspect` 可读，0600 挡不住）：宿主上有 docker 权限≈有密钥，本来如此；同机 mpyhw-api 同模式。缓解：宿主账号最小化 + 轮换流程。
-3. **共享 `caddy_net` 存在横向网络路径**（app 被攻破可达 Caddy 与隔壁服务网络面）：与现状一致；如 ops owner 愿意，可改每应用独立 edge 网（Caddy 挂多网）——列为可选增强，不阻塞。
+3. **共享 `default` 网络存在横向网络路径**（v5 更正措辞：不是 `caddy_net`）。`mpos-app` 与 `mpyhw-api`、`upypi`、`caddy`、插件后端的 `db` 同在 `default` 上，被攻破即可达这些网络面——**含插件后端那个未设密码隔离的 `db`**。与现状一致（他们四个本来就互通），不阻塞。已做的收敛：`mpos-db`/`mpos-minio` 只在 `mpos_internal`，反向不可达。
 
 ## 已知残留风险（须跟踪）
 
