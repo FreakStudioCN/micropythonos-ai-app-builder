@@ -1,10 +1,11 @@
 # Add this block to the host Caddyfile — the same one that already serves
 # blockless.upypi.net for the plugin backend — then reload Caddy.
 #
-# `mpos-app` resolves by service name because it joins the existing `edge`
-# network (caddy_net) declared in the host's compose.yml. Nothing to add there:
-# that network is already defined for the plugin backend, which is why
-# compose.mpos-services.yml references `edge` without redefining it.
+# Caddy is a service in the same compose stack (it publishes :80/:443 and mounts
+# this file), so `mpos-app` resolves by service name over compose's implicit
+# `default` network. That is the whole reason compose.mpos-services.yml lists
+# `default` on mpos-app: a service that declares any network leaves `default`,
+# and Caddy would stop resolving it.
 #
 # Confirm the final hostname with the ops owner before going live.
 mpos.upypi.net {

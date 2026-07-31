@@ -17,8 +17,15 @@
 # collide silently on paste — a duplicate YAML key does not error, it wins.
 # Do not "simplify" the prefixes back out.
 #
-# Already present in the host file, referenced but NOT redefined here:
-#   networks.edge  -> external, the Caddy network (`caddy_net`)
+# Caddy runs INSIDE this stack (a `caddy` service publishing :80/:443 and
+# mounting ./Caddyfile), not as an external proxy on a shared network. The host
+# file declares no networks at all, so every service sits on compose's implicit
+# `default` network and Caddy resolves them by service name.
+#
+# That is why mpos-app lists `default` explicitly: declaring any `networks:` on
+# a service removes it from `default`, and Caddy would stop resolving it. The
+# database and object store stay off `default` so the neighbouring services
+# cannot reach them.
 #
 # Fill the secrets with ./render-compose-block.sh — never by hand. It generates
 # every credential and writes each one to all the places that must agree.
@@ -56,8 +63,8 @@ services:
       DEEPSEEK_MODEL: deepseek-v4-flash
     expose:
       - "10000"              # reached by Caddy over the shared network; NOT published
-    # `edge` is the host file's existing external Caddy network.
-    networks: [edge, mpos_internal]
+    # `default` keeps Caddy able to resolve `mpos-app`; see the header.
+    networks: [default, mpos_internal]
     depends_on:
       mpos-db:
         condition: service_healthy
@@ -197,14 +204,13 @@ services:
         echo "minio-init converged OK"
     logging: *mpos-logging
 
-# Paste into the host file's existing `networks:` map. Do NOT re-add `edge` —
-# it is already there, and a second `edge:` key would silently replace it.
+# The host file has NO `networks:` section — add this one whole.
 networks:
   mpos_internal:
     name: mpos_internal
 
-# Paste into the host file's existing `volumes:` map. Its `pgdata:` key belongs
-# to the plugin backend; these two keys are distinct on purpose.
+# Paste into the host file's existing `volumes:` map, alongside postgres-data,
+# upypi-db, upypi-pkgs, caddy-config and caddy-data.
 volumes:
   mpos_pgdata:
     name: mpos_pgdata
