@@ -1,7 +1,46 @@
 # 国内自托管部署计划（定版 v4）
 
 状态：**已定版，待实施**。v1 2026-07-28；v2 吸收 Codex review R1；v3 吸收 R2（CD 触发机制重设计、首次部署改宿主手工、供应链 pin、显式接受风险清单）；v4 吸收 R3（**source_sha 绑定 CI 通过的 commit**、ci.yml action pin、MinIO 轮换契约修正、multipart 权限、备份口径修正、密钥字符集、Compose 版本前提、tag 触发）。
-本文件取代 Render/Supabase 路线（`render.yaml`、`docs/deployment-render-supabase.md` 随实施 PR 废弃）。
+v5 改为**并入现有栈**（见下节）。本文件取代 Render/Supabase 路线（`render.yaml`、`docs/deployment-render-supabase.md` 随实施 PR 废弃）。
+
+## v5 变更：并入现有 compose，不再另起独立栈
+
+v1–v4 假设新开 `/srv/mpos` 独立栈。**v5 改为把 mpos 的四个服务并进生产机上已经在跑的那份 compose.yml**（即已承载插件后端 `mpyhw-api` 的那份），一份文件、一次 `docker compose up`、一次交接。**以下 v4 正文中所有 `/srv/mpos`、"独立栈"、`db`/`minio`/`minio-init` 服务名，一律以本节为准。**
+
+### 命名前缀是硬要求，不是风格
+
+宿主那份 compose 已经定义了 `db`、`pgdata`、`internal`。原方案的块里有同名键——**YAML 重复键不报错，后者静默覆盖**。已实测：直接粘贴原块，合并结果只剩 5 个服务，`db` 变成 mpos 的 postgres，`volumes.pgdata` 被重指到 `mpos_pgdata`，**插件后端会带着错误的库和错误的数据卷起来**。故全部改名：
+
+| 原 | 现 | 为什么 |
+|---|---|---|
+| `db` | `mpos-db` | 与插件后端的 `db` 服务碰撞 |
+| `minio` / `minio-init` | `mpos-minio` / `mpos-minio-init` | 防御性，宿主文件将来可能有 |
+| `internal` | `mpos_internal` | 与 `internal: name: mpyhw_internal` 碰撞 |
+| `pgdata` | `mpos_pgdata` | 与 `pgdata: name: mpyhw_pgdata` 碰撞 |
+| `edge` | 不再定义，只引用 | 宿主文件已有；重复定义会替换掉它 |
+| `name: mpos` | 删除 | 宿主文件已有 `name: mpyhw` |
+
+验证方式：把块与插件后端 compose 合并后 `docker compose config` 通过，且 6 个服务齐全、`db` 未被改动。
+
+### 保留独立 postgres 容器（推翻"复用现有 pg"）
+
+复用宿主已有的 pg 需要**人工 psql 进生产库执行 `CREATE DATABASE`/`CREATE ROLE`**——postgres 的 init 脚本只在数据目录为空时运行，对已有数据的卷不生效。而独立容器由 `POSTGRES_*` 在空卷上自举，**零宿主往返**。这台机不是我们的，每次"麻烦你上机跑一条命令"都是一轮往返；1G 内存比一轮往返便宜。
+
+### 密钥不再手工填
+
+新增 `deploy/render-compose-block.sh`：生成全部 5 个凭据并写入所有必须一致的位置，末尾断言无残留 `CHANGE-ME`。外部签发的 `DEEPSEEK_API_KEY` 校验 `^sk-[A-Za-z0-9_-]+$`，不符合直接拒绝渲染（含 `$`/`|` 会破坏 compose 插值）。**禁止手工填任何一半**：四组配对值不一致不会在编辑期报错，只会变成起不来的容器或一小时后的 S3 403。
+
+### CD job 的三处相应改动
+
+栈共享之后，原 deploy job 有两处会误伤邻居：
+
+1. **`.env` 整文件覆盖** → 改为**只重写 `MPOS_IMAGE` 那一行**，且**原地写入**（不用临时文件 + `mv`，那会改掉文件的属主与权限——该文件可能属于别的账号）。已实测：邻居行在部署与回滚后均完好，inode 不变。缺 `MPOS_IMAGE` 行则大声失败（首次部署是宿主手工，由它播种）。
+2. **`docker compose up -d --wait` 无 service 参数** → 改为 `... --wait mpos-app`，否则每次 mpos 部署都会重启插件后端。**永远不要加 `--remove-orphans`**，它会拆掉邻居服务。
+3. 栈目录不再写死 `/srv/mpos` → 读仓库变量 `MPOS_STACK_DIR`，未设置则 job 直接失败。
+
+### 接受的新代价
+
+一份 compose 意味着**爆炸半径合并**：该文件语法错误会同时挡住两个服务的部署，宿主上手滑的 `up -d`（不带 service 名）会重启插件后端。以 service 级 scope + 上面的注释缓解，不做机制隔离。
 
 ## 已拍板的决策
 
@@ -37,11 +76,13 @@ push deploy/domestic ──────────────→ image job（�
 main: CI 成功 → workflow_run ──────→ image job → deploy job（upypi runner）
 workflow_dispatch（仅 main + 审批）─→ 同上
 
-生产机 /srv/mpos:
-  mpos-app    ghcr.io/freakstudiocn/micropythonos-ai-app-builder@<digest>（:10000 仅内网）
-  db          postgres:16.<pin>（pgdata 卷）
-  minio       minio/minio:<pin>（miniodata 卷，仅内网）
-  minio-init  一次性 mc 容器（建桶 + app 专用 key，幂等）
+生产机 <MPOS_STACK_DIR>/compose.yml（已存在，承载插件后端；本方案向其追加四个服务）:
+  mpyhw-api        （已在跑，不动）
+  db               （已在跑，插件后端的 postgres，不动）
+  mpos-app         ghcr.io/freakstudiocn/micropythonos-ai-app-builder@<digest>（:10000 仅内网）
+  mpos-db          postgres:16.<pin>（mpos_pgdata 卷）
+  mpos-minio       minio/minio:<pin>（mpos_miniodata 卷，仅内网）
+  mpos-minio-init  一次性 mc 容器（建桶 + app 专用 key，幂等）
 入口: 现有 Caddy（caddy_net）→ mpos.upypi.net → mpos-app:10000
 ```
 
@@ -54,7 +95,7 @@ workflow_dispatch（仅 main + 审批）─→ 同上
 全部服务 `restart: unless-stopped`（`minio-init` 除外，`restart: "no"`）。
 
 - **`mpos-app`**
-  - `image: ${MPOS_IMAGE}`（digest pin，来自 `/srv/mpos/.env`）。
+  - `image: ${MPOS_IMAGE}`（digest pin，来自现有栈目录的 `.env`）。
   - `expose: 10000`；networks `edge`（external caddy 网）+ `internal`；不 publish 宿主端口。
   - healthcheck：`python -c "urllib.request.urlopen('http://127.0.0.1:10000/api/health')"`。
   - `depends_on`: `db: service_healthy`、`minio-init: service_completed_successfully`（`object_storage.py` 导入期 `_ensure_bucket()`、`session_service` 构造期 `restore_all()`，顺序靠编排保证，不改代码兜底）。
@@ -93,7 +134,7 @@ DEEPSEEK_MODEL=deepseek-v4-flash        # 以账号实际可用为准
 
 同源不设 `FRONTEND_ORIGINS`/`VITE_*`；Storage 五变量 all-or-nothing 为预期，不绕。
 
-**密钥装填与宿主处理**：**自生成密钥**（DB 密码、MinIO root/app key、JWT 类）一律 `openssl rand -hex N`（纯 hex：无 `$` 等 Compose 插值敏感字符，DB 密码天然免 percent-encode）；**外部签发凭据**（`DEEPSEEK_API_KEY`）豁免此规则，装填前校验不含 `$`（DeepSeek key 为 `sk-`+字母数字，天然安全；如未来某外部凭据含 `$`，用 `$$` 转义并在 `docker compose config` 输出中核对渲染值）；加密通道传输；`/srv/mpos/compose.yml` 属主部署账号/root、`0600`；不进通用日志采集；备份中按密文对待。绝不入库。
+**密钥装填与宿主处理**：**自生成密钥**（DB 密码、MinIO root/app key、JWT 类）一律 `openssl rand -hex N`（纯 hex：无 `$` 等 Compose 插值敏感字符，DB 密码天然免 percent-encode）；**外部签发凭据**（`DEEPSEEK_API_KEY`）豁免此规则，装填前校验不含 `$`（DeepSeek key 为 `sk-`+字母数字，天然安全；如未来某外部凭据含 `$`，用 `$$` 转义并在 `docker compose config` 输出中核对渲染值）；加密通道传输；宿主那份**共享** compose.yml 属主部署账号/root、`0600`；不进通用日志采集；备份中按密文对待。绝不入库。**v5：装填一律用 `deploy/render-compose-block.sh`，不手工填**。
 
 ### 2. `deploy/Caddyfile.snippet`（新）
 
@@ -103,7 +144,7 @@ mpos.upypi.net {
 }
 ```
 
-### 3. `deploy/env.example`（新，模板）→ 宿主 `/srv/mpos/.env`
+### 3. `deploy/env.example`（新，模板）→ 追加到宿主**现有栈目录**的 `.env`
 
 仅一行非密 pin：`MPOS_IMAGE=ghcr.io/freakstudiocn/micropythonos-ai-app-builder@sha256:<digest>`。
 
@@ -138,8 +179,8 @@ mpos.upypi.net {
 
 1. 实施 PR 于 `deploy/domestic` → CI 绿 → 分支 push 的 image job 出镜像与 digest（含非 root 冒烟）。不合 main。
 2. GHCR package 设 public（或服务器一次性 login）。
-3. **宿主预检**（ops owner + 我们）：**版本前提**——Docker Engine ≥ 24、Compose plugin ≥ v2.20（计划依赖 `service_completed_successfully` 与 `up --wait`，`docker compose version` 实测确认）→ `/srv/mpos` + 0600 compose.yml + `.env`（填 digest）→ `docker compose config` 通过 → 无残留 `CHANGE-ME` 扫描。
-4. **首次部署 = 宿主手工** `docker compose up -d --wait`：`ps` 全 healthy、日志干净（无 storage 缺项/S3 403/DB auth 错误）。
+3. **宿主预检**（ops owner + 我们）：**版本前提**——Docker Engine ≥ 24、Compose plugin ≥ v2.20（计划依赖 `service_completed_successfully` 与 `up --wait`，`docker compose version` 实测确认）→ **先备份现有 compose.yml** → 把 `render-compose-block.sh` 的输出粘进现有 compose.yml 的 `services:`/`networks:`/`volumes:` 三个映射 → 在同目录 `.env` 追加 `MPOS_IMAGE`（填 digest）→ `docker compose config` 通过**且输出里插件后端的 `db`、`pgdata`、`mpyhw_internal` 均未改动** → 无残留 `CHANGE-ME` 扫描。
+4. **首次部署 = 宿主手工** `docker compose up -d --wait mpos-app`（**带 service 名**，否则会重启插件后端；且不加 `--remove-orphans`）：`ps` 全 healthy、日志干净（无 storage 缺项/S3 403/DB auth 错误），并确认 `mpyhw-api` 未被重建。
 5. **先验后端再暴露**：caddy 网络内 `curl mpos-app:10000/api/health` 通过 → 加 Caddyfile snippet + reload → 最后 DNS（提前压 TTL）。
 6. 冒烟：health 四项 + 首页 + `/mpos-web/` + 显式 DB 读写（注册）+ 显式 MinIO 往返（session 对象出现且可读回）。注意 `/api/health` 只报配置不做实时依赖探活——监控不得只信它。
 7. superadmin：`docker compose exec mpos-app python scripts/provision_superadmin.py --target production --username <user> --promote-existing` → 权限矩阵抽查（superadmin 200 / 普通 403）。
@@ -153,8 +194,11 @@ mpos.upypi.net {
 
 ## 需要 ops owner（ben0i0d）确认/提供
 
-- 新栈上机同意；磁盘预算（镜像+Postgres+MinIO 随生成量涨）。
-- 子域名定名 + DNS（切换前压 TTL）；`caddy_net` 真实名；`/srv/mpos` 约定。
+- **同意把四个服务并进现有 compose.yml**（而不是另起独立栈），以及随之而来的爆炸半径合并。
+- **现有 compose.yml 与 Caddyfile 的当前内容**——仓库里那份是模板不是实跑文件，我们无法读取生产机。粘贴前需据实核对是否已有同名 service/network/volume。
+- 现有栈目录的绝对路径（填进仓库变量 `MPOS_STACK_DIR`）；`caddy_net` 真实名。
+- 新服务上机同意；磁盘预算（镜像+Postgres+MinIO 随生成量涨）。
+- 子域名定名 + DNS（切换前压 TTL）。
 - runner 限定到本仓库（label 只是路由不是边界）。
 - 备份纳管：`pg_dump` + `mc mirror`（不做在线卷拷贝），**离机目的地 + 保留期 + 恢复演练**；备份按密文对待。
 

@@ -10,8 +10,17 @@ name: publish-image
 #   - `workflow_dispatch` is restricted to main and verifies that CI succeeded for
 #     the resolved sha before building.
 #   - push to deploy/domestic and v* tags: image build + smoke only, NO deploy.
-#   - the deploy job updates /srv/mpos/.env transactionally (restores the previous
-#     pin and stack on failure) and audits `source_sha` + digest in the job summary.
+#   - the deploy job updates the MPOS_IMAGE line in the shared stack's .env
+#     transactionally (restores the previous pin and stack on failure) and audits
+#     `source_sha` + digest in the job summary. The stack directory is the one
+#     that already holds the plugin backend's compose.yml — set the repository
+#     variable MPOS_STACK_DIR to its path; the job refuses to run without it.
+#
+# SHARED STACK: mpos-app lives in the SAME compose file as the plugin backend
+# (mpyhw-api), so every docker compose call here is scoped to `mpos-app` and the
+# .env rewrite is line-surgical. An unscoped `up -d` would restart the plugin
+# backend on every deployment; a whole-file .env write would delete its lines.
+# Never add --remove-orphans: it would tear down the neighbouring services.
 #
 # SECURITY (red line): NEVER add `pull_request` or `pull_request_target` triggers —
 # the deploy job runs on a self-hosted runner ON the production host; a PR trigger
@@ -165,18 +174,43 @@ jobs:
           DIGEST: ${{ needs.image.outputs.digest }}
           SOURCE_SHA: ${{ needs.image.outputs.source_sha }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          STACK_DIR: ${{ vars.MPOS_STACK_DIR }}
         run: |
           set -euo pipefail
           IMAGE="ghcr.io/freakstudiocn/micropythonos-ai-app-builder@${DIGEST}"
+          if [ -z "${STACK_DIR}" ]; then
+            echo "repository variable MPOS_STACK_DIR is unset — it must point at the" >&2
+            echo "directory holding the shared compose.yml on the production host." >&2
+            exit 1
+          fi
           export DOCKER_CONFIG="$(mktemp -d)"
           trap 'rm -rf "${DOCKER_CONFIG}"' EXIT
           echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker pull "${IMAGE}"
-          cd /srv/mpos
-          OLD_LINE=$(cat .env)
-          printf 'MPOS_IMAGE=%s\n' "${IMAGE}" > .env
+          cd "${STACK_DIR}"
+
+          # The .env is shared with the plugin backend's stack: rewrite ONLY our
+          # pin line, in place, and leave every other line untouched.
+          OLD_PIN=$(sed -n 's/^MPOS_IMAGE=//p' .env)
+          if [ -z "${OLD_PIN}" ]; then
+            echo "no MPOS_IMAGE line in ${STACK_DIR}/.env — the first deployment is" >&2
+            echo "manual and seeds it (see the launch sequence in the plan doc)." >&2
+            exit 1
+          fi
+          # Rewrite in place rather than via a temp file + mv: this .env belongs to
+          # the shared stack and may be owned by another account, so a recreate
+          # would change its owner and mode. The substitution is captured in full
+          # first, so a sed failure aborts under set -e before .env is touched.
+          set_pin() {
+            new=$(sed "s|^MPOS_IMAGE=.*|MPOS_IMAGE=$1|" .env)
+            printf '%s\n' "${new}" > .env
+          }
+
+          set_pin "${IMAGE}"
           deploy_ok=""
-          if docker compose up -d --wait; then
+          # Scoped to mpos-app (compose still starts its depends_on) so a mpos
+          # deployment never restarts the plugin backend in the same file.
+          if docker compose up -d --wait mpos-app; then
             # Assignment inside the condition so an inspect failure counts as a
             # failed verification instead of killing the shell under set -e.
             if RUNNING=$(docker inspect "$(docker compose ps -q mpos-app)" --format '{{.Config.Image}}') \
@@ -185,9 +219,9 @@ jobs:
             fi
           fi
           if [ -z "${deploy_ok}" ]; then
-            echo "deploy or digest verification failed — rolling back to previous pin: ${OLD_LINE}"
-            printf '%s\n' "${OLD_LINE}" > .env
-            docker compose up -d --wait
+            echo "deploy or digest verification failed — rolling back to previous pin: ${OLD_PIN}"
+            set_pin "${OLD_PIN}"
+            docker compose up -d --wait mpos-app
             exit 1
           fi
           echo "deployed source_sha=${SOURCE_SHA} digest=${DIGEST}" >> "${GITHUB_STEP_SUMMARY}"

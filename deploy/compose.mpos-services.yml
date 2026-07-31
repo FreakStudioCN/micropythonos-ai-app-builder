@@ -1,43 +1,43 @@
-# compose.yml — self-contained production stack for the MicroPythonOS AI App Builder
-# (same-origin frontend + FastAPI + /mpos-web) behind an EXISTING Caddy reverse proxy.
-# Modeled on cursor_for_hardware/mpyhw-api/deploy/compose.yml; everything inline, no
-# secrets outside this file except the image pin in /srv/mpos/.env (MPOS_IMAGE).
+# MicroPythonOS AI App Builder — the services to ADD to the production host's
+# EXISTING compose stack (the one that already runs the plugin backend
+# `mpyhw-api` behind Caddy). This is a PASTE SOURCE, not a runnable file.
 #
-# Host layout:  /srv/mpos/compose.yml  (THIS file, filled; owner root/deploy, mode 0600)
-#               /srv/mpos/.env         (single line: MPOS_IMAGE=ghcr.io/...@sha256:...)
+# ┌─ READ THIS FIRST ────────────────────────────────────────────────────────┐
+# │ Do NOT copy this file to the server as `compose.yml`. It has no project  │
+# │ `name:` and no `edge:` network on purpose — both already exist in the    │
+# │ host's file. Copying it over would orphan the running plugin backend.    │
+# │                                                                          │
+# │ The host keeps ONE compose file and ONE `docker compose up`. Paste the   │
+# │ four services below into its `services:` map, and the network + volumes  │
+# │ into its `networks:` / `volumes:` maps.                                  │
+# └──────────────────────────────────────────────────────────────────────────┘
 #
-# BEFORE RUNNING, fill every CHANGE-ME:
-#   [DB-PW]   openssl rand -hex 16 — written in TWO spots that MUST match
-#             (inside DATABASE_URL and POSTGRES_PASSWORD)
-#   [S3-ROOT] openssl rand -hex 16 (user) / -hex 32 (password) — MinIO bootstrap only
-#   [S3-APP]  access key id: openssl rand -hex 8; secret: openssl rand -hex 32 —
-#             written in TWO spots each (mpos-app env and minio-init env). Rotation
-#             changes ONLY the secret; the key id is the MinIO username and stays fixed.
-#   DEEPSEEK_API_KEY — externally issued (sk-...); verify it contains no `$`.
-# All self-generated secrets are pure hex on purpose: no $ (compose interpolation),
-# no URL-encoding needed inside DATABASE_URL.
-# Set the real Caddy network name under `networks: edge:` at the bottom.
-# NEVER commit a filled copy of this file.
+# Every name here is `mpos`-prefixed because the host file already defines
+# `db`, `pgdata` and `internal` for the plugin backend. Those three would
+# collide silently on paste — a duplicate YAML key does not error, it wins.
+# Do not "simplify" the prefixes back out.
 #
-# Requires Docker Engine >= 24 and docker compose plugin >= v2.20
-# (uses `service_completed_successfully` and `up --wait`).
+# Already present in the host file, referenced but NOT redefined here:
+#   networks.edge  -> external, the Caddy network (`caddy_net`)
 #
-# Run:  docker compose up -d --wait
-
-name: mpos
+# Fill the secrets with ./render-compose-block.sh — never by hand. It generates
+# every credential and writes each one to all the places that must agree.
+#
+# Requires Docker Engine >= 24 and compose plugin >= v2.20
+# (`service_completed_successfully`, `up --wait`).
 
 services:
   mpos-app:
-    # Immutable digest pin, supplied by /srv/mpos/.env (updated by the deploy job).
+    # Immutable digest pin from the stack dir's .env (rewritten by the deploy job).
     image: ${MPOS_IMAGE}
     restart: unless-stopped
     environment:
-      # [DB-PW] password here MUST equal POSTGRES_PASSWORD in the db service.
-      DATABASE_URL: postgresql://mpos:CHANGE-ME-DB-PW-hex16@db:5432/mpos
+      # [DB-PW] MUST equal POSTGRES_PASSWORD in mpos-db.
+      DATABASE_URL: postgresql://mpos:CHANGE-ME-DB-PW-hex16@mpos-db:5432/mpos
 
-      MPOS_STORAGE_ENDPOINT: http://minio:9000
+      MPOS_STORAGE_ENDPOINT: http://mpos-minio:9000
       MPOS_STORAGE_REGION: us-east-1
-      # [S3-APP] MUST equal MPOS_INIT_APP_KEY / MPOS_INIT_APP_SECRET in minio-init.
+      # [S3-APP] MUST equal MPOS_INIT_APP_KEY / MPOS_INIT_APP_SECRET in mpos-minio-init.
       MPOS_STORAGE_ACCESS_KEY_ID: CHANGE-ME-app-key-hex8
       MPOS_STORAGE_SECRET_ACCESS_KEY: CHANGE-ME-app-secret-hex32
       MPOS_STORAGE_BUCKET: mpos-sessions
@@ -56,11 +56,12 @@ services:
       DEEPSEEK_MODEL: deepseek-v4-flash
     expose:
       - "10000"              # reached by Caddy over the shared network; NOT published
-    networks: [edge, internal]
+    # `edge` is the host file's existing external Caddy network.
+    networks: [edge, mpos_internal]
     depends_on:
-      db:
+      mpos-db:
         condition: service_healthy
-      minio-init:
+      mpos-minio-init:
         condition: service_completed_successfully
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:10000/api/health')"]
@@ -74,13 +75,17 @@ services:
     mem_limit: 2g
     cpus: 2
     pids_limit: 512
-    logging: &default-logging
+    logging: &mpos-logging
       driver: json-file
       options:
         max-size: 10m
         max-file: "3"
 
-  db:
+  # A dedicated Postgres, NOT the plugin backend's. Reusing that one would need a
+  # manual CREATE DATABASE/CREATE ROLE against a live production DB by the ops
+  # owner — postgres init scripts only run on an empty data dir. This container
+  # self-bootstraps from POSTGRES_* on an empty volume: zero host round-trips.
+  mpos-db:
     image: postgres:16.14@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
     restart: unless-stopped
     environment:
@@ -89,8 +94,8 @@ services:
       # [DB-PW] MUST equal the password inside DATABASE_URL above.
       POSTGRES_PASSWORD: CHANGE-ME-DB-PW-hex16
     volumes:
-      - pgdata:/var/lib/postgresql/data
-    networks: [internal]
+      - mpos_pgdata:/var/lib/postgresql/data
+    networks: [mpos_internal]
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U mpos -d mpos"]
       interval: 5s
@@ -98,19 +103,19 @@ services:
       retries: 20
     mem_limit: 1g
     pids_limit: 256
-    logging: *default-logging
+    logging: *mpos-logging
 
-  minio:
+  mpos-minio:
     image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
     restart: unless-stopped
     command: server /data
     environment:
-      # [S3-ROOT] bootstrap credentials; only minio-init uses them, the app never does.
+      # [S3-ROOT] bootstrap credentials; only mpos-minio-init uses them, the app never does.
       MINIO_ROOT_USER: CHANGE-ME-root-user-hex16
       MINIO_ROOT_PASSWORD: CHANGE-ME-root-pw-hex32
     volumes:
-      - miniodata:/data
-    networks: [internal]
+      - mpos_miniodata:/data
+    networks: [mpos_internal]
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
       interval: 10s
@@ -118,30 +123,30 @@ services:
       retries: 12
     mem_limit: 1g
     pids_limit: 256
-    logging: *default-logging
+    logging: *mpos-logging
 
   # One-shot convergence: bucket + app credential + least-privilege policy.
   # Idempotent; rerun after rotating the app secret (it re-creates the MinIO user).
   # MinIO cannot read back a stored secret, so convergence is probed by actually
   # authenticating with the target app credentials.
-  minio-init:
+  mpos-minio-init:
     image: minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
     restart: "no"
     environment:
-      MINIO_ROOT_USER: CHANGE-ME-root-user-hex16          # = minio service value
-      MINIO_ROOT_PASSWORD: CHANGE-ME-root-pw-hex32        # = minio service value
+      MINIO_ROOT_USER: CHANGE-ME-root-user-hex16          # = mpos-minio value
+      MINIO_ROOT_PASSWORD: CHANGE-ME-root-pw-hex32        # = mpos-minio value
       MPOS_INIT_APP_KEY: CHANGE-ME-app-key-hex8           # = MPOS_STORAGE_ACCESS_KEY_ID
       MPOS_INIT_APP_SECRET: CHANGE-ME-app-secret-hex32    # = MPOS_STORAGE_SECRET_ACCESS_KEY
-    networks: [internal]
+    networks: [mpos_internal]
     depends_on:
-      minio:
+      mpos-minio:
         condition: service_healthy
     entrypoint: ["/bin/sh", "-ec"]
     command:
       - |
-        mc alias set root http://minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
+        mc alias set root http://mpos-minio:9000 "$$MINIO_ROOT_USER" "$$MINIO_ROOT_PASSWORD"
         mc mb --ignore-existing root/mpos-sessions
-        if mc alias set appprobe http://minio:9000 "$$MPOS_INIT_APP_KEY" "$$MPOS_INIT_APP_SECRET" >/dev/null 2>&1 \
+        if mc alias set appprobe http://mpos-minio:9000 "$$MPOS_INIT_APP_KEY" "$$MPOS_INIT_APP_SECRET" >/dev/null 2>&1 \
            && mc ls appprobe/mpos-sessions >/dev/null 2>&1; then
           echo "app credential already converged"
         else
@@ -187,20 +192,21 @@ services:
           *" mpos-app-rw "*) echo "policy already attached" ;;
           *) mc admin policy attach root mpos-app-rw --user "$$MPOS_INIT_APP_KEY" ;;
         esac
-        mc alias set appverify http://minio:9000 "$$MPOS_INIT_APP_KEY" "$$MPOS_INIT_APP_SECRET"
+        mc alias set appverify http://mpos-minio:9000 "$$MPOS_INIT_APP_KEY" "$$MPOS_INIT_APP_SECRET"
         mc ls appverify/mpos-sessions
         echo "minio-init converged OK"
-    logging: *default-logging
+    logging: *mpos-logging
 
+# Paste into the host file's existing `networks:` map. Do NOT re-add `edge` —
+# it is already there, and a second `edge:` key would silently replace it.
 networks:
-  edge:
-    external: true
-    name: caddy_net          # <-- CHANGE to the host's real Caddy docker network name
-  internal:
+  mpos_internal:
     name: mpos_internal
 
+# Paste into the host file's existing `volumes:` map. Its `pgdata:` key belongs
+# to the plugin backend; these two keys are distinct on purpose.
 volumes:
-  pgdata:
+  mpos_pgdata:
     name: mpos_pgdata
-  miniodata:
+  mpos_miniodata:
     name: mpos_miniodata
