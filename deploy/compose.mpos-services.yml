@@ -3,19 +3,22 @@
 # `mpyhw-api` behind Caddy). This is a PASTE SOURCE, not a runnable file.
 #
 # ┌─ READ THIS FIRST ────────────────────────────────────────────────────────┐
-# │ Do NOT copy this file to the server as `compose.yml`. It has no project  │
-# │ `name:` and no `edge:` network on purpose — both already exist in the    │
-# │ host's file. Copying it over would orphan the running plugin backend.    │
-# │                                                                          │
-# │ The host keeps ONE compose file and ONE `docker compose up`. Paste the   │
-# │ four services below into its `services:` map, and the network + volumes  │
-# │ into its `networks:` / `volumes:` maps.                                  │
+# │ Do NOT copy this file to the server as `compose.yml`. The host keeps ONE │
+# │ compose file and ONE `docker compose up`: paste the four services below  │
+# │ into its `services:` map, the two volumes into its `volumes:` map, and    │
+# │ the `networks:` section whole (it has none today).                        │
 # └──────────────────────────────────────────────────────────────────────────┘
 #
-# Every name here is `mpos`-prefixed because the host file already defines
-# `db`, `pgdata` and `internal` for the plugin backend. Those three would
-# collide silently on paste — a duplicate YAML key does not error, it wins.
-# Do not "simplify" the prefixes back out.
+# There is deliberately no top-level `name:` here. The host file has none
+# either, so its project name comes from the stack directory. Introducing one
+# would rename the project, and every running container — the plugin backend
+# and Caddy included — would become an orphan of the new one.
+#
+# The host file's services are `db`, `mpyhw-api`, `upypi` and `caddy`; its
+# volumes are `postgres-data`, `upypi-db`, `upypi-pkgs`, `caddy-config` and
+# `caddy-data`. `db` is why everything here is `mpos`-prefixed: a duplicate
+# YAML key does not error, it silently wins, and an unprefixed `db` would take
+# over the plugin backend's database. Do not "simplify" the prefixes back out.
 #
 # Caddy runs INSIDE this stack (a `caddy` service publishing :80/:443 and
 # mounting ./Caddyfile), not as an external proxy on a shared network. The host
@@ -32,6 +35,12 @@
 #
 # Requires Docker Engine >= 24 and compose plugin >= v2.20
 # (`service_completed_successfully`, `up --wait`).
+#
+# Images come from the host's Huawei Cloud mirror, not Docker Hub, which that
+# machine cannot reach. That costs the digest pinning the plan asked for: a
+# mirrored image has a different digest, and it can only be read after the
+# first pull on the host. Resolve them there and pin in a follow-up. MPOS_IMAGE
+# is unaffected — it is ours, on GHCR, and stays a digest.
 
 services:
   mpos-app:
@@ -93,7 +102,11 @@ services:
   # owner — postgres init scripts only run on an empty data dir. This container
   # self-bootstraps from POSTGRES_* on an empty volume: zero host round-trips.
   mpos-db:
-    image: postgres:16.14@sha256:33f923b05f64ca54ac4401c01126a6b92afe839a0aa0a52bc5aeb5cc958e5f20
+    # Deliberately the SAME image the host already runs for the plugin backend:
+    # proven pullable on that machine, and the layers are already cached there.
+    # Docker Hub is not reachable from it — every Hub image in the host stack
+    # goes through this mirror — so a docker.io digest pin would simply fail.
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/postgres:16-alpine
     restart: unless-stopped
     environment:
       POSTGRES_USER: mpos
@@ -113,7 +126,11 @@ services:
     logging: *mpos-logging
 
   mpos-minio:
-    image: minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
+    # UNVERIFIED: the mirror path is inferred from the host's postgres/caddy
+    # entries (ddn-k8s/docker.io/<org>/<image>). The registry answers 401 to an
+    # anonymous probe even for images known to exist, so existence cannot be
+    # checked from outside. `docker pull` this on the host BEFORE going live.
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
     restart: unless-stopped
     command: server /data
     environment:
@@ -123,6 +140,13 @@ services:
     volumes:
       - mpos_miniodata:/data
     networks: [mpos_internal]
+    # VERIFY ON THE HOST BEFORE THE FIRST DEPLOY: this assumes `curl` exists in
+    # the MinIO image. Recent MinIO images run on a minimal base and their own
+    # docs moved to `mc ready local`. If curl is absent the check can never
+    # pass, mpos-minio-init never runs (it waits for service_healthy), mpos-app
+    # never starts, and `up -d --wait` just times out — it reads as a hang, not
+    # as a bad healthcheck. One command settles it:
+    #   docker run --rm --entrypoint sh <image> -c 'command -v curl mc'
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
       interval: 10s
@@ -137,7 +161,8 @@ services:
   # MinIO cannot read back a stored secret, so convergence is probed by actually
   # authenticating with the target app credentials.
   mpos-minio-init:
-    image: minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    # Same unverified mirror path as mpos-minio — pull-test both together.
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
     restart: "no"
     environment:
       MINIO_ROOT_USER: CHANGE-ME-root-user-hex16          # = mpos-minio value

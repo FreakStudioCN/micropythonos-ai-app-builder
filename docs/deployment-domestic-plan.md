@@ -111,7 +111,7 @@ workflow_dispatch（仅 main + 审批）─→ 同上
 
 - **`mpos-app`**
   - `image: ${MPOS_IMAGE}`（digest pin，来自现有栈目录的 `.env`）。
-  - `expose: 10000`；networks `edge`（external caddy 网）+ `internal`；不 publish 宿主端口。
+  - `expose: 10000`；networks `default`（栈内 caddy 靠它解析）+ `mpos_internal`；不 publish 宿主端口。（v5 更正：原写 `edge`（external caddy 网）+ `internal`，两者都不存在。）
   - healthcheck：`python -c "urllib.request.urlopen('http://127.0.0.1:10000/api/health')"`。
   - `depends_on`: `db: service_healthy`、`minio-init: service_completed_successfully`（`object_storage.py` 导入期 `_ensure_bucket()`、`session_service` 构造期 `restore_all()`，顺序靠编排保证，不改代码兜底）。
   - 加固：非 root 用户运行（见第 6 件）、`cap_drop: [ALL]`、`security_opt: [no-new-privileges:true]`；**限额给数**：`mem_limit: 2g`、`cpus: 2`、`pids_limit: 512`；日志 `json-file` + `max-size: 10m, max-file: "3"`（所有服务同）。不挂 docker socket，无 privileged。
@@ -196,7 +196,7 @@ mpos.upypi.net {
 2. GHCR package 设 public（或服务器一次性 login）。
 3. **宿主预检**（ops owner + 我们）：**版本前提**——Docker Engine ≥ 24、Compose plugin ≥ v2.20（计划依赖 `service_completed_successfully` 与 `up --wait`，`docker compose version` 实测确认）→ **先备份现有 compose.yml** → 把 `render-compose-block.sh` 的输出粘进现有 compose.yml 的 `services:`/`networks:`/`volumes:` 三个映射 → 在同目录 `.env` 追加 `MPOS_IMAGE`（填 digest）→ `docker compose config` 通过**且输出里插件后端的 `db`、`pgdata`、`mpyhw_internal` 均未改动** → 无残留 `CHANGE-ME` 扫描。
 4. **首次部署 = 宿主手工** `docker compose up -d --wait mpos-app`（**带 service 名**，否则会重启插件后端；且不加 `--remove-orphans`）：`ps` 全 healthy、日志干净（无 storage 缺项/S3 403/DB auth 错误），并确认 `mpyhw-api` 未被重建。
-5. **先验后端再暴露**：caddy 网络内 `curl mpos-app:10000/api/health` 通过 → 加 Caddyfile snippet + reload → 最后 DNS（提前压 TTL）。
+5. **先验后端再暴露**：`docker compose exec caddy wget -qO- http://mpos-app:10000/api/health` 通过（Caddy 在栈内，从它自己容器里验才是真链路）→ 编辑与 compose.yml 同目录的 `Caddyfile` 追加 vhost → `docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile`（**别 `up -d` 或重启 caddy 服务**，那会连带影响另外两个站）→ 最后 DNS（提前压 TTL）。
 6. 冒烟：health 四项 + 首页 + `/mpos-web/` + 显式 DB 读写（注册）+ 显式 MinIO 往返（session 对象出现且可读回）。注意 `/api/health` 只报配置不做实时依赖探活——监控不得只信它。
 7. superadmin：`docker compose exec mpos-app python scripts/provision_superadmin.py --target production --username <user> --promote-existing` → 权限矩阵抽查（superadmin 200 / 普通 403）。
 8. 真实生成：澄清 → 生成（50→40）→ MPK 下载 → WASM 预览。
@@ -212,7 +212,8 @@ mpos.upypi.net {
 - **同意把四个服务并进现有 compose.yml**（而不是另起独立栈），以及随之而来的爆炸半径合并。
 - **现有 compose.yml 与 Caddyfile 的当前内容**——仓库里那份是模板不是实跑文件，我们无法读取生产机。粘贴前需据实核对是否已有同名 service/network/volume。
 - 现有栈目录的绝对路径（填进仓库变量 `MPOS_STACK_DIR`）。（`caddy_net` 一项作废：无此网络，见 v5。）
-- **实测 `docker pull` 这两个镜像**：`postgres:16.14@sha256:…`、`minio/minio@sha256:…`。拉不动则需给出可用的镜像站路径（他 postgres/caddy 走的是 `swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/...`）。
+- **实测 `docker pull` 这两个镜像**：`.../ddn-k8s/docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z` 与 `.../minio/mc:RELEASE.2025-08-13T08-35-41Z`。路径是按他 postgres/caddy 的命名规律推的，**未验证**——匿名探 registry 一律 401（连已知存在的 `library/postgres` 也 401），外部证不了。拉不动就要他给可用路径或换自建镜像。（postgres 已改用他正在跑的那个 `library/postgres:16-alpine`，无此风险。）
+- **实测 MinIO 镜像里有没有 `curl`**：`docker run --rm --entrypoint sh <minio镜像> -c 'command -v curl mc'`。没有的话 healthcheck 永远不过 → init 不跑 → app 不起 → `up --wait` 超时，**症状是"卡住"不是"健康检查配错"**。届时改用 `mc ready local`。
 - 新服务上机同意；磁盘预算（镜像+Postgres+MinIO 随生成量涨）。
 - 子域名定名 + DNS（切换前压 TTL）。
 - runner 限定到本仓库（label 只是路由不是边界）。
