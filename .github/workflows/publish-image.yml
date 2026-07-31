@@ -64,6 +64,15 @@ jobs:
           set -euo pipefail
           case "${{ github.event_name }}" in
             workflow_run)
+              # `branches: [main]` filters the TRIGGERING run's head_branch, not a
+              # base ref. A fork PR whose head branch is itself named `main`
+              # produces a CI run that matches this filter, and building its
+              # head_sha would ship fork-authored code to the production host —
+              # exactly the hole the `pull_request` ban above exists to close,
+              # reached indirectly. Require a push, from this repository, on main.
+              test "${{ github.event.workflow_run.event }}" = "push"
+              test "${{ github.event.workflow_run.head_repository.full_name }}" = "${{ github.repository }}"
+              test "${{ github.event.workflow_run.head_branch }}" = "main"
               sha="${{ github.event.workflow_run.head_sha }}"
               ;;
             workflow_dispatch)
@@ -184,28 +193,48 @@ jobs:
             exit 1
           fi
           export DOCKER_CONFIG="$(mktemp -d)"
-          trap 'rm -rf "${DOCKER_CONFIG}"' EXIT
+          # ONE exit handler, because a second `trap ... EXIT` would silently
+          # replace this one and leave the GHCR credentials on the host. It also
+          # carries the pin rollback: a job timeout or a manual cancel kills this
+          # shell outright, so the rollback further down would never run and .env
+          # would stay pinned to a digest that never came up. Restoring the pin
+          # is all it does — a compose call here could be killed mid-flight too;
+          # the next deploy or a manual `up -d` then lands on the good digest.
+          rollback_armed=""
+          cleanup() {
+            if [ -n "${rollback_armed}" ]; then
+              echo "interrupted before verification — restoring pin: ${OLD_PIN}" >&2
+              set_pin "${OLD_PIN}"
+            fi
+            rm -rf "${DOCKER_CONFIG}"
+          }
+          trap cleanup EXIT INT TERM
           echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
           docker pull "${IMAGE}"
           cd "${STACK_DIR}"
 
-          # The .env is shared with the plugin backend's stack: rewrite ONLY our
-          # pin line, in place, and leave every other line untouched.
+          # This .env is shared with the plugin backend's stack. Only the
+          # MPOS_IMAGE line changes; every other line is carried through
+          # verbatim. The write itself is a whole-file rewrite, not a one-line
+          # patch — see set_pin for why it is done in place.
           OLD_PIN=$(sed -n 's/^MPOS_IMAGE=//p' .env)
           if [ -z "${OLD_PIN}" ]; then
             echo "no MPOS_IMAGE line in ${STACK_DIR}/.env — the first deployment is" >&2
             echo "manual and seeds it (see the launch sequence in the plan doc)." >&2
             exit 1
           fi
-          # Rewrite in place rather than via a temp file + mv: this .env belongs to
-          # the shared stack and may be owned by another account, so a recreate
-          # would change its owner and mode. The substitution is captured in full
-          # first, so a sed failure aborts under set -e before .env is touched.
+          # In place rather than temp-file + mv: this .env belongs to the shared
+          # stack and may be owned by another account, and a recreate would take
+          # its owner and mode with it. The cost is that the write is not atomic
+          # — accepted, because the alternative can fail every deploy outright.
+          # The substitution is captured in full first, so a sed failure aborts
+          # under set -e before .env is opened for writing.
           set_pin() {
             new=$(sed "s|^MPOS_IMAGE=.*|MPOS_IMAGE=$1|" .env)
             printf '%s\n' "${new}" > .env
           }
 
+          rollback_armed=1
           set_pin "${IMAGE}"
           deploy_ok=""
           # Scoped to mpos-app (compose still starts its depends_on) so a mpos
@@ -220,8 +249,12 @@ jobs:
           fi
           if [ -z "${deploy_ok}" ]; then
             echo "deploy or digest verification failed — rolling back to previous pin: ${OLD_PIN}"
+            # Disarm first: this branch does the full rollback (pin AND stack),
+            # so the exit handler must not repeat the pin write on the way out.
+            rollback_armed=""
             set_pin "${OLD_PIN}"
             docker compose up -d --wait mpos-app
             exit 1
           fi
+          rollback_armed=""
           echo "deployed source_sha=${SOURCE_SHA} digest=${DIGEST}" >> "${GITHUB_STEP_SUMMARY}"
