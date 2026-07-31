@@ -9,16 +9,18 @@ v1–v4 假设新开 `/srv/mpos` 独立栈。**v5 改为把 mpos 的四个服务
 
 ### 命名前缀是硬要求，不是风格
 
-宿主那份 compose 已经定义了 `db`、`pgdata`、`internal`。原方案的块里有同名键——**YAML 重复键不报错，后者静默覆盖**。已实测：直接粘贴原块，合并结果只剩 5 个服务，`db` 变成 mpos 的 postgres，`volumes.pgdata` 被重指到 `mpos_pgdata`，**插件后端会带着错误的库和错误的数据卷起来**。故全部改名：
+**YAML 重复键不报错，后者静默覆盖。** 对着**真机文件**核过之后，改动分三类 —— 下表按「是不是真碰撞」分开，别把防御性改名和真问题混为一谈：
 
-| 原 | 现 | 为什么 |
+| 原 | 现 | 性质 |
 |---|---|---|
-| `db` | `mpos-db` | 与插件后端的 `db` 服务碰撞 |
-| `minio` / `minio-init` | `mpos-minio` / `mpos-minio-init` | 防御性，宿主文件将来可能有 |
-| `internal` | `mpos_internal` | 与 `internal: name: mpyhw_internal` 碰撞 |
-| `pgdata` | `mpos_pgdata` | 与 `pgdata: name: mpyhw_pgdata` 碰撞 |
-| `edge`（external `caddy_net`） | 改为 `default` | **该网络不存在**，见下 |
-| `name: mpos` | 删除 | 宿主文件无顶层 `name:`，项目名取自目录名 |
+| `db` | `mpos-db` | 🔴 **真碰撞** —— 他确实有 `db` 服务。不改就会顶替掉插件后端的数据库 |
+| `edge`（external `caddy_net`） | 改为 `default` | 🔴 **真故障** —— 该网络根本不存在，`config` 直接报错；且声明任何 `networks:` 就会脱离 `default`，Caddy 解析不到（见下节） |
+| `name: mpos` | 删除 | 🔴 **真危险** —— 他没有顶层 `name:`，项目名取自目录名。加一个＝改项目名，**他所有在跑的容器（含 Caddy）立刻变孤儿** |
+| `internal` | `mpos_internal` | 🟡 防御性 —— 他一个 network 都没声明，当前不碰撞 |
+| `pgdata` | `mpos_pgdata` | 🟡 防御性 —— 他的卷叫 `postgres-data`，当前不碰撞 |
+| `minio` / `minio-init` | `mpos-minio` / `mpos-minio-init` | 🟡 防御性 —— 他没有这两个服务 |
+
+> 早期版本这张表声称他有 `pgdata` 和 `internal` 并会碰撞。那是**对着仓库模板**推的，不是真机。真机上只有 `db` 一个真碰撞。防御性改名仍然保留（成本为零，且挡住他将来加同名键），但不要再把它们当成"已发生的故障"来引用。
 
 ### 宿主实际架构（2026-07-31 拿到真文件后更正，v1–v4 全部搞错了）
 
@@ -108,9 +110,13 @@ workflow_dispatch（仅 main + 审批）─→ 同上
 
 ## 仓库改动清单（实施分支 `deploy/domestic`，6 件）
 
-### 1. `deploy/compose.yml`（新）
+### 1. `deploy/compose.mpos-services.yml`（新；v5 由 `deploy/compose.yml` 改名）
 
-全部服务 `restart: unless-stopped`（`minio-init` 除外，`restart: "no"`）。
+改名是因为它**不再是一份可独立运行的 compose**，而是往宿主现有文件里粘的**片段**：没有顶层 `name:`，`default` 网络也依赖宿主文件。叫 `compose.yml` 会诱导人整份 scp 上去覆盖——那正是最坏的操作。
+
+配套新增 `deploy/render-compose-block.sh`（第 3.5 件），装填密钥一律走它。
+
+全部服务 `restart: unless-stopped`（`mpos-minio-init` 除外，`restart: "no"`）。
 
 - **`mpos-app`**
   - `image: ${MPOS_IMAGE}`（digest pin，来自现有栈目录的 `.env`）。
