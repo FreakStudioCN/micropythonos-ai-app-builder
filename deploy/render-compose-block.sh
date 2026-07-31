@@ -64,7 +64,12 @@ if printf '%s' "${rendered}" | grep -n 'CHANGE-ME'; then
 fi
 
 if [ -n "${OUT}" ]; then
+  # umask only governs CREATION. Redirecting into a file that already exists
+  # keeps its current mode, so a rerun over a 0644 path would leave live
+  # credentials world-readable while this still printed "0600". chmod covers
+  # both cases.
   ( umask 077; printf '%s\n' "${rendered}" > "${OUT}" )
+  chmod 600 "${OUT}"
   echo "wrote ${OUT} (0600) — contains live secrets, transmit over an encrypted channel only" >&2
 else
   printf '%s\n' "${rendered}"

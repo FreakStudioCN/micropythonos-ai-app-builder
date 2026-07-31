@@ -75,6 +75,7 @@ v1–v4 假设新开 `/srv/mpos` 独立栈。**v5 改为把 mpos 的四个服务
 2. **新工作全在分支 `deploy/domestic`**。分支 push 只构建镜像（含容器冒烟），**不部署**。
 3. **首次生产部署 = 宿主机手工执行**（`workflow_dispatch` 只能触发默认分支上已存在的 workflow，分支阶段机制上不可用；手工路径见「首次上线序列」，这是主路径不是兜底）。
 4. 合并 main 后的常态 CD：`CI 成功(main) → workflow_run → build → deploy`；`workflow_dispatch` 仅允许 main ref 且过 `production` environment 审批。
+   ⚠️ **v5 实测：`production` environment 目前根本不存在**（API 404）。workflow 里写了 `environment: production`，GitHub 会在首次用到时自动建一个**没有任何保护规则**的同名环境 —— 也就是说「required reviewers 审批」这道门现在是空的。**切换日前必须手工建好该 environment 并配上 required reviewers**，否则本文多处把它当作缓解措施的地方都不成立。
 5. 过渡期给老站发修复：erkou111 在其 Render 面板手动 deploy；本仓库不持有其密钥。
 6. 待 erkou111 确认：关闭老服务的 Render 原生 Auto-Deploy。
 
@@ -101,7 +102,9 @@ workflow_dispatch（仅 main + 审批）─→ 同上
 入口: 栈内 caddy 服务（default 网络）→ mpos.upypi.net → mpos-app:10000
 ```
 
-实施时所有 pin 必须落成**具体值**：postgres/minio 解析到 digest、GitHub Actions 各 action 按 commit SHA 引用、`MPOS_IMAGE` 永远是 `@sha256:` digest。
+实施时所有 pin 必须落成**具体值**：GitHub Actions 各 action 按 commit SHA 引用、`MPOS_IMAGE` 永远是 `@sha256:` digest。
+
+> **v5 例外（postgres/minio 的 digest pin 暂缓）**：这三个镜像改走华为云镜像站后，digest 与 Docker Hub 不同，且只能在宿主首次 pull 之后才读得到，所以当前用的是 tag。**这确实不满足本文原定的硬门**，代价是 tag 可变——缓存清掉后重拉可能拿到不同字节，回滚不再可复现。补法：首次部署后在宿主 `docker images --digests` 取值，回填成 digest 并单独提一个 PR。
 
 ## 仓库改动清单（实施分支 `deploy/domestic`，6 件）
 
@@ -173,7 +176,8 @@ mpos.upypi.net {
   - `workflow_run: workflows [CI], types [completed], branches [main]` → CI **成功**才 build+deploy（deploy 从此门在测试之后）；
   - `workflow_dispatch` → 仅当 `github.ref == 'refs/heads/main'`。
   - **🔒 永不添加 `pull_request`/`pull_request_target`**；自托管 job 不 checkout、不跑仓库脚本。
-- **`source_sha` 绑定（CI 门的完整性所在）**：每种触发先解析唯一 `source_sha`——`workflow_run` 路径**必须**取 `github.event.workflow_run.head_sha`（即真正通过 CI 的 commit），push/tag 取 `github.sha`，dispatch 先用 `gh api` 校验该 sha 的 CI conclusion==success 再继续。**checkout、构建、`sha-<source_sha>` 打标、部署审计输出全部用这一个 sha**——普通 checkout 会拿到 main 当前 HEAD，可能是未过 CI 的更新 commit，等于绕开 CI 门。
+- **`source_sha` 绑定（CI 门的完整性所在）**：每种触发先解析唯一 `source_sha`——`workflow_run` 路径**必须**取 `github.event.workflow_run.head_sha`（即真正通过 CI 的 commit），push/tag 取 `github.sha`，dispatch 先用 `gh api` 校验该 sha 的 CI conclusion==success 再继续。
+- 🔒 **`workflow_run` 三重来源校验（v5 新增，堵一个真实的 fork 提权路径）**：`branches: [main]` 过滤的是**触发方 run 的 head_branch**，不是 base ref。**fork 作者只要把自己的分支也命名为 `main`，其 PR 的 CI run 就能匹配上**，于是 `head_sha` 指向 fork 代码 → image job 构建它 → deploy job 把它推上生产机。这等于绕开上面那条「永不加 `pull_request`」的红线。故在解析 `source_sha` 前硬断言三条：`workflow_run.event == "push"`、`workflow_run.head_repository.full_name == github.repository`、`workflow_run.head_branch == "main"`。**checkout、构建、`sha-<source_sha>` 打标、部署审计输出全部用这一个 sha**——普通 checkout 会拿到 main 当前 HEAD，可能是未过 CI 的更新 commit，等于绕开 CI 门。
 - **`image` job**（ubuntu-latest，`timeout-minutes: 30`，权限 `contents: read, packages: write, actions: read`——`actions: read` 供 dispatch 路径查 CI conclusion）：checkout `source_sha`（`submodules: false`）→ 仅 `git submodule update --init vendor/MicroPython_Skills` → buildx 构建根 `./Dockerfile` → **容器冒烟**：以默认 env 起容器（本地 sqlite/文件模式），非 root 身份确认 + `curl /api/health` 200 → push GHCR（`latest`@main、`sha-<source_sha>`、tag 触发时 semver）→ **将 `source_sha` 与 `digest` 一并声明为 job outputs**（deploy job 经 `needs.image.outputs.*` 消费，两条链都闭合）。所有 action 按 commit SHA pin。
 - **`deploy` job**（`runs-on: [self-hosted, Linux, X64, upypi]`，`needs: image`，`timeout-minutes: 15`，权限 `contents: none, packages: read`，`environment: production`（含 required reviewers 审批），条件：workflow_run-成功路径或 main 的 dispatch）：接收 `source_sha` 与 digest 为显式输入 → 临时 `DOCKER_CONFIG` 登录 GHCR（结束即删；package public 后可免）→ 按第 3 件的事务契约执行 → digest 一致校验 → **审计输出：`deployed source_sha=<sha> digest=<digest>` 写入 job summary**（部署账本，与 `.env` 交叉对证）。
 - `concurrency`: 固定组 `production-deploy`，`cancel-in-progress: false`。
@@ -193,17 +197,17 @@ mpos.upypi.net {
 ## 首次上线序列（顺序即门禁）
 
 1. 实施 PR 于 `deploy/domestic` → CI 绿 → 分支 push 的 image job 出镜像与 digest（含非 root 冒烟）。不合 main。
-2. GHCR package 设 public（或服务器一次性 login）。
-3. **宿主预检**（ops owner + 我们）：**版本前提**——Docker Engine ≥ 24、Compose plugin ≥ v2.20（计划依赖 `service_completed_successfully` 与 `up --wait`，`docker compose version` 实测确认）→ **先备份现有 compose.yml** → 把 `render-compose-block.sh` 的输出粘进现有 compose.yml 的 `services:`/`networks:`/`volumes:` 三个映射 → 在同目录 `.env` 追加 `MPOS_IMAGE`（填 digest）→ `docker compose config` 通过**且输出里插件后端的 `db`、`pgdata`、`mpyhw_internal` 均未改动** → 无残留 `CHANGE-ME` 扫描。
+2. GHCR 拉取权限。**已实测：三个包（`micropythonos-ai-app-builder`、`mpyhw-api`、`upypi`）全是 private**，匿名拉取 403。CD 的 deploy job 用 `GITHUB_TOKEN`（`packages: read`）自己登录，不受影响；**但首次部署是宿主手工执行，不在 workflow 里**，所以那台机上现有的 `docker login`（跑 `mpyhw-api` 就必须已经有）**必须同时能拉到新这个包** —— 若那份凭据是按仓库细粒度授权的就拉不到。让 ops owner 直接 `docker pull` 一次验，或把包设 public。
+3. **宿主预检**（ops owner + 我们）：**版本前提**——Docker Engine ≥ 24、Compose plugin ≥ v2.20（计划依赖 `service_completed_successfully` 与 `up --wait`，`docker compose version` 实测确认）→ **先备份现有 compose.yml** → 把 `render-compose-block.sh` 的输出粘进现有 compose.yml 的 `services:`/`networks:`/`volumes:` 三个映射 → 在同目录 `.env` 追加 `MPOS_IMAGE`（填 digest）→ `docker compose config` 通过**且输出里插件后端的 `db` 服务与 `postgres-data` 卷均未改动**（v5 更正：原写 `pgdata`、`mpyhw_internal` —— 真机上这两个名字都不存在，照着找会找不到）→ 无残留 `CHANGE-ME` 扫描。
 4. **首次部署 = 宿主手工** `docker compose up -d --wait mpos-app`（**带 service 名**，否则会重启插件后端；且不加 `--remove-orphans`）：`ps` 全 healthy、日志干净（无 storage 缺项/S3 403/DB auth 错误），并确认 `mpyhw-api` 未被重建。
 5. **先验后端再暴露**：`docker compose exec caddy wget -qO- http://mpos-app:10000/api/health` 通过（Caddy 在栈内，从它自己容器里验才是真链路）→ 编辑与 compose.yml 同目录的 `Caddyfile` 追加 vhost → `docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile`（**别 `up -d` 或重启 caddy 服务**，那会连带影响另外两个站）→ 最后 DNS（提前压 TTL）。
 6. 冒烟：health 四项 + 首页 + `/mpos-web/` + 显式 DB 读写（注册）+ 显式 MinIO 往返（session 对象出现且可读回）。注意 `/api/health` 只报配置不做实时依赖探活——监控不得只信它。
 7. superadmin：`docker compose exec mpos-app python scripts/provision_superadmin.py --target production --username <user> --promote-existing` → 权限矩阵抽查（superadmin 200 / 普通 403）。
 8. 真实生成：澄清 → 生成（50→40）→ MPK 下载 → WASM 预览。
 9. **持久化/备份/回滚演练（验收硬门）**：
-   - `down && up -d` 数据仍在、session 从 MinIO 恢复；
+   - 容器重建后数据仍在、session 从 MinIO 恢复。**命令必须点名 mpos 三个服务**：`docker compose rm -sf mpos-app mpos-db mpos-minio` → `docker compose up -d --wait mpos-app`。⛔ **绝不能用 `docker compose down`** —— 它是项目级的，会把 `mpyhw-api`、`upypi`、`caddy` 和插件后端的 `db` 一起停掉，两个线上站直接断服。（v5 更正：原文就是 `down && up -d`，是独立栈时代的残留。）
    - `pg_dump`（DB：账号/登录/计费的权威源）+ **MinIO 用 `mc mirror` 导出**（session 状态与 artifact 的权威源——`session_state.json` 等就住在对象存储里，**不做在线卷目录拷贝**）→ **在一次性栈恢复并登录成功**；备份落**离机/独立盘**目的地，定保留期；两者非同刻一致，**明确接受的偏斜口径**：账号/点数以 DB 备份为准，session 以 MinIO 备份为准，互相引用缺失时（如 session 在而 artifact 缺、或反之）应干净报错，接受的数据丢失窗口 = 备份间隔；恢复演练至少覆盖「DB 旧于 MinIO」「MinIO 旧于 DB」两个方向各一次登录+开 session 验证；
-   - digest 回滚演练：改 `.env` → `up -d` → 登录/计费/生成正常 → 滚回。当前 schema 仅增量（`create_all` + `auth.py` 手写补列），**未来任何非增量变更前必须先补 Alembic**，届时回滚演练要含 DB 恢复；
+   - digest 回滚演练：改 `.env` → `docker compose up -d --wait mpos-app`（**同样带 service 名**）→ 登录/计费/生成正常 → 滚回。当前 schema 仅增量（`create_all` + `auth.py` 手写补列），**未来任何非增量变更前必须先补 Alembic**，届时回滚演练要含 DB 恢复；
    - 宿主端口审计：DB/MinIO/app 无任何公网绑定。
 10. 观察期 → **切换日前置门：注册闸门拍板**（见风险 1）→ 合并 main → 完整自动链路（CI→workflow_run→build→deploy）再验一遍 → 老站下线（erkou111）。
 
