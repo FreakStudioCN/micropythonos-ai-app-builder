@@ -38,7 +38,7 @@
 #
 # Images come from the host's Huawei Cloud mirror, not Docker Hub, which that
 # machine cannot reach. All three are digest-pinned against THAT mirror — the
-# digests were resolved by actually pulling them on 2026-08-01, so the mirror
+# digests were resolved by actually pulling them on 2026-07-31, so the mirror
 # paths are verified, not inferred. They are index digests, so they stay correct
 # whatever the host's architecture. Do not swap in a docker.io digest: the same
 # tag has a different digest there, and the pull would fail on this host.
@@ -107,7 +107,7 @@ services:
     # proven pullable on that machine, and the layers are already cached there.
     # Docker Hub is not reachable from it — every Hub image in the host stack
     # goes through this mirror — so a docker.io digest pin would simply fail.
-    # Digest resolved against the mirror itself (2026-08-01); it is the index
+    # Digest resolved against the mirror itself (2026-07-31); it is the index
     # digest, so it is platform-independent.
     image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/postgres:16-alpine@sha256:31482568d12f43e4e3c51a2d87993eddd0163354306f987be3bc674bbcbd3e08
     restart: unless-stopped
@@ -129,7 +129,7 @@ services:
     logging: *mpos-logging
 
   mpos-minio:
-    # Mirror path VERIFIED by pulling it (2026-08-01), which also produced this
+    # Mirror path VERIFIED by pulling it (2026-07-31), which also produced this
     # digest. An anonymous registry probe answers 401 even for images that
     # exist, so the earlier "unverified" note was about the probe, not the path.
     image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:52dfd5c0bbd38d3219f2058c7af216d9f9a27a994b7b5baad09bbd38866015ff
@@ -143,7 +143,7 @@ services:
       - mpos_miniodata:/data
     networks: [mpos_internal]
     # `curl` is present at /usr/bin/curl in this exact image — checked by
-    # running it (2026-08-01), not assumed. Worth stating because if it were
+    # running it (2026-07-31), not assumed. Worth stating because if it were
     # absent the failure is invisible: the check never passes, mpos-minio-init
     # waits on service_healthy forever, mpos-app never starts, and `up --wait`
     # times out looking like a hang. `mc` is at /usr/bin/mc too, so
@@ -162,7 +162,7 @@ services:
   # MinIO cannot read back a stored secret, so convergence is probed by actually
   # authenticating with the target app credentials.
   mpos-minio-init:
-    # Same mirror, likewise pulled and digest-resolved on 2026-08-01.
+    # Same mirror, likewise pulled and digest-resolved on 2026-07-31.
     image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:bdfae21c72b19fae5a005c56dddba25a873d75fac3dda60f55aea7e417382cbe
     restart: "no"
     environment:
