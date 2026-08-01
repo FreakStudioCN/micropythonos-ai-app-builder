@@ -105,7 +105,27 @@ job 上限相应从 15min 提到 25min，必须大于内层之和（390s + 420s 
 
 这与 ops owner 说的「github 有时候因为墙会波动」一致，也解释了为什么**他 stack 里每一个 Docker Hub 镜像都走华为云镜像站**——这台机的跨境镜像拉取本来就不可靠。我们的 GHCR 同样是跨境，只是之前没被验证过。
 
-**所以调参数（更长 timeout、更多重试）是治标**，方向应该是把镜像放到国内 registry。这一条待拍板，未定之前 CD 的部署环节不可用（构建与推送不受影响，那一半在 GitHub 侧）。
+**所以调参数（更长 timeout、更多重试）是治标。已拍板：镜像改推国内 registry。**
+
+### 双 registry：GHCR 仍是规范副本，部署从国内拉
+
+一次 buildx 构建，推到两个 registry。**这是「一次构建推两处」而不是「构建两次」**，因为 buildx 产出的是**同一个 manifest**，而 manifest digest 是内容寻址的——所以 `steps.build.outputs.digest` 在两边都成立，v4 的 digest-pin 硬门原样保留。构建两次则可能得到两个 digest，那会把整套 pin 机制悄悄架空。
+
+分工：**GHCR 是规范副本**（CI、溯源、回滚都读它），**国内 registry 只服务那台生产机的 pull**。
+
+要配三项，缺任何一项 image job 第一步就红：
+
+| 配置 | 类型 | 例 |
+|---|---|---|
+| `CN_IMAGE` | repo **variable** | `registry.cn-hangzhou.aliyuncs.com/<namespace>/micropythonos-ai-app-builder` |
+| `CN_REGISTRY_USERNAME` | repo **secret** | 阿里云 ACR 的用户名 |
+| `CN_REGISTRY_PASSWORD` | repo **secret** | ACR 的固定密码/访问凭证 |
+
+registry 主机名从 `CN_IMAGE` 推导（`${CN_IMAGE%%/*}`），不单独配——**一个会自相矛盾的配置项，不如没有**。
+
+未配置时**大声失败，绝不静默只推 GHCR**：那样 CI 会是绿的，几小时后在别人的生产机上才炸。已实测三种取值：unset → exit 1、**空串 → exit 1**（GitHub 未配置的 `vars` 给的是空串不是 unset，所以这里必须用 `:?` 而不是 `?`）、正常值 → 正确解析出 registry 主机名。
+
+deploy job 相应改为登录并从国内 registry 拉，`permissions` 里的 `packages: read` 一并去掉——它不再碰 GHCR，`GITHUB_TOKEN` 什么权限都不需要了。
 
 ### 与宿主现有 CD 的两处有意分歧（`mpy-hardware-extension` PR #26 是参考实现）
 
