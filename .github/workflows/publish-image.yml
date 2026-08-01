@@ -41,13 +41,6 @@ permissions: {}
 
 env:
   IMAGE_NAME: ghcr.io/freakstudiocn/micropythonos-ai-app-builder
-  # The production host cannot pull from GHCR. This is measured, not suspected:
-  # on 2026-08-01 three bounded pull attempts all hung, a different layer each
-  # time, 8 of 9 layers down every time. Same reason every Docker Hub image in
-  # that host's stack already goes through a domestic mirror. So the image is
-  # pushed to a domestic registry too, and the deploy job pulls from there.
-  # GHCR stays the canonical copy — CI, provenance and rollback all read it.
-  CN_IMAGE: ${{ vars.CN_IMAGE }}
 
 jobs:
   image:
@@ -107,18 +100,6 @@ jobs:
       - name: Check out the skills submodule only
         run: git submodule update --init vendor/MicroPython_Skills
 
-      # Derived rather than configured separately: one setting that cannot
-      # disagree with itself beats two that can.
-      - name: Resolve the domestic registry host
-        id: cn
-        run: |
-          set -euo pipefail
-          : "${CN_IMAGE:?vars.CN_IMAGE is unset. The production host cannot pull from GHCR (three bounded attempts all hung on 2026-08-01), so an image that only exists there cannot be deployed. Set the repository variable to the full domestic path, e.g. registry.cn-hangzhou.aliyuncs.com/<namespace>/micropythonos-ai-app-builder}"
-          # No silent skip when it is missing: a build that quietly pushed only
-          # to GHCR would look green and then fail hours later at deploy time,
-          # on someone else's production host.
-          echo "registry=${CN_IMAGE%%/*}" >> "$GITHUB_OUTPUT"
-
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
       - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
@@ -126,23 +107,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
-        with:
-          registry: ${{ steps.cn.outputs.registry }}
-          username: ${{ secrets.CN_REGISTRY_USERNAME }}
-          password: ${{ secrets.CN_REGISTRY_PASSWORD }}
-
       - name: Image tags
         id: meta
         uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
         with:
-          # Both registries in ONE build. buildx produces a single manifest and
-          # pushes it to every tag, and a manifest digest is content-addressed —
-          # so `steps.build.outputs.digest` is valid at both, and the digest pin
-          # survives. Two separate builds would risk two different digests.
-          images: |
-            ${{ env.IMAGE_NAME }}
-            ${{ env.CN_IMAGE }}
+          images: ${{ env.IMAGE_NAME }}
           tags: |
             type=raw,value=latest,enable=${{ github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch' }}
             type=raw,value=sha-${{ steps.src.outputs.sha }}
@@ -215,21 +184,14 @@ jobs:
       group: production-deploy
       cancel-in-progress: false
     permissions:
-      # `packages: read` is gone with GHCR: this job now pulls from the domestic
-      # registry, so the GITHUB_TOKEN needs nothing at all.
       contents: none
+      packages: read
     steps:
       - name: Pull, pin, deploy (transactional)
         env:
           DIGEST: ${{ needs.image.outputs.digest }}
           SOURCE_SHA: ${{ needs.image.outputs.source_sha }}
-          # Same digest as the GHCR copy — one buildx build pushed one manifest
-          # to both, and a manifest digest is content-addressed. If that ever
-          # stops being true the pull fails outright rather than deploying the
-          # wrong image, which is the failure mode to prefer here.
-          CN_IMAGE: ${{ vars.CN_IMAGE }}
-          CN_USER: ${{ secrets.CN_REGISTRY_USERNAME }}
-          CN_PASS: ${{ secrets.CN_REGISTRY_PASSWORD }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # /srv/upypi is where the stack actually lives: the plugin backend's
           # merged deploy job cd's there today. Overridable if the ops owner
           # moves it; a wrong value fails loudly at the cd below, so the default
@@ -237,8 +199,7 @@ jobs:
           STACK_DIR: ${{ vars.MPOS_STACK_DIR || '/srv/upypi' }}
         run: |
           set -euo pipefail
-          : "${CN_IMAGE:?vars.CN_IMAGE is unset — nothing to pull from. GHCR is not reachable from this host.}"
-          IMAGE="${CN_IMAGE}@${DIGEST}"
+          IMAGE="ghcr.io/freakstudiocn/micropythonos-ai-app-builder@${DIGEST}"
           export DOCKER_CONFIG="$(mktemp -d)"
           # ONE exit handler, because a second `trap ... EXIT` would silently
           # replace this one and leave the GHCR credentials on the host. It also
@@ -262,8 +223,8 @@ jobs:
             echo "removed temporary docker config ${DOCKER_CONFIG}" >&2
           }
           trap cleanup EXIT INT TERM
-          echo "${CN_PASS}" | docker login "${CN_IMAGE%%/*}" -u "${CN_USER}" --password-stdin
-          # Reachability from this host is intermittent — it is why a
+          echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+          # GitHub reachability from this host is intermittent — it is why a
           # webhook-driven CD was rejected in favour of this runner. Retry a
           # transient blip rather than failing a deployment over it. Still fails
           # loudly once the attempts are spent; this is a retry, not a fallback.
@@ -289,7 +250,7 @@ jobs:
             sleep $((attempt * 10))
           done
           if [ -z "${pulled}" ]; then
-            echo "docker pull failed after 3 attempts — ${CN_IMAGE%%/*} unreachable, hung, or digest missing there" >&2
+            echo "docker pull failed after 3 attempts — GHCR unreachable, hung, or digest missing" >&2
             exit 1
           fi
           cd "${STACK_DIR}"
