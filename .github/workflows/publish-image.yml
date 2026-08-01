@@ -175,7 +175,10 @@ jobs:
     # errors. Labels are routing, not a security boundary — scoping the runner
     # to this repository is what limits it, so the extra labels buy nothing.
     runs-on: upypi
-    timeout-minutes: 15
+    # Must exceed the sum of the inner bounds, or the job limit becomes the
+    # thing that fires and the specific `timeout` messages never get printed:
+    # pull 3x120s + 30s backoff = 390s, deploy 420s, rollback 420s = 1230s.
+    timeout-minutes: 25
     environment: production
     concurrency:
       group: production-deploy
@@ -212,6 +215,12 @@ jobs:
               set_pin "${OLD_PIN}"
             fi
             rm -rf "${DOCKER_CONFIG}"
+            # Logged because the first cancelled run left no way to tell whether
+            # this ran at all — the shell is killed and the log just shows an
+            # orphaned docker process. The GHCR credential here dies with the
+            # job either way, but "probably cleaned up" is not a thing to leave
+            # in a log about someone else's production host.
+            echo "removed temporary docker config ${DOCKER_CONFIG}" >&2
           }
           trap cleanup EXIT INT TERM
           echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
@@ -219,14 +228,29 @@ jobs:
           # webhook-driven CD was rejected in favour of this runner. Retry a
           # transient blip rather than failing a deployment over it. Still fails
           # loudly once the attempts are spent; this is a retry, not a fallback.
+          #
+          # `timeout` is load-bearing, and it is here because of a real incident
+          # rather than caution. On the first run of this job the pull fetched 8
+          # of 9 layers in 11 seconds and then sat on the last one until the job
+          # limit killed it 15 minutes later. The retry below was powerless: it
+          # only ever sees a non-zero exit, and a hung `docker pull` does not
+          # exit at all. Wrapping converts "hangs forever" — which no retry can
+          # catch — into "exits 124", which is the failure this loop was written
+          # for. A healthy pull here takes ~11s, so 120s is not a tight bound.
           pulled=""
           for attempt in 1 2 3; do
-            if docker pull "${IMAGE}"; then pulled=1; break; fi
-            echo "pull attempt ${attempt}/3 failed; retrying in $((attempt * 10))s" >&2
+            rc=0
+            timeout 120 docker pull "${IMAGE}" || rc=$?
+            if [ "${rc}" = 0 ]; then pulled=1; break; fi
+            if [ "${rc}" = 124 ]; then
+              echo "pull attempt ${attempt}/3 hung past 120s and was killed; retrying in $((attempt * 10))s" >&2
+            else
+              echo "pull attempt ${attempt}/3 failed (exit ${rc}); retrying in $((attempt * 10))s" >&2
+            fi
             sleep $((attempt * 10))
           done
           if [ -z "${pulled}" ]; then
-            echo "docker pull failed after 3 attempts — GHCR unreachable or digest missing" >&2
+            echo "docker pull failed after 3 attempts — GHCR unreachable, hung, or digest missing" >&2
             exit 1
           fi
           cd "${STACK_DIR}"
@@ -257,7 +281,14 @@ jobs:
           deploy_ok=""
           # Scoped to mpos-app (compose still starts its depends_on) so a mpos
           # deployment never restarts the plugin backend in the same file.
-          if docker compose up -d --wait mpos-app; then
+          #
+          # Wrapped for the same reason as the pull, and it is not a theoretical
+          # worry here: on a first deployment this `up` is what pulls postgres,
+          # minio and mc from the mirror, so it can hang on a layer exactly the
+          # way the GHCR pull did. `--wait` then blocks on health with no bound
+          # of its own. 420s covers the real startup cost — mpos-db needs up to
+          # 100s of pg_isready retries and mpos-app has a 60s start_period.
+          if timeout 420 docker compose up -d --wait mpos-app; then
             # Assignment inside the condition so an inspect failure counts as a
             # failed verification instead of killing the shell under set -e.
             # head -1 because `ps -q` returns newline-separated IDs: a leftover
@@ -276,7 +307,10 @@ jobs:
             # so the exit handler must not repeat the pin write on the way out.
             rollback_armed=""
             set_pin "${OLD_PIN}"
-            docker compose up -d --wait mpos-app
+            # Bounded like the deploy above: a rollback that hangs would burn
+            # the job's remaining budget and leave the stack mid-restart with
+            # nothing in the log to say why.
+            timeout 420 docker compose up -d --wait mpos-app
             exit 1
           fi
           rollback_armed=""
