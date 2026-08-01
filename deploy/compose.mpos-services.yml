@@ -33,6 +33,9 @@
 # Fill the secrets with ./render-compose-block.sh — never by hand. It generates
 # every credential and writes each one to all the places that must agree.
 #
+# Nothing here is interpolated, so this stack needs no .env file — same as the
+# host's existing services. Paste it in and it is complete.
+#
 # Requires Docker Engine >= 24 and compose plugin >= v2.20
 # (`service_completed_successfully`, `up --wait`).
 #
@@ -45,8 +48,18 @@
 
 services:
   mpos-app:
-    # Immutable digest pin from the stack dir's .env (rewritten by the deploy job).
-    image: ${MPOS_IMAGE}
+    # A mutable tag, exactly like the neighbouring mpyhw-api:latest and
+    # upypi:main. The deploy job pulls by immutable digest and then retags that
+    # digest to :latest here, so what actually runs is still pinned by content —
+    # the tag is only how compose refers to it.
+    #
+    # An earlier version interpolated MPOS_IMAGE from a .env in the stack dir.
+    # That
+    # bought automatic rollback, and cost a file this host has never had, ~80
+    # extra lines of deploy logic, and a second versioning mechanism living in
+    # the same compose file as the first. Not worth it before the service has
+    # even deployed once. Revisit if rollback automation is ever actually needed.
+    image: ghcr.io/freakstudiocn/micropythonos-ai-app-builder:latest
     restart: unless-stopped
     environment:
       # [DB-PW] MUST equal POSTGRES_PASSWORD in mpos-db.

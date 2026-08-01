@@ -10,16 +10,16 @@ name: publish-image
 #   - `workflow_dispatch` is restricted to main and verifies that CI succeeded for
 #     the resolved sha before building.
 #   - push to deploy/domestic and v* tags: image build + smoke only, NO deploy.
-#   - the deploy job updates the MPOS_IMAGE line in the shared stack's .env
-#     transactionally (restores the previous pin and stack on failure) and audits
-#     `source_sha` + digest in the job summary. The stack directory is the one
-#     that already holds the plugin backend's compose.yml — set the repository
-#     variable MPOS_STACK_DIR to its path; the job refuses to run without it.
+#   - the deploy job pulls by immutable digest, retags it to :latest, restarts
+#     only mpos-app, and verifies by image ID that the running container is this
+#     build. Same mechanism the plugin backend already uses on this host, so no
+#     .env and no second versioning scheme in a shared compose file. The stack
+#     directory is the one that already holds the plugin backend's compose.yml —
+#     set the repository variable MPOS_STACK_DIR if it ever moves.
 #
 # SHARED STACK: mpos-app lives in the SAME compose file as the plugin backend
-# (mpyhw-api), so every docker compose call here is scoped to `mpos-app` and the
-# .env rewrite is line-surgical. An unscoped `up -d` would restart the plugin
-# backend on every deployment; a whole-file .env write would delete its lines.
+# (mpyhw-api), so every docker compose call here is scoped to `mpos-app`. An
+# unscoped `up -d` would restart the plugin backend on every deployment.
 # Never add --remove-orphans: it would tear down the neighbouring services.
 #
 # SECURITY (red line): NEVER add `pull_request` or `pull_request_target` triggers —
@@ -199,21 +199,12 @@ jobs:
           STACK_DIR: ${{ vars.MPOS_STACK_DIR || '/srv/upypi' }}
         run: |
           set -euo pipefail
-          IMAGE="ghcr.io/freakstudiocn/micropythonos-ai-app-builder@${DIGEST}"
+          IMAGE="${IMAGE_NAME}@${DIGEST}"
           export DOCKER_CONFIG="$(mktemp -d)"
-          # ONE exit handler, because a second `trap ... EXIT` would silently
-          # replace this one and leave the GHCR credentials on the host. It also
-          # carries the pin rollback: a job timeout or a manual cancel kills this
-          # shell outright, so the rollback further down would never run and .env
-          # would stay pinned to a digest that never came up. Restoring the pin
-          # is all it does — a compose call here could be killed mid-flight too;
-          # the next deploy or a manual `up -d` then lands on the good digest.
-          rollback_armed=""
+          # ONE exit handler. A second `trap ... EXIT` anywhere below would
+          # silently replace this one and leave the GHCR credentials sitting on
+          # someone else's production host.
           cleanup() {
-            if [ -n "${rollback_armed}" ]; then
-              echo "interrupted before verification — restoring pin: ${OLD_PIN}" >&2
-              set_pin "${OLD_PIN}"
-            fi
             rm -rf "${DOCKER_CONFIG}"
             # Logged because the first cancelled run left no way to tell whether
             # this ran at all — the shell is killed and the log just shows an
@@ -246,10 +237,11 @@ jobs:
           # healthy pull is ~11s and 8 of 9 layers land inside 120s, so 180s is
           # slack for a slow-but-alive connection, not patience for a dead one.
           #
-          # Note this cannot accumulate progress: SIGTERM makes docker roll back
-          # the partial pull, so every attempt re-fetches all nine layers. If
-          # this still fails, the answer is to get the image onto the host once
-          # by other means (docker save/load) — not to raise these numbers.
+          # Attempts DO accumulate: layers that finished in an earlier attempt
+          # stay on the host, so each retry has less to fetch. Measured — after
+          # three failed attempts had banked 8 of 9 layers, the next run's pull
+          # completed in 2 seconds. An earlier note here claimed the opposite;
+          # it was wrong.
           pulled=""
           for attempt in $(seq 1 6); do
             rc=0
@@ -266,31 +258,24 @@ jobs:
             echo "docker pull failed after 6 attempts — registry unreachable, hung, or digest missing" >&2
             exit 1
           fi
+          # Retag the digest we just pulled to the tag compose refers to. Same
+          # mechanism the plugin backend's deploy job uses on this host, and the
+          # reason mpos-app needs no .env: the file on disk never changes, only
+          # what :latest points at locally. What runs is still selected by
+          # digest — the tag is just the handle compose holds it by.
+          #
+          # `docker tag` is local and instant, so there is no window here worth
+          # guarding: either it succeeds and the `up` below uses the new image,
+          # or set -e stops before anything is restarted.
+          docker tag "${IMAGE}" "${IMAGE_NAME}:latest"
+
+          # Resolve the image ID now, for verification after the restart. The
+          # container reports the ID it was created from, not the tag, so this
+          # is what proves the running container is THIS build and not whatever
+          # :latest happened to point at before.
+          WANT_ID=$(docker inspect --format '{{.Id}}' "${IMAGE}")
+
           cd "${STACK_DIR}"
-
-          # This .env is shared with the plugin backend's stack. Only the
-          # MPOS_IMAGE line changes; every other line is carried through
-          # verbatim. The write itself is a whole-file rewrite, not a one-line
-          # patch — see set_pin for why it is done in place.
-          OLD_PIN=$(sed -n 's/^MPOS_IMAGE=//p' .env)
-          if [ -z "${OLD_PIN}" ]; then
-            echo "no MPOS_IMAGE line in ${STACK_DIR}/.env — the first deployment is" >&2
-            echo "manual and seeds it (see the launch sequence in the plan doc)." >&2
-            exit 1
-          fi
-          # In place rather than temp-file + mv: this .env belongs to the shared
-          # stack and may be owned by another account, and a recreate would take
-          # its owner and mode with it. The cost is that the write is not atomic
-          # — accepted, because the alternative can fail every deploy outright.
-          # The substitution is captured in full first, so a sed failure aborts
-          # under set -e before .env is opened for writing.
-          set_pin() {
-            new=$(sed "s|^MPOS_IMAGE=.*|MPOS_IMAGE=$1|" .env)
-            printf '%s\n' "${new}" > .env
-          }
-
-          rollback_armed=1
-          set_pin "${IMAGE}"
           deploy_ok=""
           # Scoped to mpos-app (compose still starts its depends_on) so a mpos
           # deployment never restarts the plugin backend in the same file.
@@ -306,25 +291,26 @@ jobs:
             # failed verification instead of killing the shell under set -e.
             # head -1 because `ps -q` returns newline-separated IDs: a leftover
             # container for this service would make the substitution one quoted
-            # multi-line argument, docker inspect would reject it, and a healthy
-            # deployment would roll itself back on every run until someone
-            # removed the orphan by hand.
-            if RUNNING=$(docker inspect "$(docker compose ps -q mpos-app | head -1)" --format '{{.Config.Image}}') \
-               && [ "${RUNNING}" = "${IMAGE}" ]; then
+            # multi-line argument and docker inspect would reject it.
+            #
+            # Compare image IDs, not `.Config.Image`: with a mutable tag that
+            # field just reads back "…:latest" and would match no matter which
+            # build is actually running, i.e. a check that can never fail.
+            if RUNNING_ID=$(docker inspect "$(docker compose ps -q mpos-app | head -1)" --format '{{.Image}}') \
+               && [ "${RUNNING_ID}" = "${WANT_ID}" ]; then
               deploy_ok=1
             fi
           fi
           if [ -z "${deploy_ok}" ]; then
-            echo "deploy or digest verification failed — rolling back to previous pin: ${OLD_PIN}"
-            # Disarm first: this branch does the full rollback (pin AND stack),
-            # so the exit handler must not repeat the pin write on the way out.
-            rollback_armed=""
-            set_pin "${OLD_PIN}"
-            # Bounded like the deploy above: a rollback that hangs would burn
-            # the job's remaining budget and leave the stack mid-restart with
-            # nothing in the log to say why.
-            timeout 420 docker compose up -d --wait mpos-app
+            echo "deploy failed, or the running container is not this build" >&2
+            echo "  wanted image id: ${WANT_ID}" >&2
+            echo "  running now    : ${RUNNING_ID:-<none>}" >&2
+            # No automatic rollback: with a tag-based deployment there is no
+            # previous pin recorded anywhere to roll back TO. Recovery is
+            # `docker tag <previous digest> :latest && docker compose up -d
+            # --wait mpos-app` on the host. This is the cost that was accepted
+            # when the .env pin was dropped, and it is stated rather than
+            # silently absent.
             exit 1
           fi
-          rollback_armed=""
           echo "deployed source_sha=${SOURCE_SHA} digest=${DIGEST}" >> "${GITHUB_STEP_SUMMARY}"

@@ -61,7 +61,7 @@ v1–v4 假设新开 `/srv/mpos` 独立栈。**v5 改为把 mpos 的四个服务
 
 栈共享之后，原 deploy job 有两处会误伤邻居：
 
-1. **`.env` 整文件覆盖** → 改为**只重写 `MPOS_IMAGE` 那一行**，且**原地写入**（不用临时文件 + `mv`，那会改掉文件的属主与权限——该文件可能属于别的账号）。已实测：邻居行在部署与回滚后均完好，inode 不变。缺 `MPOS_IMAGE` 行则大声失败（首次部署是宿主手工，由它播种）。
+1. ~~`.env` 整文件覆盖 → 只重写 `MPOS_IMAGE` 那一行~~ **v6 作废：不再有 `.env`**，改为按 digest 拉后 `docker tag … :latest`，宿主上没有任何文件被 CD 修改。
 2. **`docker compose up -d --wait` 无 service 参数** → 改为 `... --wait mpos-app`，否则每次 mpos 部署都会重启插件后端。**永远不要加 `--remove-orphans`**，它会拆掉邻居服务。
 3. 栈目录不再写死 `/srv/mpos` → 读仓库变量 `MPOS_STACK_DIR`，未设置则 job 直接失败。
 4. **每个 docker 调用都用 `timeout` 兜住**（2026-08-01 首次真实运行打脸后加的，不是预防性设计）。
@@ -83,7 +83,7 @@ v1–v4 假设新开 `/srv/mpos` 独立栈。**v5 改为把 mpos 的四个服务
 
 `docker compose up --wait` 同样包了，而且那里不是假想：首次部署时**正是这个 `up` 去镜像站拉 postgres/minio/mc**，能以完全相同的方式挂在某一层上，而 `--wait` 自己没有任何时限。回滚那次 `up` 也包了——回滚挂死会烧光剩余预算，并把栈丢在重启到一半的状态、日志里还没有任何线索。
 
-job 上限相应从 15min 提到 25min，必须大于内层之和（390s + 420s + 420s），否则先炸的是 job 上限，那些具体的 timeout 信息根本打不出来。
+job 上限相应上调（现为 35min），必须大于内层之和（6×180s + 5×10s + 420s + 420s = 1970s），否则先炸的是 job 上限，那些具体的 timeout 信息根本打不出来。
 
 修完立刻用真实运行验证了一遍，行为完全符合设计——7 分钟大声失败，取代 15 分钟静默挂死；`removed temporary docker config /tmp/tmp.CxpPmKESGm` 也证实退出处理器确实跑了（上次取消后无法证实这一点）。
 
@@ -97,23 +97,51 @@ job 上限相应从 15min 提到 25min，必须大于内层之和（390s + 420s 
 | 2/3 | 8/9（含 6fd7，且已有 7 层解压完成） | `76dd1e712a48` |
 | 3/3 | 8/9 | `6fd774763a57` 又卡 |
 
-事实：每次卡的层不一样（不是某个 blob 坏了）；每次都能下完 9 层里的 8 层，第 2 次甚至解压完 7 层；**三次之间进度不累积**（`timeout` 发 SIGTERM 后 docker 回滚未完成的拉取），所以加重试次数换不到累积收益。
+事实：每次卡的层不一样（不是某个 blob 坏了）；每次都能下完 9 层里的 8 层，第 2 次甚至解压完 7 层。
+
+> 早期版本这里写「三次之间进度不累积」。**也是错的。** 层确实留在了那台机上——把重试从 3 次 ×120s 调成 6 次 ×180s 之后，下一次运行的 pull **2 秒就完成了**，因为只剩最后一层要补。
 
 > ⛔ **一个已被证伪的诊断，留在这里防止有人再走一遍。**
 > 我据此判断「这台机跨境拉 GHCR 不可靠」，并去实现了双 registry（推国内一份）。**错的。** 反证只花了一次查询：插件后端的 deploy job 跑在**同一台机、同一个 runner** 上，用的是**裸 `docker pull`——没有 timeout，没有重试**，`2026-07-31T22:19` 那次 **17 秒成功**，而且它历史上的 publish-image 几乎全绿。
 > 所以 GHCR 对那台机是通的，双 registry 是给一个我没查清的问题买的昂贵解法，还要仓库主去开一个阿里云账号来换一个本来就有的能力。已 revert。
 > 教训与本文档开头那条同源：**「他 stack 里所有 Docker Hub 镜像都走镜像站」是真的，但由此外推到 GHCR 是我自己加的一步**，而隔壁就摆着一个能证伪它的现成实例。先看同机跑着的兄弟服务，再下结论。
 
-**当前最可能的解释（未验证）**：插件后端每次部署只有代码层变，其余层在那台机上是 `Already exists`，实际只拉一层——所以 17 秒。我们是**首次**拉这个镜像，9 层全都要下。若成立，则难的只有第一次，一旦镜像上了机，后续增量与插件后端同样快。
+**已解决，且解释被证实**：难的只有第一次。插件后端每次部署只有代码层变、其余 `Already exists`，所以 17 秒；我们是首次拉，9 层全要下。把预算从「3 次 ×120s」改成「6 次 ×180s」——**多换几次连接，而不是在同一条死连接上等更久**（挂死的连接是黑洞，不会自愈；证据是每次卡的层都不同，说明新尝试会建新连接）——之后镜像成功落到那台机上，`Status: Downloaded newer image`，耗时 2 秒。
 
-验证方式与候选解法见待办；在此之前**别再动 registry**。
+此后每次部署都是增量，与插件后端同速。**不需要国内 registry，也不需要 `docker save`/`load` 手工搬运。**
 
-### 与宿主现有 CD 的两处有意分歧（`mpy-hardware-extension` PR #26 是参考实现）
+### v6：镜像引用改回 `:latest` + 重打 tag，与宿主一致（推翻 v4/v5 的 `.env` digest pin）
 
-那份已合并的 CD 只有 21 行，机制是：`docker login` → 按 digest `pull` → **`docker tag <digest> :latest`** → `cd /srv/upypi && docker compose up -d`。两处我们**故意**不一样，不是疏漏：
+**这一节推翻本文档多处关于 `MPOS_IMAGE` / `.env` 的写法，以本节为准。**
 
-1. **镜像引用**：他们 compose 里写死 `:latest`，靠部署时重打 tag 让 compose 认到新镜像；我们走 `.env` 里 `MPOS_IMAGE` 的 `@sha256:` digest。我们这套不可变、可回滚可复现，但**同一份 compose 里从此并存两套机制**——交接时必须讲清楚，否则接手的人会以为 mpos 也能靠重打 tag 换版本。
-2. **作用域**：他们 `up -d` 不带 service 名（每次发插件后端都会重启全栈，含 Caddy）；我们带 `mpos-app`。我们这套更安全，代价是「别重启邻居」这条纪律在宿主现有实践里本来就不成立，不能假定对方知道。
+原方案：compose 写 `image: ${MPOS_IMAGE}`，宿主栈目录放一份 `.env`，CD 部署时原地重写那一行，失败自动回滚到上一个 pin。
+
+改为：compose 写 `image: ghcr.io/…:latest`，CD **按 digest 拉**之后 `docker tag <digest> :latest`，然后 `up -d --wait mpos-app`。**跑的是哪个 build 仍由 digest 决定**，tag 只是 compose 握住它的把手。
+
+推翻的理由，全部是成本，没有一项是"更优雅"：
+
+| | 他那套（现采用） | 我原来那套 |
+|---|---|---|
+| 宿主上要新增文件 | 无 | `.env`（这台机从来没有过） |
+| deploy step 行数 | 116 | 约 200 |
+| 同一份 compose 里的版本机制 | 一套 | **两套并存** |
+| 回滚 | 手工重打 tag | 自动 |
+
+那个"自动回滚"是唯一的实质收益，而它**在服务连第一次都还没部署成功的阶段根本用不上**。为它付出的是：给别人的生产机加一个陌生文件、CD 里近百行事务逻辑、以及交接时必须解释"为什么隔壁靠 tag 换版本而 mpos 不行"。真需要回滚自动化时再加不迟。
+
+**触发这次重估的是一个具体故障**：deploy 报 `sed: can't read .env: No such file or directory`——那台机上压根没有 `.env`，因为他的 compose 全部内联写死。我引入的机制，在它服务的那台机器上没有立足点。
+
+**连带的验证方式必须跟着改，这不是可选项。** 原来校验 `docker inspect --format '{{.Config.Image}}'` 是否等于目标镜像；在可变 tag 下该字段恒为 `…:latest`，**换了镜像它一个字都不变**——那会变成一道永远通过的假门。已改为比较镜像 ID（`{{.Image}}` vs `docker inspect --format '{{.Id}}'`）。本机实测坐实：把 `:latest` 指向另一个镜像后，`.Config.Image` 毫无变化，ID 比较立刻抓到不一致。
+
+**放弃的东西要写明**：deploy 失败后**不再自动回滚**，因为 tag 机制下没有"上一个 pin"记录在任何地方。恢复动作是宿主上 `docker tag <上一个 digest> :latest && docker compose up -d --wait mpos-app`。job 失败时会把期望 ID 与实际 ID 都打进日志。
+
+### 与宿主现有 CD 的剩余一处分歧
+
+那份已合并的 CD 只有 21 行：`docker login` → 按 digest `pull` → `docker tag <digest> :latest` → `cd /srv/upypi && docker compose up -d`。v6 之后镜像引用机制已与它一致，只剩一处**故意**不同：
+
+- **作用域**：他们 `up -d` 不带 service 名（每次发插件后端都会重启全栈，含 Caddy）；我们带 `mpos-app`。我们这套更安全，代价是「别重启邻居」这条纪律在宿主现有实践里本来就不成立，不能假定对方知道。
+
+我们另外保留了他们没有的两样：`timeout` 包裹（挂死的 pull 不会静默耗光 job）与部署后按镜像 ID 的一致性校验。这两样不增加宿主的认知负担——它们只活在 workflow 里。
 
 ### 接受的新代价
 
@@ -164,7 +192,7 @@ workflow_dispatch（仅 main + 审批）─→ 同上
 入口: 栈内 caddy 服务（default 网络）→ mpos.upypi.net → mpos-app:10000
 ```
 
-实施时所有 pin 必须落成**具体值**：GitHub Actions 各 action 按 commit SHA 引用、`MPOS_IMAGE` 永远是 `@sha256:` digest。
+实施时所有 pin 必须落成**具体值**：GitHub Actions 各 action 按 commit SHA 引用。（v6：`MPOS_IMAGE` 已取消；CD **拉取**时用的仍然永远是 `@sha256:` digest，只是 compose 里握的是 tag。）
 
 > **v5：postgres/minio/mc 的 digest 已实测取得并回填**（见上节表格），原先「暂缓 pin」的妥协作废。三个 pin 指向的是华为云镜像站的 digest，不是 Docker Hub 的。
 
@@ -179,7 +207,7 @@ workflow_dispatch（仅 main + 审批）─→ 同上
 全部服务 `restart: unless-stopped`（`mpos-minio-init` 除外，`restart: "no"`）。
 
 - **`mpos-app`**
-  - `image: ${MPOS_IMAGE}`（digest pin，来自现有栈目录的 `.env`）。
+  - `image: ghcr.io/freakstudiocn/micropythonos-ai-app-builder:latest`（v6：与宿主现有服务一致；CD 按 digest 拉后重打这个 tag，跑的仍由 digest 决定）。
   - `expose: 10000`；networks `default`（栈内 caddy 靠它解析）+ `mpos_internal`；不 publish 宿主端口。（v5 更正：原写 `edge`（external caddy 网）+ `internal`，两者都不存在。）
   - healthcheck：`python -c "urllib.request.urlopen('http://127.0.0.1:10000/api/health')"`。
   - `depends_on`: `db: service_healthy`、`minio-init: service_completed_successfully`（`object_storage.py` 导入期 `_ensure_bucket()`、`session_service` 构造期 `restore_all()`，顺序靠编排保证，不改代码兜底）。
@@ -228,11 +256,11 @@ mpos.upypi.net {
 }
 ```
 
-### 3. `deploy/env.example`（新，模板）→ 追加到宿主**现有栈目录**的 `.env`
+### 3. ~~`deploy/env.example`~~ **v6 取消（不再有 `.env`）**
 
-仅一行非密 pin：`MPOS_IMAGE=ghcr.io/freakstudiocn/micropythonos-ai-app-builder@sha256:<digest>`。
+这件产物不再存在，宿主上也不需要建 `.env`（见 v6）。交接件因此只剩 **compose.yml + Caddyfile 两个文件**。
 
-**deploy job 的事务契约**：先按 digest pull 成功 → 记下旧值、写入新值 → `docker compose up -d --wait`；若失败，**恢复旧值并 `up -d --wait` 回到旧栈**，job 以失败退出。`.env` 与实际运行容器的 digest 由部署后 `docker inspect` 强制一致校验。回滚 = 改回上一已验证 digest + `up -d`。
+**deploy job 的新契约**：按 digest pull 成功（有界重试）→ `docker tag <digest> :latest` → `docker compose up -d --wait mpos-app` → **按镜像 ID 校验**运行中的容器确实是这个 build。宿主上没有任何文件被 CD 修改。失败不自动回滚（tag 机制下没有上一个 pin 可回），日志打出期望与实际 ID。
 
 ### 4. `.github/workflows/publish-image.yml`（新）
 
@@ -264,7 +292,7 @@ mpos.upypi.net {
 
 1. 实施 PR 于 `deploy/domestic` → CI 绿 → 分支 push 的 image job 出镜像与 digest（含非 root 冒烟）。不合 main。
 2. ~~GHCR 拉取权限~~ **已不是门（2026-08-01 实测关闭）**。三个包（`micropythonos-ai-app-builder`、`mpyhw-api`、`upypi`）确实全是 private，匿名拉取 401——但首次部署既然改走 CD（见过渡期策略第 3 条），deploy job 就用 `secrets.GITHUB_TOKEN` + `packages: read` 自己登录，实测通过。**所以不要再去问 ops owner 要 classic token，也不要把包设 public**：这个仓库本身是 private（插件后端那个才是 public），把包设 public 等于首次公开整个代码库。
-3. **宿主预检**（ops owner + 我们）：**版本前提**——Docker Engine ≥ 24、Compose plugin ≥ v2.20（计划依赖 `service_completed_successfully` 与 `up --wait`，`docker compose version` 实测确认）→ **先备份现有 compose.yml** → 把 `render-compose-block.sh` 的输出粘进现有 compose.yml 的 `services:`/`networks:`/`volumes:` 三个映射 → 在同目录 `.env` 追加 `MPOS_IMAGE`（填 digest）→ `docker compose config` 通过**且输出里插件后端的 `db` 服务与 `postgres-data` 卷均未改动**（v5 更正：原写 `pgdata`、`mpyhw_internal` —— 真机上这两个名字都不存在，照着找会找不到）→ 无残留 `CHANGE-ME` 扫描。
+3. **宿主预检**（ops owner + 我们）：**版本前提**——Docker Engine ≥ 24、Compose plugin ≥ v2.20（计划依赖 `service_completed_successfully` 与 `up --wait`，`docker compose version` 实测确认）→ **先备份现有 compose.yml** → 把 `render-compose-block.sh` 的输出粘进现有 compose.yml 的 `services:`/`networks:`/`volumes:` 三个映射 → （v6：**不再需要建 `.env`**）→ `docker compose config` 通过**且输出里插件后端的 `db` 服务与 `postgres-data` 卷均未改动**（v5 更正：原写 `pgdata`、`mpyhw_internal` —— 真机上这两个名字都不存在，照着找会找不到）→ 无残留 `CHANGE-ME` 扫描。
 4. **首次部署 = 触发 `workflow_dispatch`**（v5 更正：原为宿主手工，理由已失效，见过渡期策略第 3 条）。deploy job 自己 `docker compose up -d --wait mpos-app`——**带 service 名**，否则会重启插件后端；且不加 `--remove-orphans`。验收不变：`ps` 全 healthy、日志干净（无 storage 缺项/S3 403/DB auth 错误），并确认 `mpyhw-api` 未被重建。宿主手工那条命令仍然是有效的兜底，但不再是主路径。
 5. **先验后端再暴露**：`docker compose exec caddy wget -qO- http://mpos-app:10000/api/health` 通过（Caddy 在栈内，从它自己容器里验才是真链路）→ 编辑与 compose.yml 同目录的 `Caddyfile` 追加 vhost → `docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile`（**别 `up -d` 或重启 caddy 服务**，那会连带影响另外两个站）→ 最后 DNS（提前压 TTL）。
 6. 冒烟：health 四项 + 首页 + `/mpos-web/` + 显式 DB 读写（注册）+ 显式 MinIO 往返（session 对象出现且可读回）。注意 `/api/health` 只报配置不做实时依赖探活——监控不得只信它。
@@ -273,7 +301,7 @@ mpos.upypi.net {
 9. **持久化/备份/回滚演练（验收硬门）**：
    - 容器重建后数据仍在、session 从 MinIO 恢复。**命令必须点名 mpos 三个服务**：`docker compose rm -sf mpos-app mpos-db mpos-minio` → `docker compose up -d --wait mpos-app`。⛔ **绝不能用 `docker compose down`** —— 它是项目级的，会把 `mpyhw-api`、`upypi`、`caddy` 和插件后端的 `db` 一起停掉，两个线上站直接断服。（v5 更正：原文就是 `down && up -d`，是独立栈时代的残留。）
    - `pg_dump`（DB：账号/登录/计费的权威源）+ **MinIO 用 `mc mirror` 导出**（session 状态与 artifact 的权威源——`session_state.json` 等就住在对象存储里，**不做在线卷目录拷贝**）→ **在一次性栈恢复并登录成功**；备份落**离机/独立盘**目的地，定保留期；两者非同刻一致，**明确接受的偏斜口径**：账号/点数以 DB 备份为准，session 以 MinIO 备份为准，互相引用缺失时（如 session 在而 artifact 缺、或反之）应干净报错，接受的数据丢失窗口 = 备份间隔；恢复演练至少覆盖「DB 旧于 MinIO」「MinIO 旧于 DB」两个方向各一次登录+开 session 验证；
-   - digest 回滚演练：改 `.env` → `docker compose up -d --wait mpos-app`（**同样带 service 名**）→ 登录/计费/生成正常 → 滚回。当前 schema 仅增量（`create_all` + `auth.py` 手写补列），**未来任何非增量变更前必须先补 Alembic**，届时回滚演练要含 DB 恢复；
+   - 回滚演练（v6 改为 tag 方式）：`docker tag <上一个 digest> ghcr.io/freakstudiocn/micropythonos-ai-app-builder:latest` → `docker compose up -d --wait mpos-app`（**同样带 service 名**）→ 登录/计费/生成正常 → 滚回。当前 schema 仅增量（`create_all` + `auth.py` 手写补列），**未来任何非增量变更前必须先补 Alembic**，届时回滚演练要含 DB 恢复；
    - 宿主端口审计：DB/MinIO/app 无任何公网绑定。
 10. 观察期 → **切换日前置门：注册闸门拍板**（见风险 1）→ 合并 main → 完整自动链路（CI→workflow_run→build→deploy）再验一遍 → 老站下线（erkou111）。
 
