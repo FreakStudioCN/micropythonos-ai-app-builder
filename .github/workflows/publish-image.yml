@@ -177,8 +177,8 @@ jobs:
     runs-on: upypi
     # Must exceed the sum of the inner bounds, or the job limit becomes the
     # thing that fires and the specific `timeout` messages never get printed:
-    # pull 3x120s + 30s backoff = 390s, deploy 420s, rollback 420s = 1230s.
-    timeout-minutes: 25
+    # pull 6x180s + 5x10s backoff = 1130s, deploy 420s, rollback 420s = 1970s.
+    timeout-minutes: 35
     environment: production
     concurrency:
       group: production-deploy
@@ -236,21 +236,34 @@ jobs:
           # only ever sees a non-zero exit, and a hung `docker pull` does not
           # exit at all. Wrapping converts "hangs forever" — which no retry can
           # catch — into "exits 124", which is the failure this loop was written
-          # for. A healthy pull here takes ~11s, so 120s is not a tight bound.
+          # for.
+          #
+          # ATTEMPTS, not duration, is the lever. A hung connection is a black
+          # hole: it never returns and never errors, so a longer single attempt
+          # just waits longer on the same dead socket. The evidence is that a
+          # DIFFERENT layer stalls each time, which means a fresh attempt draws
+          # fresh connections — that is the thing that can actually succeed. A
+          # healthy pull is ~11s and 8 of 9 layers land inside 120s, so 180s is
+          # slack for a slow-but-alive connection, not patience for a dead one.
+          #
+          # Note this cannot accumulate progress: SIGTERM makes docker roll back
+          # the partial pull, so every attempt re-fetches all nine layers. If
+          # this still fails, the answer is to get the image onto the host once
+          # by other means (docker save/load) — not to raise these numbers.
           pulled=""
-          for attempt in 1 2 3; do
+          for attempt in $(seq 1 6); do
             rc=0
-            timeout 120 docker pull "${IMAGE}" || rc=$?
+            timeout 180 docker pull "${IMAGE}" || rc=$?
             if [ "${rc}" = 0 ]; then pulled=1; break; fi
             if [ "${rc}" = 124 ]; then
-              echo "pull attempt ${attempt}/3 hung past 120s and was killed; retrying in $((attempt * 10))s" >&2
+              echo "pull attempt ${attempt}/6 hung past 180s and was killed; retrying in 10s" >&2
             else
-              echo "pull attempt ${attempt}/3 failed (exit ${rc}); retrying in $((attempt * 10))s" >&2
+              echo "pull attempt ${attempt}/6 failed (exit ${rc}); retrying in 10s" >&2
             fi
-            sleep $((attempt * 10))
+            sleep 10
           done
           if [ -z "${pulled}" ]; then
-            echo "docker pull failed after 3 attempts — GHCR unreachable, hung, or digest missing" >&2
+            echo "docker pull failed after 6 attempts — registry unreachable, hung, or digest missing" >&2
             exit 1
           fi
           cd "${STACK_DIR}"
