@@ -37,10 +37,11 @@
 # (`service_completed_successfully`, `up --wait`).
 #
 # Images come from the host's Huawei Cloud mirror, not Docker Hub, which that
-# machine cannot reach. That costs the digest pinning the plan asked for: a
-# mirrored image has a different digest, and it can only be read after the
-# first pull on the host. Resolve them there and pin in a follow-up. MPOS_IMAGE
-# is unaffected — it is ours, on GHCR, and stays a digest.
+# machine cannot reach. All three are digest-pinned against THAT mirror — the
+# digests were resolved by actually pulling them on 2026-08-01, so the mirror
+# paths are verified, not inferred. They are index digests, so they stay correct
+# whatever the host's architecture. Do not swap in a docker.io digest: the same
+# tag has a different digest there, and the pull would fail on this host.
 
 services:
   mpos-app:
@@ -106,7 +107,9 @@ services:
     # proven pullable on that machine, and the layers are already cached there.
     # Docker Hub is not reachable from it — every Hub image in the host stack
     # goes through this mirror — so a docker.io digest pin would simply fail.
-    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/postgres:16-alpine
+    # Digest resolved against the mirror itself (2026-08-01); it is the index
+    # digest, so it is platform-independent.
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/postgres:16-alpine@sha256:31482568d12f43e4e3c51a2d87993eddd0163354306f987be3bc674bbcbd3e08
     restart: unless-stopped
     environment:
       POSTGRES_USER: mpos
@@ -126,11 +129,10 @@ services:
     logging: *mpos-logging
 
   mpos-minio:
-    # UNVERIFIED: the mirror path is inferred from the host's postgres/caddy
-    # entries (ddn-k8s/docker.io/<org>/<image>). The registry answers 401 to an
-    # anonymous probe even for images known to exist, so existence cannot be
-    # checked from outside. `docker pull` this on the host BEFORE going live.
-    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z
+    # Mirror path VERIFIED by pulling it (2026-08-01), which also produced this
+    # digest. An anonymous registry probe answers 401 even for images that
+    # exist, so the earlier "unverified" note was about the probe, not the path.
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z@sha256:52dfd5c0bbd38d3219f2058c7af216d9f9a27a994b7b5baad09bbd38866015ff
     restart: unless-stopped
     command: server /data
     environment:
@@ -140,13 +142,12 @@ services:
     volumes:
       - mpos_miniodata:/data
     networks: [mpos_internal]
-    # VERIFY ON THE HOST BEFORE THE FIRST DEPLOY: this assumes `curl` exists in
-    # the MinIO image. Recent MinIO images run on a minimal base and their own
-    # docs moved to `mc ready local`. If curl is absent the check can never
-    # pass, mpos-minio-init never runs (it waits for service_healthy), mpos-app
-    # never starts, and `up -d --wait` just times out — it reads as a hang, not
-    # as a bad healthcheck. One command settles it:
-    #   docker run --rm --entrypoint sh <image> -c 'command -v curl mc'
+    # `curl` is present at /usr/bin/curl in this exact image — checked by
+    # running it (2026-08-01), not assumed. Worth stating because if it were
+    # absent the failure is invisible: the check never passes, mpos-minio-init
+    # waits on service_healthy forever, mpos-app never starts, and `up --wait`
+    # times out looking like a hang. `mc` is at /usr/bin/mc too, so
+    # `mc ready local` is available if this image ever drops curl.
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
       interval: 10s
@@ -161,8 +162,8 @@ services:
   # MinIO cannot read back a stored secret, so convergence is probed by actually
   # authenticating with the target app credentials.
   mpos-minio-init:
-    # Same unverified mirror path as mpos-minio — pull-test both together.
-    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/minio/mc:RELEASE.2025-08-13T08-35-41Z
+    # Same mirror, likewise pulled and digest-resolved on 2026-08-01.
+    image: swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:bdfae21c72b19fae5a005c56dddba25a873d75fac3dda60f55aea7e417382cbe
     restart: "no"
     environment:
       MINIO_ROOT_USER: CHANGE-ME-root-user-hex16          # = mpos-minio value
