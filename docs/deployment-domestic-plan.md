@@ -33,11 +33,21 @@ v1–v4 假设新开 `/srv/mpos` 独立栈。**v5 改为把 mpos 的四个服务
 
 验证方式：与**真文件**合并后无键碰撞，`docker compose config` 通过，8 服务 / 7 卷齐全，他四个服务的 image 与网络均未变。
 
-### ⚠️ 未决：镜像源可能拉不动
+### 镜像源：已改走华为云镜像站，并已实测（2026-08-01 结案）
 
-他 stack 里**每一个 Docker Hub 镜像都走了华为云镜像站**（`swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/library/{postgres,caddy}`），只有自家 GHCR 镜像直连。强烈提示那台机拉不动 Docker Hub。
+他 stack 里**每一个 Docker Hub 镜像都走华为云镜像站**（`swr.cn-north-4.myhuaweicloud.com/ddn-k8s/docker.io/...`），只有自家 GHCR 直连——那台机拉不动 Docker Hub。所以原方案钉的 Docker Hub digest 会直接失败，三个镜像全部改走该镜像站。
 
-本方案钉的 `postgres:16.14@sha256:…` 与 `minio/minio@sha256:…` **都是 Docker Hub digest，大概率拉不下来**。`ddn-k8s/docker.io/minio/minio` 是否存在**未经验证**，不要当成事实。落地前必须由 ops owner 实测 `docker pull`。附带后果：走镜像站则 digest 与 Docker Hub 不同，v4 的"digest pin"供应链要求需要重新取值。
+**本机实拉验证通过**，三个都存在，并由此取到 digest（index digest，跨平台通用），已回填成 pin：
+
+| 镜像 | digest |
+|---|---|
+| `library/postgres:16-alpine` | `sha256:31482568…3e08` |
+| `minio/minio:RELEASE.2025-09-07T16-13-09Z` | `sha256:52dfd5c0…15ff` |
+| `minio/mc:RELEASE.2025-08-13T08-35-41Z` | `sha256:bdfae21c…2cbe` |
+
+所以 v4 的 digest-pin 硬门**仍然满足**，不需要"首次部署后回填"这个妥协。
+
+**顺带证伪一条 P1 风险**：MinIO healthcheck 依赖的 `curl` **确实存在**（`/usr/bin/curl`，实跑容器确认），`mc` 也在（`/usr/bin/mc`）。此前担心的"curl 缺失 → init 永不启动 → app 永不启动 → `up --wait` 静默超时"**不成立**。
 
 ### 保留独立 postgres 容器（推翻"复用现有 pg"）
 
@@ -113,7 +123,7 @@ workflow_dispatch（仅 main + 审批）─→ 同上
 
 实施时所有 pin 必须落成**具体值**：GitHub Actions 各 action 按 commit SHA 引用、`MPOS_IMAGE` 永远是 `@sha256:` digest。
 
-> **v5 例外（postgres/minio 的 digest pin 暂缓）**：这三个镜像改走华为云镜像站后，digest 与 Docker Hub 不同，且只能在宿主首次 pull 之后才读得到，所以当前用的是 tag。**这确实不满足本文原定的硬门**，代价是 tag 可变——缓存清掉后重拉可能拿到不同字节，回滚不再可复现。补法：首次部署后在宿主 `docker images --digests` 取值，回填成 digest 并单独提一个 PR。
+> **v5：postgres/minio/mc 的 digest 已实测取得并回填**（见上节表格），原先「暂缓 pin」的妥协作废。三个 pin 指向的是华为云镜像站的 digest，不是 Docker Hub 的。
 
 ## 仓库改动清单（实施分支 `deploy/domestic`，6 件）
 
@@ -230,8 +240,8 @@ mpos.upypi.net {
 - **现有 compose.yml 与 Caddyfile 的当前内容**——仓库里那份是模板不是实跑文件，我们无法读取生产机。粘贴前需据实核对是否已有同名 service/network/volume。
 - ~~现有栈目录的绝对路径~~ **已知：`/srv/upypi`**。来源是插件后端已合并的 CD（`mpy-hardware-extension` PR #26，`cd /srv/upypi && docker compose up -d`），与他 compose 里 caddy 挂 `./Caddyfile` 一致。workflow 已写成默认值，路径变了再设 `vars.MPOS_STACK_DIR` 覆盖。（`caddy_net` 一项作废：无此网络，见 v5。）
 - **🆕 内存预算**（原先只问了磁盘）。他明确说过「服务器配置不是很够」——这正是当初否掉 CD 框架、选自托管 runner 的理由。本方案在已有 4 个服务的机器上**新增两个常驻进程**（postgres + MinIO），并声明 `mem_limit` 合计 4G（app 2g / db 1g / minio 1g）。`mem_limit` 是上限不是预留，但实际占用是真的。**上机前必须确认剩余内存扛得住**，否则第一次 `up` 就可能触发 OOM——而 OOM 杀的**不一定是我们的容器**。
-- **实测 `docker pull` 这两个镜像**：`.../ddn-k8s/docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z` 与 `.../minio/mc:RELEASE.2025-08-13T08-35-41Z`。路径是按他 postgres/caddy 的命名规律推的，**未验证**——匿名探 registry 一律 401（连已知存在的 `library/postgres` 也 401），外部证不了。拉不动就要他给可用路径或换自建镜像。（postgres 已改用他正在跑的那个 `library/postgres:16-alpine`，无此风险。）
-- **实测 MinIO 镜像里有没有 `curl`**：`docker run --rm --entrypoint sh <minio镜像> -c 'command -v curl mc'`。没有的话 healthcheck 永远不过 → init 不跑 → app 不起 → `up --wait` 超时，**症状是"卡住"不是"健康检查配错"**。届时改用 `mc ready local`。
+- ~~实测三个镜像能不能从华为云镜像站拉~~ **已自测通过（2026-08-01，本地 Docker）**，不再需要他代劳。三个都拉下来了，digest 已回填进 compose（见 v5）。原先"路径是按命名规律推的、未验证"的顾虑作废——之所以早先证不了，是因为**匿名探 registry 对存在的镜像也一律 401**，那是探针的限制，不是路径的问题。教训：能自己拉就别拿去当"需对方确认"。
+- ~~实测 MinIO 镜像里有没有 `curl``~~ **已自测：`/usr/bin/curl` 和 `/usr/bin/mc` 都在**（同上）。这条原本是 P1，因为缺 `curl` 的失败**不可见**：healthcheck 永远不过 → init 不跑 → app 不起 → `up --wait` 超时，症状是"卡住"而不是"健康检查配错"。现已证伪，healthcheck 保持 `curl` 不动；`mc ready local` 作为该镜像日后去掉 curl 时的备选记在 compose 注释里。
 - 新服务上机同意；磁盘预算（镜像+Postgres+MinIO 随生成量涨）。
 - 子域名定名 + DNS（切换前压 TTL）。
 - runner 限定到本仓库（label 只是路由不是边界）。
