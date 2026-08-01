@@ -55,6 +55,13 @@ v1–v4 假设新开 `/srv/mpos` 独立栈。**v5 改为把 mpos 的四个服务
 2. **`docker compose up -d --wait` 无 service 参数** → 改为 `... --wait mpos-app`，否则每次 mpos 部署都会重启插件后端。**永远不要加 `--remove-orphans`**，它会拆掉邻居服务。
 3. 栈目录不再写死 `/srv/mpos` → 读仓库变量 `MPOS_STACK_DIR`，未设置则 job 直接失败。
 
+### 与宿主现有 CD 的两处有意分歧（`mpy-hardware-extension` PR #26 是参考实现）
+
+那份已合并的 CD 只有 21 行，机制是：`docker login` → 按 digest `pull` → **`docker tag <digest> :latest`** → `cd /srv/upypi && docker compose up -d`。两处我们**故意**不一样，不是疏漏：
+
+1. **镜像引用**：他们 compose 里写死 `:latest`，靠部署时重打 tag 让 compose 认到新镜像；我们走 `.env` 里 `MPOS_IMAGE` 的 `@sha256:` digest。我们这套不可变、可回滚可复现，但**同一份 compose 里从此并存两套机制**——交接时必须讲清楚，否则接手的人会以为 mpos 也能靠重打 tag 换版本。
+2. **作用域**：他们 `up -d` 不带 service 名（每次发插件后端都会重启全栈，含 Caddy）；我们带 `mpos-app`。我们这套更安全，代价是「别重启邻居」这条纪律在宿主现有实践里本来就不成立，不能假定对方知道。
+
 ### 接受的新代价
 
 一份 compose 意味着**爆炸半径合并**：该文件语法错误会同时挡住两个服务的部署，宿主上手滑的 `up -d`（不带 service 名）会重启插件后端。以 service 级 scope + 上面的注释缓解，不做机制隔离。
@@ -221,7 +228,8 @@ mpos.upypi.net {
 
 - **同意把四个服务并进现有 compose.yml**（而不是另起独立栈），以及随之而来的爆炸半径合并。
 - **现有 compose.yml 与 Caddyfile 的当前内容**——仓库里那份是模板不是实跑文件，我们无法读取生产机。粘贴前需据实核对是否已有同名 service/network/volume。
-- 现有栈目录的绝对路径（填进仓库变量 `MPOS_STACK_DIR`）。（`caddy_net` 一项作废：无此网络，见 v5。）
+- ~~现有栈目录的绝对路径~~ **已知：`/srv/upypi`**。来源是插件后端已合并的 CD（`mpy-hardware-extension` PR #26，`cd /srv/upypi && docker compose up -d`），与他 compose 里 caddy 挂 `./Caddyfile` 一致。workflow 已写成默认值，路径变了再设 `vars.MPOS_STACK_DIR` 覆盖。（`caddy_net` 一项作废：无此网络，见 v5。）
+- **🆕 内存预算**（原先只问了磁盘）。他明确说过「服务器配置不是很够」——这正是当初否掉 CD 框架、选自托管 runner 的理由。本方案在已有 4 个服务的机器上**新增两个常驻进程**（postgres + MinIO），并声明 `mem_limit` 合计 4G（app 2g / db 1g / minio 1g）。`mem_limit` 是上限不是预留，但实际占用是真的。**上机前必须确认剩余内存扛得住**，否则第一次 `up` 就可能触发 OOM——而 OOM 杀的**不一定是我们的容器**。
 - **实测 `docker pull` 这两个镜像**：`.../ddn-k8s/docker.io/minio/minio:RELEASE.2025-09-07T16-13-09Z` 与 `.../minio/mc:RELEASE.2025-08-13T08-35-41Z`。路径是按他 postgres/caddy 的命名规律推的，**未验证**——匿名探 registry 一律 401（连已知存在的 `library/postgres` 也 401），外部证不了。拉不动就要他给可用路径或换自建镜像。（postgres 已改用他正在跑的那个 `library/postgres:16-alpine`，无此风险。）
 - **实测 MinIO 镜像里有没有 `curl`**：`docker run --rm --entrypoint sh <minio镜像> -c 'command -v curl mc'`。没有的话 healthcheck 永远不过 → init 不跑 → app 不起 → `up --wait` 超时，**症状是"卡住"不是"健康检查配错"**。届时改用 `mc ready local`。
 - 新服务上机同意；磁盘预算（镜像+Postgres+MinIO 随生成量涨）。

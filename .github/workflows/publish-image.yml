@@ -168,7 +168,13 @@ jobs:
     name: deploy on production host
     needs: image
     if: github.event_name == 'workflow_run' || github.event_name == 'workflow_dispatch'
-    runs-on: [self-hosted, Linux, X64, upypi]
+    # Single label, matching the plugin backend's already-working deploy job on
+    # this same runner. The four-element [self-hosted, Linux, X64, upypi] form
+    # relies on the default labels actually being present; if the runner was
+    # registered without one of them the job sits QUEUED forever and never
+    # errors. Labels are routing, not a security boundary — scoping the runner
+    # to this repository is what limits it, so the extra labels buy nothing.
+    runs-on: upypi
     timeout-minutes: 15
     environment: production
     concurrency:
@@ -183,15 +189,14 @@ jobs:
           DIGEST: ${{ needs.image.outputs.digest }}
           SOURCE_SHA: ${{ needs.image.outputs.source_sha }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          STACK_DIR: ${{ vars.MPOS_STACK_DIR }}
+          # /srv/upypi is where the stack actually lives: the plugin backend's
+          # merged deploy job cd's there today. Overridable if the ops owner
+          # moves it; a wrong value fails loudly at the cd below, so the default
+          # cannot mask a mistake.
+          STACK_DIR: ${{ vars.MPOS_STACK_DIR || '/srv/upypi' }}
         run: |
           set -euo pipefail
           IMAGE="ghcr.io/freakstudiocn/micropythonos-ai-app-builder@${DIGEST}"
-          if [ -z "${STACK_DIR}" ]; then
-            echo "repository variable MPOS_STACK_DIR is unset — it must point at the" >&2
-            echo "directory holding the shared compose.yml on the production host." >&2
-            exit 1
-          fi
           export DOCKER_CONFIG="$(mktemp -d)"
           # ONE exit handler, because a second `trap ... EXIT` would silently
           # replace this one and leave the GHCR credentials on the host. It also
@@ -210,7 +215,20 @@ jobs:
           }
           trap cleanup EXIT INT TERM
           echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          docker pull "${IMAGE}"
+          # GitHub reachability from this host is intermittent — it is why a
+          # webhook-driven CD was rejected in favour of this runner. Retry a
+          # transient blip rather than failing a deployment over it. Still fails
+          # loudly once the attempts are spent; this is a retry, not a fallback.
+          pulled=""
+          for attempt in 1 2 3; do
+            if docker pull "${IMAGE}"; then pulled=1; break; fi
+            echo "pull attempt ${attempt}/3 failed; retrying in $((attempt * 10))s" >&2
+            sleep $((attempt * 10))
+          done
+          if [ -z "${pulled}" ]; then
+            echo "docker pull failed after 3 attempts — GHCR unreachable or digest missing" >&2
+            exit 1
+          fi
           cd "${STACK_DIR}"
 
           # This .env is shared with the plugin backend's stack. Only the
