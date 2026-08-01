@@ -57,13 +57,55 @@ v1–v4 假设新开 `/srv/mpos` 独立栈。**v5 改为把 mpos 的四个服务
 
 新增 `deploy/render-compose-block.sh`：生成全部 5 个凭据并写入所有必须一致的位置，末尾断言无残留 `CHANGE-ME`。外部签发的 `DEEPSEEK_API_KEY` 校验 `^sk-[A-Za-z0-9_-]+$`，不符合直接拒绝渲染（含 `$`/`|` 会破坏 compose 插值）。**禁止手工填任何一半**：四组配对值不一致不会在编辑期报错，只会变成起不来的容器或一小时后的 S3 403。
 
-### CD job 的三处相应改动
+### CD job 的四处相应改动
 
 栈共享之后，原 deploy job 有两处会误伤邻居：
 
 1. **`.env` 整文件覆盖** → 改为**只重写 `MPOS_IMAGE` 那一行**，且**原地写入**（不用临时文件 + `mv`，那会改掉文件的属主与权限——该文件可能属于别的账号）。已实测：邻居行在部署与回滚后均完好，inode 不变。缺 `MPOS_IMAGE` 行则大声失败（首次部署是宿主手工，由它播种）。
 2. **`docker compose up -d --wait` 无 service 参数** → 改为 `... --wait mpos-app`，否则每次 mpos 部署都会重启插件后端。**永远不要加 `--remove-orphans`**，它会拆掉邻居服务。
 3. 栈目录不再写死 `/srv/mpos` → 读仓库变量 `MPOS_STACK_DIR`，未设置则 job 直接失败。
+4. **每个 docker 调用都用 `timeout` 兜住**（2026-08-01 首次真实运行打脸后加的，不是预防性设计）。
+
+### 首次真实部署的事故：挂死的 pull 不是失败的 pull
+
+合并当天 CD 第一次跑就挂了，值得单列，因为它推翻的是一条**我自以为已经防住了**的风险：
+
+```
+06:16:28  2fb9654321e5: Download complete     ← 9 层里 8 层，11 秒拉完
+06:31:26  ##[error] The operation was canceled ← 最后一层挂了 15 分钟，job 超时
+```
+
+为此专门写的三次重试**一次都没触发**。原因不是参数不对，是机制选错了：`if docker pull …; then` 只能观察到**非零退出**，而挂死的 pull 根本不退出，循环就卡在第一轮里。
+
+这和 compose 注释里那条 MinIO healthcheck 缺 `curl` 的风险是**同一种失败形状**——静默挂起而不是大声报错，症状是「卡住」不是「配错」。我在那边认出来了，在这边没认出来。`timeout` 把「永远不返回」变成「exit 124」，重试才接得住它本来就该接的东西。
+
+修完是**行为验证**的，不是看代码看对的：挂死 → 三次有界重试 → exit 1；先挂后成 → 第 2 次成功；纯失败 → exit 1；正常 → 第 1 次过。反过来拿旧写法跑同一个挂死场景，8 秒内零输出、只能从外部杀掉，坐实重试从未触发。
+
+`docker compose up --wait` 同样包了，而且那里不是假想：首次部署时**正是这个 `up` 去镜像站拉 postgres/minio/mc**，能以完全相同的方式挂在某一层上，而 `--wait` 自己没有任何时限。回滚那次 `up` 也包了——回滚挂死会烧光剩余预算，并把栈丢在重启到一半的状态、日志里还没有任何线索。
+
+job 上限相应从 15min 提到 25min，必须大于内层之和（390s + 420s + 420s），否则先炸的是 job 上限，那些具体的 timeout 信息根本打不出来。
+
+修完立刻用真实运行验证了一遍，行为完全符合设计——7 分钟大声失败，取代 15 分钟静默挂死；`removed temporary docker config /tmp/tmp.CxpPmKESGm` 也证实退出处理器确实跑了（上次取消后无法证实这一点）。
+
+### 🔴 但真正的问题不是超时，是 GHCR 从这台机拉不动（未解决）
+
+修复生效之后，暴露出底下压着的东西：**三次有界重试全部挂死**，这不是偶发波动。
+
+| 尝试 | 下完 | 卡住的层 |
+|---|---|---|
+| 1/3 | 8/9 | `6fd774763a57` |
+| 2/3 | 8/9（含 6fd7，且已有 7 层解压完成） | `76dd1e712a48` |
+| 3/3 | 8/9 | `6fd774763a57` 又卡 |
+
+三个事实决定了性质：
+
+1. **每次卡的层不一样**——不是某个 blob 损坏，是随机某条连接建立后被黑洞（不返回也不报错）。docker 自身没有停滞检测，所以它会一直等。
+2. **每次都能下完 9 层里的 8 层**，第 2 次甚至已经解压完 7 层——离成功非常近，但总差最后一口。
+3. **三次尝试之间进度不累积**：`timeout` 发 SIGTERM 后 docker 会回滚未完成的拉取，所以第 3 次又得从头下 8 层。加大重试次数换不到累积收益。
+
+这与 ops owner 说的「github 有时候因为墙会波动」一致，也解释了为什么**他 stack 里每一个 Docker Hub 镜像都走华为云镜像站**——这台机的跨境镜像拉取本来就不可靠。我们的 GHCR 同样是跨境，只是之前没被验证过。
+
+**所以调参数（更长 timeout、更多重试）是治标**，方向应该是把镜像放到国内 registry。这一条待拍板，未定之前 CD 的部署环节不可用（构建与推送不受影响，那一半在 GitHub 侧）。
 
 ### 与宿主现有 CD 的两处有意分歧（`mpy-hardware-extension` PR #26 是参考实现）
 
@@ -92,7 +134,7 @@ v1–v4 假设新开 `/srv/mpos` 独立栈。**v5 改为把 mpos 的四个服务
 
 1. **main 冻结**：过渡期内不合并任何改动；切换日一次性合并 `deploy/domestic`。
 2. **新工作全在分支 `deploy/domestic`**。分支 push 只构建镜像（含容器冒烟），**不部署**。
-3. **首次生产部署 = 宿主机手工执行**（`workflow_dispatch` 只能触发默认分支上已存在的 workflow，分支阶段机制上不可用；手工路径见「首次上线序列」，这是主路径不是兜底）。
+3. ~~**首次生产部署 = 宿主机手工执行**~~ **该前提已随合并失效（2026-08-01）**。原理由是「`workflow_dispatch` 只能触发默认分支上已存在的 workflow，分支阶段机制上不可用」——PR #9 已合并进 main，workflow 现在就在默认分支上，这个限制没有了。首次部署改走 CD（`workflow_dispatch`），宿主端只需准备好文件。**连带消掉一个卡点**：手工路径要求那台机上现有的 `docker login` 能拉到我们这个 private 包；走 CD 则由 deploy job 用 `secrets.GITHUB_TOKEN` + `packages: read` 自己登录，**已实测 `Login Succeeded` 且拉下 9 层中的 8 层**，不需要 ops owner 提供或验证任何 GHCR 凭据。
 4. 合并 main 后的常态 CD：`CI 成功(main) → workflow_run → build → deploy`；`workflow_dispatch` 仅允许 main ref 且过 `production` environment 审批。
    ⚠️ **v5 实测：`production` environment 目前根本不存在**（API 404）。workflow 里写了 `environment: production`，GitHub 会在首次用到时自动建一个**没有任何保护规则**的同名环境 —— 也就是说「required reviewers 审批」这道门现在是空的。**切换日前必须手工建好该 environment 并配上 required reviewers**，否则本文多处把它当作缓解措施的地方都不成立。
 5. 过渡期给老站发修复：erkou111 在其 Render 面板手动 deploy；本仓库不持有其密钥。
@@ -220,9 +262,9 @@ mpos.upypi.net {
 ## 首次上线序列（顺序即门禁）
 
 1. 实施 PR 于 `deploy/domestic` → CI 绿 → 分支 push 的 image job 出镜像与 digest（含非 root 冒烟）。不合 main。
-2. GHCR 拉取权限。**已实测：三个包（`micropythonos-ai-app-builder`、`mpyhw-api`、`upypi`）全是 private**，匿名拉取 403。CD 的 deploy job 用 `GITHUB_TOKEN`（`packages: read`）自己登录，不受影响；**但首次部署是宿主手工执行，不在 workflow 里**，所以那台机上现有的 `docker login`（跑 `mpyhw-api` 就必须已经有）**必须同时能拉到新这个包** —— 若那份凭据是按仓库细粒度授权的就拉不到。让 ops owner 直接 `docker pull` 一次验，或把包设 public。
+2. ~~GHCR 拉取权限~~ **已不是门（2026-08-01 实测关闭）**。三个包（`micropythonos-ai-app-builder`、`mpyhw-api`、`upypi`）确实全是 private，匿名拉取 401——但首次部署既然改走 CD（见过渡期策略第 3 条），deploy job 就用 `secrets.GITHUB_TOKEN` + `packages: read` 自己登录，实测通过。**所以不要再去问 ops owner 要 classic token，也不要把包设 public**：这个仓库本身是 private（插件后端那个才是 public），把包设 public 等于首次公开整个代码库。
 3. **宿主预检**（ops owner + 我们）：**版本前提**——Docker Engine ≥ 24、Compose plugin ≥ v2.20（计划依赖 `service_completed_successfully` 与 `up --wait`，`docker compose version` 实测确认）→ **先备份现有 compose.yml** → 把 `render-compose-block.sh` 的输出粘进现有 compose.yml 的 `services:`/`networks:`/`volumes:` 三个映射 → 在同目录 `.env` 追加 `MPOS_IMAGE`（填 digest）→ `docker compose config` 通过**且输出里插件后端的 `db` 服务与 `postgres-data` 卷均未改动**（v5 更正：原写 `pgdata`、`mpyhw_internal` —— 真机上这两个名字都不存在，照着找会找不到）→ 无残留 `CHANGE-ME` 扫描。
-4. **首次部署 = 宿主手工** `docker compose up -d --wait mpos-app`（**带 service 名**，否则会重启插件后端；且不加 `--remove-orphans`）：`ps` 全 healthy、日志干净（无 storage 缺项/S3 403/DB auth 错误），并确认 `mpyhw-api` 未被重建。
+4. **首次部署 = 触发 `workflow_dispatch`**（v5 更正：原为宿主手工，理由已失效，见过渡期策略第 3 条）。deploy job 自己 `docker compose up -d --wait mpos-app`——**带 service 名**，否则会重启插件后端；且不加 `--remove-orphans`。验收不变：`ps` 全 healthy、日志干净（无 storage 缺项/S3 403/DB auth 错误），并确认 `mpyhw-api` 未被重建。宿主手工那条命令仍然是有效的兜底，但不再是主路径。
 5. **先验后端再暴露**：`docker compose exec caddy wget -qO- http://mpos-app:10000/api/health` 通过（Caddy 在栈内，从它自己容器里验才是真链路）→ 编辑与 compose.yml 同目录的 `Caddyfile` 追加 vhost → `docker compose exec caddy caddy reload --config /etc/caddy/Caddyfile`（**别 `up -d` 或重启 caddy 服务**，那会连带影响另外两个站）→ 最后 DNS（提前压 TTL）。
 6. 冒烟：health 四项 + 首页 + `/mpos-web/` + 显式 DB 读写（注册）+ 显式 MinIO 往返（session 对象出现且可读回）。注意 `/api/health` 只报配置不做实时依赖探活——监控不得只信它。
 7. superadmin：`docker compose exec mpos-app python scripts/provision_superadmin.py --target production --username <user> --promote-existing` → 权限矩阵抽查（superadmin 200 / 普通 403）。
