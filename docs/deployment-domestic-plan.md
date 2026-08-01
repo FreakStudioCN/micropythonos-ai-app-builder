@@ -143,6 +143,27 @@ job 上限相应上调（现为 35min），必须大于内层之和（6×180s + 
 
 我们另外保留了他们没有的两样：`timeout` 包裹（挂死的 pull 不会静默耗光 job）与部署后按镜像 ID 的一致性校验。这两样不增加宿主的认知负担——它们只活在 workflow 里。
 
+### ✅ 首次端到端部署成功（2026-08-01 10:01 UTC）
+
+`5f8013f` 那次 CD 全绿，四个容器起齐：
+
+```
+Login Succeeded
+Status: Downloaded newer image ...@sha256:50ddd976     ← 3.5s（增量，层已在机上）
+Container upypi-mpos-db-1          Healthy
+Container upypi-mpos-minio-1       Healthy
+Container upypi-mpos-minio-init-1  Exited              ← 一次性收敛任务，正常
+Container upypi-mpos-app-1         Healthy
+```
+
+三条本方案的核心断言由此**被实测坐实**，不再是设计意图：
+
+1. **邻居没被碰**——整份 deploy 日志里 `caddy`/`mpyhw-api`/`upypi`/`db` 一次都没出现。`up -d --wait mpos-app` 的 service 级作用域是有效的。
+2. **项目名取自目录**——容器名前缀 `upypi-`，与「不加顶层 `name:`」的判断一致。当初若加了 `name: mpos`，他所有在跑的容器会当场变孤儿。
+3. **存储硬门通过**——`MPOS_REQUIRE_DURABLE_STORAGE: "true"` 下 app 起不来就是存储不通；它 Healthy，说明 MinIO 桶/凭据/策略收敛与 `restore_all()` 全部真实跑通，Postgres 同理。
+
+**外部可访问性尚未验证，且从我这里验证不了。** `mpos.upypi.net` 已解析到 `8.148.255.95`（DNS 已配），但本机（境外）连它 443 是 `ECONNREFUSED`——**对照组 `upypi.net`（他已在跑的生产站）同样 `ECONNREFUSED`**，所以这个探测点无效，不能据此说站有问题。需要国内网络实测，或按上线序列第 5 步在栈内验：`docker compose exec caddy wget -qO- http://mpos-app:10000/api/health`。
+
 ### 接受的新代价
 
 一份 compose 意味着**爆炸半径合并**：该文件语法错误会同时挡住两个服务的部署，宿主上手滑的 `up -d`（不带 service 名）会重启插件后端。以 service 级 scope + 上面的注释缓解，不做机制隔离。
