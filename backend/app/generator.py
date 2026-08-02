@@ -53,7 +53,7 @@ SYSTEM_PROMPT = """
 - 射击游戏必须在底部提供清晰的 `LEFT`、`RIGHT`、`FIRE` 三个屏幕按钮：LEFT/RIGHT 点击后改变玩家位置，FIRE 点击后创建或激活子弹
 - 射击游戏必须保存玩家和子弹的数字坐标，用 `set_pos()` 更新对象；使用 `lv.timer_create()` 更新子弹、敌人、碰撞和分数
 - 不调用任何控件的 `get_pos()`、`get_coords()`、`get_x()`、`get_y()`；位置必须保存在 `self.player_x`、`self.bullet_y` 等 Python 数字状态中
-- 不调用 `get_child_cnt()`、`get_child()` 或其他控件树读取方法；创建控件时保存到 `self.day_buttons` 等 Python 列表，需要数量时使用 `len(self.day_buttons)`
+- 创建控件时优先把引用保存到 `self.day_buttons` 等 Python 列表，需要数量时优先使用 `len(self.day_buttons)`；当前绑定允许 `parent.get_child(index)` 和 `parent.get_child_count()`，但禁止旧名称 `get_child_cnt()` 和不稳定的 `get_child_by_type()`
 - `onCreate()` 必须快速返回，严禁 `while True`、界面主循环以及
   `sleep()`、`sleep_ms()` 等阻塞等待
 - 计算器解析表达式等纯计算逻辑允许使用有明确退出条件的有限 `while`；
@@ -641,7 +641,7 @@ def _validate_code(code: str) -> list[str]:
                 "get_x",
                 "get_y",
                 "get_child_cnt",
-                "get_child",
+                "get_child_by_type",
             }
         ):
             hits.append(
@@ -1060,6 +1060,13 @@ def _normalize_lvgl_code(code: str) -> tuple[str, list[str]]:
     )
     if flex_flow_count:
         applied.append("已移除 set_flex_flow 不支持的 selector 参数")
+    normalized, legacy_child_count = re.subn(
+        r"\.get_child_cnt\(\s*\)",
+        ".get_child_count()",
+        normalized,
+    )
+    if legacy_child_count:
+        applied.append("已将旧式 get_child_cnt() 转换为 get_child_count()")
     normalized, legacy_align_count = re.subn(
         r"(?P<target>[A-Za-z_][\w.]*)\.align\(\s*"
         r"(?P<base>[A-Za-z_][\w.]*)\s*,\s*"
@@ -1102,11 +1109,11 @@ def _build_correction(
             "不要调用控件 get_x/get_y；使用 Python 数字状态作为唯一位置来源。"
             "最终 app_code 文本中 get_x 和 get_y 的出现次数必须为 0。"
         )
-    if "get_child_cnt" in message or "get_child" in message:
+    if re.search(r"\b(?:get_child_cnt|get_child_by_type)\b", message):
         suggestions.append(
-            "不要读取 LVGL 控件树。创建日期按钮时把引用加入 self.day_buttons，"
-            "需要检查数量时使用 len(self.day_buttons)。最终 app_code 中 "
-            "get_child_cnt 和 get_child 的出现次数必须为 0。"
+            "不要使用旧式 get_child_cnt 或不稳定的 get_child_by_type。"
+            "创建控件时优先把引用加入 self.day_buttons，需要数量时使用 "
+            "len(self.day_buttons) 或当前绑定支持的 get_child_count()。"
         )
     if "set_text_align" in message:
         suggestions.append("删除 set_text_align，使用 label.align(...) 摆放标签。")
@@ -1892,7 +1899,7 @@ async def generate_app(
     )
     max_attempts = max(
         1,
-        min(2, int(os.getenv("DEEPSEEK_MAX_ATTEMPTS", "1"))),
+        min(2, int(os.getenv("DEEPSEEK_MAX_ATTEMPTS", "2"))),
     )
     deadline = time.monotonic() + budget_seconds
     correction = ""
@@ -1914,10 +1921,10 @@ async def generate_app(
             break
         attempts_used = attempt
         attempts_after_this = max_attempts - attempts_used
-        reserved_for_retry = 3.0 if attempts_after_this else 0.0
+        attempts_including_this = attempts_after_this + 1
         call_timeout = min(
             request_timeout_seconds,
-            max(2.0, remaining - reserved_for_retry),
+            max(2.0, remaining / attempts_including_this),
         )
         model_meta = {}
         try:
