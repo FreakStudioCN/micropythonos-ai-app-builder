@@ -341,16 +341,38 @@ class GeneratorQualityTests(unittest.TestCase):
         with self.assertRaisesRegex(GenerationError, "get_pos"):
             _validate_code(bad)
 
-    def test_widget_tree_reads_are_rejected_with_python_list_guidance(self) -> None:
-        bad = STYLED_APP.replace(
+    def test_current_widget_tree_reads_are_supported(self) -> None:
+        current = STYLED_APP.replace(
+            "        self.label = lv.label(card)",
+            "        child_count = card.get_child_count()\n"
+            "        first_child = card.get_child(0)\n"
+            "        self.label = lv.label(card)",
+        )
+        self.assertTrue(_validate_code(current))
+        self.assertTrue(_validate_api_summaries(current))
+
+    def test_legacy_child_count_is_normalized_to_current_binding(self) -> None:
+        legacy = STYLED_APP.replace(
             "        before = self.label.get_text()",
             "        count = self.label.get_child_cnt()\n"
             "        before = self.label.get_text()",
         )
-        with self.assertRaisesRegex(GenerationError, "get_child_cnt"):
+        normalized, warnings = _normalize_lvgl_code(legacy)
+        self.assertNotIn("get_child_cnt", normalized)
+        self.assertIn("get_child_count()", normalized)
+        self.assertTrue(any("get_child_count" in item for item in warnings))
+        self.assertTrue(_validate_code(normalized))
+
+    def test_unstable_child_lookup_is_rejected_with_python_list_guidance(self) -> None:
+        bad = STYLED_APP.replace(
+            "        before = self.label.get_text()",
+            "        child = self.label.get_child_by_type(0, lv.label_class)\n"
+            "        before = self.label.get_text()",
+        )
+        with self.assertRaisesRegex(GenerationError, "get_child_by_type"):
             _validate_code(bad)
         correction = _build_correction(
-            GenerationError("lv.obj.get_child_cnt is unavailable"),
+            GenerationError("lv.obj.get_child_by_type is unstable"),
             bad,
         )
         self.assertIn("self.day_buttons", correction)
@@ -361,6 +383,8 @@ class GeneratorQualityTests(unittest.TestCase):
         self.assertIn("get_pos()", SYSTEM_PROMPT)
         self.assertIn("set_style_bg_color", SYSTEM_PROMPT)
         self.assertIn("set_flex_flow(flow)", SYSTEM_PROMPT)
+        self.assertIn("parent.get_child(index)", SYSTEM_PROMPT)
+        self.assertIn("parent.get_child_count()", SYSTEM_PROMPT)
         self.assertIn("get_child_cnt()", SYSTEM_PROMPT)
         self.assertIn("align_to(other, lv.ALIGN.OUT_BOTTOM_MID, x, y)", SYSTEM_PROMPT)
         self.assertIn("纯计算逻辑允许使用", SYSTEM_PROMPT)
@@ -440,11 +464,8 @@ class GeneratorRetryDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         with patch(
             "app.generator._call_deepseek",
             new=AsyncMock(side_effect=responses),
-        ):
-            with patch.dict(
-                "app.generator.os.environ",
-                {"DEEPSEEK_MAX_ATTEMPTS": "2"},
-            ):
+        ) as _call_mock:
+            with patch.dict("app.generator.os.environ", {}, clear=True):
                 result = await generate_app(request, attempt_sink=records.append)
         self.assertEqual(result.model, "test-model")
         self.assertEqual([item["status"] for item in records], [
@@ -460,6 +481,12 @@ class GeneratorRetryDiagnosticTests(unittest.IsolatedAsyncioTestCase):
             "sk-super-secret",
             json.dumps(records, ensure_ascii=False),
         )
+        call_timeouts = [
+            float(call.kwargs["timeout_seconds"])
+            for call in _call_mock.await_args_list
+        ]
+        self.assertEqual(len(call_timeouts), 2)
+        self.assertGreaterEqual(min(call_timeouts), 55.0)
 
     async def test_failed_attempts_are_all_emitted(self) -> None:
         blocking = STYLED_APP.replace(
