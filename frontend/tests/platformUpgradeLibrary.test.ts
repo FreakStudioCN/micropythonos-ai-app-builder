@@ -23,6 +23,17 @@ describe("platform action gate", () => {
 
   it("normalizes only explicit, internally consistent system status payloads", () => {
     expect(normalizePublicSystemStatus({
+      status: "ready",
+      maintenance_mode: false,
+      message: "",
+      retry_after_seconds: 300,
+    })).toEqual({
+      status: "ready",
+      maintenance: false,
+      message: "",
+      retry_after_seconds: 300,
+    });
+    expect(normalizePublicSystemStatus({
       status: "maintenance",
       maintenance: true,
       message: "upgrade",
@@ -34,6 +45,11 @@ describe("platform action gate", () => {
       retry_after_seconds: 5,
     });
     expect(normalizePublicSystemStatus({ status: "ready", maintenance: true })).toBeNull();
+    expect(normalizePublicSystemStatus({
+      status: "ready",
+      maintenance: false,
+      maintenance_mode: true,
+    })).toBeNull();
     expect(normalizePublicSystemStatus({ maintenance: false })).toBeNull();
     expect(unavailablePublicSystemStatus().status).toBe("unavailable");
   });
