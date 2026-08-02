@@ -2,6 +2,7 @@ import asyncio
 import ast
 import base64
 import io
+import inspect
 import json
 import os
 import re
@@ -117,10 +118,13 @@ from mpos import Activity
 class GeneratedApp(Activity):
     def onCreate(self):
         screen = lv.obj()
-        label = lv.label(screen)
-        label.set_text("Hello")
-        label.center()
+        self.label = lv.label(screen)
+        self.label.set_text("Hello")
+        self.label.center()
         self.setContentView(screen)
+
+    def update_label(self, value):
+        self.label.set_text(value)
 
     def self_test(self):
         before = self.label.get_text()
@@ -196,6 +200,114 @@ class ApiValidationError(GenerationError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(f"{code}: {message}")
         self.code = code
+
+
+@dataclass(frozen=True)
+class _ApiCallSignature:
+    signature: inspect.Signature
+    display: str
+
+
+def _signature_from_ast_arguments(
+    arguments: ast.arguments,
+    *,
+    drop_bound_self: bool = False,
+    display_name: str = "call",
+) -> _ApiCallSignature | None:
+    parameters: list[inspect.Parameter] = []
+    positional = [
+        (arg, inspect.Parameter.POSITIONAL_ONLY)
+        for arg in arguments.posonlyargs
+    ] + [
+        (arg, inspect.Parameter.POSITIONAL_OR_KEYWORD)
+        for arg in arguments.args
+    ]
+    positional_default_start = len(positional) - len(arguments.defaults)
+    for index, (argument, kind) in enumerate(positional):
+        default = (
+            inspect.Parameter.empty
+            if index < positional_default_start
+            else None
+        )
+        parameters.append(
+            inspect.Parameter(argument.arg, kind, default=default)
+        )
+    if arguments.vararg is not None:
+        parameters.append(
+            inspect.Parameter(
+                arguments.vararg.arg,
+                inspect.Parameter.VAR_POSITIONAL,
+            )
+        )
+    for argument, default_node in zip(
+        arguments.kwonlyargs, arguments.kw_defaults, strict=True
+    ):
+        default = (
+            inspect.Parameter.empty if default_node is None else None
+        )
+        parameters.append(
+            inspect.Parameter(
+                argument.arg,
+                inspect.Parameter.KEYWORD_ONLY,
+                default=default,
+            )
+        )
+    if arguments.kwarg is not None:
+        parameters.append(
+            inspect.Parameter(
+                arguments.kwarg.arg,
+                inspect.Parameter.VAR_KEYWORD,
+            )
+        )
+    if drop_bound_self and parameters and parameters[0].name == "self":
+        parameters = parameters[1:]
+    try:
+        signature = inspect.Signature(parameters)
+    except ValueError:
+        return None
+    return _ApiCallSignature(
+        signature=signature,
+        display=f"{display_name}{signature}",
+    )
+
+
+def _signature_from_params(
+    params: str,
+    *,
+    drop_bound_self: bool,
+    display_name: str,
+) -> _ApiCallSignature | None:
+    if not params.strip():
+        params = ""
+    try:
+        parsed = ast.parse(f"def _api({params}):\n    pass\n")
+    except SyntaxError:
+        return None
+    function = parsed.body[0]
+    if not isinstance(function, ast.FunctionDef):
+        return None
+    return _signature_from_ast_arguments(
+        function.args,
+        drop_bound_self=drop_bound_self,
+        display_name=display_name,
+    )
+
+
+def _call_signature_error(
+    call: ast.Call, signature: _ApiCallSignature
+) -> str | None:
+    if any(isinstance(argument, ast.Starred) for argument in call.args):
+        return None
+    if any(keyword.arg is None for keyword in call.keywords):
+        return None
+    try:
+        signature.signature.bind(
+            *([None] * len(call.args)),
+            **{str(keyword.arg): None for keyword in call.keywords},
+        )
+    except TypeError as exc:
+        return f"{signature.display}：{exc}"
+    return None
 
 
 GenerationAttemptSink = Callable[[dict[str, Any]], None]
@@ -511,6 +623,87 @@ def _validate_code(code: str) -> list[str]:
     hits: list[str] = []
     forbidden_calls = {"eval", "exec", "compile", "open"}
     blocking_while_nodes: dict[int, int] = {}
+    module_functions = {
+        node.name: node
+        for node in tree.body
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    generated_class = next(
+        (
+            node
+            for node in tree.body
+            if isinstance(node, ast.ClassDef) and node.name == "GeneratedApp"
+        ),
+        None,
+    )
+    app_methods = {
+        node.name: node
+        for node in (generated_class.body if generated_class else [])
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+
+    def _callback_signature(
+        callback: ast.AST,
+    ) -> tuple[str, _ApiCallSignature] | None:
+        if (
+            isinstance(callback, ast.Attribute)
+            and isinstance(callback.value, ast.Name)
+            and callback.value.id == "self"
+        ):
+            method = app_methods.get(callback.attr)
+            if method is None:
+                return None
+            signature = _signature_from_ast_arguments(
+                method.args,
+                drop_bound_self=True,
+                display_name=f"self.{callback.attr}",
+            )
+            return (f"self.{callback.attr}", signature) if signature else None
+        if isinstance(callback, ast.Name):
+            function = module_functions.get(callback.id)
+            if function is None:
+                return None
+            signature = _signature_from_ast_arguments(
+                function.args,
+                display_name=callback.id,
+            )
+            return (callback.id, signature) if signature else None
+        if isinstance(callback, ast.Lambda):
+            signature = _signature_from_ast_arguments(
+                callback.args,
+                display_name="lambda",
+            )
+            return ("lambda", signature) if signature else None
+        return None
+
+    def _check_framework_callback(call: ast.Call) -> None:
+        callback_kind: str | None = None
+        if (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "add_event_cb"
+        ):
+            callback_kind = "事件回调"
+        elif (
+            isinstance(call.func, ast.Attribute)
+            and isinstance(call.func.value, ast.Name)
+            and call.func.value.id == "lv"
+            and call.func.attr == "timer_create"
+        ):
+            callback_kind = "定时器回调"
+        if callback_kind is None or not call.args:
+            return
+        resolved = _callback_signature(call.args[0])
+        if resolved is None:
+            return
+        callback_name, signature = resolved
+        try:
+            signature.signature.bind(None)
+        except TypeError:
+            expected_name = "event" if callback_kind == "事件回调" else "timer"
+            hits.append(
+                f"{callback_kind} {callback_name}{signature.signature} "
+                f"必须接收系统传入的 {expected_name} 参数"
+            )
 
     def _extract_assigned_names(node: ast.AST) -> set[str]:
         names: set[str] = set()
@@ -584,6 +777,7 @@ def _validate_code(code: str) -> list[str]:
                 blocking_while_nodes[id(child)] = int(getattr(child, "lineno", 0))
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
+            _check_framework_callback(node)
             if isinstance(node.func, ast.Name) and node.func.id in forbidden_calls:
                 hits.append(node.func.id)
             elif (
@@ -933,24 +1127,54 @@ def _api_indexes() -> dict[str, Any]:
         if isinstance(item, dict) and item.get("name")
     }
 
-    def inherited_methods(name: str, seen: set[str] | None = None) -> set[str]:
+    def inherited_method_records(
+        name: str, seen: set[str] | None = None
+    ) -> dict[str, dict[str, Any]]:
         if seen is None:
             seen = set()
         if name in seen or name not in widget_records:
-            return set()
+            return {}
         seen.add(name)
         item = widget_records[name]
-        methods = {method["name"] for method in item.get("methods", [])}
+        methods: dict[str, dict[str, Any]] = {}
         parent = item.get("parent")
         if isinstance(parent, str):
-            methods.update(inherited_methods(parent, seen))
+            methods.update(inherited_method_records(parent, seen))
+        methods.update(
+            {
+                method["name"]: method
+                for method in item.get("methods", [])
+                if isinstance(method, dict) and method.get("name")
+            }
+        )
         return methods
 
-    widgets = {name: inherited_methods(name) for name in widget_records}
-    object_methods = widgets.get("obj", set())
-    for name in widgets:
+    widget_method_records = {
+        name: inherited_method_records(name) for name in widget_records
+    }
+    object_method_records = widget_method_records.get("obj", {})
+    for name, methods in widget_method_records.items():
         if name != "obj":
-            widgets[name].update(object_methods)
+            for method_name, record in object_method_records.items():
+                methods.setdefault(method_name, record)
+    widgets = {
+        name: set(methods) for name, methods in widget_method_records.items()
+    }
+    widget_signatures = {
+        name: {
+            method_name: signature
+            for method_name, method in methods.items()
+            if (
+                signature := _signature_from_params(
+                    str(method.get("params") or ""),
+                    drop_bound_self=True,
+                    display_name=f"lv.{name}.{method_name}",
+                )
+            )
+            is not None
+        }
+        for name, methods in widget_method_records.items()
+    }
     data_classes = {
         name: {
             method["name"]
@@ -959,7 +1183,25 @@ def _api_indexes() -> dict[str, Any]:
         }
         for name, item in data_class_records.items()
     }
+    data_class_signatures = {
+        name: {
+            method["name"]: signature
+            for method in item.get("methods", [])
+            if isinstance(method, dict)
+            and method.get("name")
+            and (
+                signature := _signature_from_params(
+                    str(method.get("params") or ""),
+                    drop_bound_self=True,
+                    display_name=f"lv.{name}.{method['name']}",
+                )
+            )
+            is not None
+        }
+        for name, item in data_class_records.items()
+    }
     object_types = {**widgets, **data_classes}
+    object_signatures = {**widget_signatures, **data_class_signatures}
     functions = {
         item["name"]
         for item in lvgl_summary.get("functions", [])
@@ -969,6 +1211,20 @@ def _api_indexes() -> dict[str, Any]:
         item["name"]: str(item.get("returns") or "").strip().strip("\"'")
         for item in lvgl_summary.get("functions", [])
         if isinstance(item, dict) and item.get("name")
+    }
+    function_signatures = {
+        item["name"]: signature
+        for item in lvgl_summary.get("functions", [])
+        if isinstance(item, dict)
+        and item.get("name")
+        and (
+            signature := _signature_from_params(
+                str(item.get("params") or ""),
+                drop_bound_self=False,
+                display_name=f"lv.{item['name']}",
+            )
+        )
+        is not None
     }
     enums = {
         item["name"]
@@ -983,8 +1239,10 @@ def _api_indexes() -> dict[str, Any]:
     return {
         "widgets": widgets,
         "object_types": object_types,
+        "object_signatures": object_signatures,
         "functions": functions,
         "function_returns": function_returns,
+        "function_signatures": function_signatures,
         "enums": enums,
         "mpos_exports": exports,
         "lvgl_generated_at": lvgl_summary.get("generated_at"),
@@ -1010,6 +1268,7 @@ def _validate_api_summaries(code: str) -> tuple[list[str], dict[str, Any]]:
     object_types: dict[str, str] = {}
     planned: set[str] = set()
     missing: set[str] = set()
+    invalid_calls: set[str] = set()
 
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom) and node.module == "mpos":
@@ -1057,6 +1316,9 @@ def _validate_api_summaries(code: str) -> tuple[list[str], dict[str, Any]]:
                     and symbol not in indexes["enums"]
                 ):
                     missing.add(dotted)
+                elif signature := indexes["function_signatures"].get(symbol):
+                    if issue := _call_signature_error(node, signature):
+                        invalid_calls.add(issue)
             continue
         owner_name = dotted.rsplit(".", 1)[0]
         method_name = dotted.rsplit(".", 1)[1]
@@ -1066,11 +1328,22 @@ def _validate_api_summaries(code: str) -> tuple[list[str], dict[str, Any]]:
             planned.add(symbol)
             if method_name not in indexes["object_types"][widget_name]:
                 missing.add(symbol)
+            elif signature := indexes["object_signatures"].get(
+                widget_name, {}
+            ).get(method_name):
+                if issue := _call_signature_error(node, signature):
+                    invalid_calls.add(issue)
 
     if missing:
         raise ApiValidationError(
             "LVGL_API_MISSING",
             "以下调用不在当前 API summary 中：" + ", ".join(sorted(missing)),
+        )
+    if invalid_calls:
+        raise ApiValidationError(
+            "LVGL_API_INVALID_CALL",
+            "以下调用的参数不符合当前 API summary："
+            + "；".join(sorted(invalid_calls)),
         )
     metadata = {
         "checked": True,
@@ -1205,6 +1478,19 @@ def _build_correction(
         suggestions.append(
             "不要使用 set_repeat_count(0)，它会自动删除定时器并可能导致后续重复释放。"
             "一次性定时器使用 set_repeat_count(1)，且不要再手工删除。"
+        )
+    if "LVGL_API_INVALID_CALL" in message or "参数不符合当前 API summary" in message:
+        suggestions.append(
+            "严格按照失败原因中列出的 API 签名传参；括号内没有的参数必须删除，"
+            "不得给 positional-only 参数改用关键字传参。"
+        )
+    if "必须接收系统传入的 event 参数" in message:
+        suggestions.append(
+            "add_event_cb 的回调必须定义为 on_click(self, event)，即使函数体暂时不用 event 也不能省略。"
+        )
+    if "必须接收系统传入的 timer 参数" in message:
+        suggestions.append(
+            "lv.timer_create 的回调必须定义为 update(self, timer)，即使函数体暂时不用 timer 也不能省略。"
         )
     if "set_text_align" in message:
         suggestions.append("删除 set_text_align，使用 label.align(...) 摆放标签。")

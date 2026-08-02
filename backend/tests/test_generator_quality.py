@@ -411,6 +411,80 @@ class GeneratorQualityTests(unittest.TestCase):
         with self.assertRaisesRegex(ApiValidationError, "lv.timer_t.nonexistent"):
             _validate_api_summaries(bad)
 
+    def test_existing_widget_method_with_wrong_arity_is_rejected(self) -> None:
+        bad = STYLED_APP.replace(
+            '        self.label.set_text("Ready")',
+            '        self.label.set_text("Ready", 0)',
+        )
+        with self.assertRaisesRegex(
+            ApiValidationError, r"LVGL_API_INVALID_CALL.*lv\.label\.set_text"
+        ):
+            _validate_api_summaries(bad)
+
+    def test_existing_lvgl_function_with_wrong_arity_is_rejected(self) -> None:
+        bad = STYLED_APP.replace(
+            "        self.setContentView(screen)",
+            "        self.update_timer = lv.timer_create(self.update_label, 100)\n"
+            "        self.setContentView(screen)",
+        )
+        with self.assertRaisesRegex(
+            ApiValidationError, r"LVGL_API_INVALID_CALL.*lv\.timer_create"
+        ):
+            _validate_api_summaries(bad)
+
+    def test_current_lvgl_argument_counts_pass_summary_validation(self) -> None:
+        current = STYLED_APP.replace(
+            "        self.setContentView(screen)",
+            "        self.update_timer = lv.timer_create(self.update_label, 100, None)\n"
+            "        self.update_timer.set_repeat_count(1)\n"
+            "        self.setContentView(screen)",
+        )
+        self.assertTrue(_validate_api_summaries(current))
+
+    def test_event_callback_without_event_parameter_is_rejected(self) -> None:
+        bad = STYLED_APP.replace(
+            "        self.setContentView(screen)",
+            "        button.add_event_cb(self.on_click, lv.EVENT.CLICKED, None)\n"
+            "        self.setContentView(screen)",
+        ).replace(
+            "    def update_label(self, value):",
+            "    def on_click(self):\n"
+            "        pass\n\n"
+            "    def update_label(self, value):",
+        )
+        with self.assertRaisesRegex(GenerationError, "必须接收系统传入的 event 参数"):
+            _validate_code(bad)
+
+    def test_timer_callback_without_timer_parameter_is_rejected(self) -> None:
+        bad = STYLED_APP.replace(
+            "        self.setContentView(screen)",
+            "        self.update_timer = lv.timer_create(self.update_frame, 33, None)\n"
+            "        self.setContentView(screen)",
+        ).replace(
+            "    def update_label(self, value):",
+            "    def update_frame(self):\n"
+            "        pass\n\n"
+            "    def update_label(self, value):",
+        )
+        with self.assertRaisesRegex(GenerationError, "必须接收系统传入的 timer 参数"):
+            _validate_code(bad)
+
+    def test_framework_callbacks_with_one_runtime_parameter_are_allowed(self) -> None:
+        current = STYLED_APP.replace(
+            "        self.setContentView(screen)",
+            "        button.add_event_cb(self.on_click, lv.EVENT.CLICKED, None)\n"
+            "        self.update_timer = lv.timer_create(self.update_frame, 33, None)\n"
+            "        self.setContentView(screen)",
+        ).replace(
+            "    def update_label(self, value):",
+            "    def on_click(self, event):\n"
+            "        self.last_event = event\n\n"
+            "    def update_frame(self, timer):\n"
+            "        self.last_timer = timer\n\n"
+            "    def update_label(self, value):",
+        )
+        self.assertTrue(_validate_code(current))
+
     def test_unsafe_timer_cleanup_forms_are_rejected(self) -> None:
         private_delete = STYLED_APP.replace(
             "        before = self.label.get_text()",
@@ -454,6 +528,8 @@ class GeneratorQualityTests(unittest.TestCase):
         self.assertIn("set_repeat_count(1)", SYSTEM_PROMPT)
         self.assertIn("align_to(other, lv.ALIGN.OUT_BOTTOM_MID, x, y)", SYSTEM_PROMPT)
         self.assertIn("纯计算逻辑允许使用", SYSTEM_PROMPT)
+        self.assertIn("self.label = lv.label(screen)", SYSTEM_PROMPT)
+        self.assertIn("def update_label(self, value):", SYSTEM_PROMPT)
 
     def test_calendar_prompt_rejects_generic_styled_app(self) -> None:
         with self.assertRaisesRegex(GenerationError, "日期按钮集合"):
