@@ -162,7 +162,18 @@ Container upypi-mpos-app-1         Healthy
 2. **项目名取自目录**——容器名前缀 `upypi-`，与「不加顶层 `name:`」的判断一致。当初若加了 `name: mpos`，他所有在跑的容器会当场变孤儿。
 3. **存储硬门通过**——`MPOS_REQUIRE_DURABLE_STORAGE: "true"` 下 app 起不来就是存储不通；它 Healthy，说明 MinIO 桶/凭据/策略收敛与 `restore_all()` 全部真实跑通，Postgres 同理。
 
-**外部可访问性尚未验证，且从我这里验证不了。** `mpos.upypi.net` 已解析到 `8.148.255.95`（DNS 已配），但本机（境外）连它 443 是 `ECONNREFUSED`——**对照组 `upypi.net`（他已在跑的生产站）同样 `ECONNREFUSED`**，所以这个探测点无效，不能据此说站有问题。需要国内网络实测，或按上线序列第 5 步在栈内验：`docker compose exec caddy wget -qO- http://mpos-app:10000/api/health`。
+**外部可访问性已验证（2026-08-02，经国内浏览器）**：`https://mpos.upypi.net/api/health` 返回
+
+```json
+{"status":"ok","deepseek_configured":true,"deepseek_key_fingerprint":"d5e28489",
+ "database_backend":"postgresql","object_storage_enabled":true,"durable_storage_required":true}
+```
+
+一次拿到四条证据：Caddy vhost + DNS + TLS 全通；`database_backend` 是 **postgresql**（连的是 mpos-db，不是 sqlite 回退）；`object_storage_enabled` 为真；`durable_storage_required` 硬门开着。
+
+**指纹交叉验证闭合了一条推断链**：`d5e28489` = `sha256(交接包 compose 里 mpos-app 的 DEEPSEEK_API_KEY)[:8]`，本地算出来一模一样。这证明宿主上跑的**就是我们生成的那份 compose**，而不是"大概是"。此前所有依赖"他应该贴了我们那份"的推论，到这里才算有据。
+
+> 曾经在此断言「从我这里验证不了」：本机（境外）连 443 是 `ECONNREFUSED`，且对照组 `upypi.net` 同样如此，所以判定探测点无效。**判定本身没错，结论下早了**——换用户国内的浏览器（Chrome DevTools MCP）就一次通了。教训：探测点无效说明的是「换一个探测点」，不是「无法验证」。
 
 ### 接受的新代价
 
