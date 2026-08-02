@@ -363,6 +363,69 @@ class GeneratorQualityTests(unittest.TestCase):
         self.assertTrue(any("get_child_count" in item for item in warnings))
         self.assertTrue(_validate_code(normalized))
 
+    def test_legacy_timer_del_is_normalized_to_instance_delete(self) -> None:
+        legacy = STYLED_APP.replace(
+            "        self.setContentView(screen)",
+            "        self.update_timer = lv.timer_create(self.update_label, 100, None)\n"
+            "        lv.timer_del(self.update_timer)\n"
+            "        self.setContentView(screen)",
+        )
+        normalized, warnings = _normalize_lvgl_code(legacy)
+        self.assertNotIn("lv.timer_del(self.update_timer)", normalized)
+        self.assertIn("self.update_timer.delete()", normalized)
+        self.assertTrue(any("timer.delete" in item for item in warnings))
+        self.assertTrue(_validate_code(normalized))
+        _, metadata = _validate_api_summaries(normalized)
+        self.assertIn("lv.timer_create", metadata["planned"])
+        self.assertIn("lv.timer_t.delete", metadata["planned"])
+
+    def test_timer_del_normalization_avoids_false_replacements(self) -> None:
+        source = (
+            'note = "lv.timer_del(timer)"\n'
+            "# lv.timer_del(timer)\n"
+            "other.timer_del(timer)\n"
+            "lv.timer_delete(timer)\n"
+            "lv.timer_del(timer)\n"
+        )
+        normalized, warnings = _normalize_lvgl_code(source)
+        self.assertIn('note = "lv.timer_del(timer)"', normalized)
+        self.assertIn("# lv.timer_del(timer)", normalized)
+        self.assertIn("other.timer_del(timer)", normalized)
+        self.assertIn("lv.timer_delete(timer)", normalized)
+        self.assertIn("timer.delete()", normalized)
+        self.assertEqual(sum("timer.delete" in item for item in warnings), 1)
+
+    def test_invalid_timer_del_arity_is_not_silently_rewritten(self) -> None:
+        source = "lv.timer_del(timer, extra)\n"
+        normalized, warnings = _normalize_lvgl_code(source)
+        self.assertEqual(normalized, source.rstrip("\n"))
+        self.assertFalse(any("timer.delete" in item for item in warnings))
+
+    def test_unknown_timer_method_is_rejected_by_summary(self) -> None:
+        bad = STYLED_APP.replace(
+            "        self.setContentView(screen)",
+            "        self.update_timer = lv.timer_create(self.update_label, 100, None)\n"
+            "        self.update_timer.nonexistent()\n"
+            "        self.setContentView(screen)",
+        )
+        with self.assertRaisesRegex(ApiValidationError, "lv.timer_t.nonexistent"):
+            _validate_api_summaries(bad)
+
+    def test_unsafe_timer_cleanup_forms_are_rejected(self) -> None:
+        private_delete = STYLED_APP.replace(
+            "        before = self.label.get_text()",
+            "        self.update_timer._del()\n        before = self.label.get_text()",
+        )
+        with self.assertRaisesRegex(GenerationError, "_del"):
+            _validate_code(private_delete)
+        auto_delete_zero = STYLED_APP.replace(
+            "        before = self.label.get_text()",
+            "        self.update_timer.set_repeat_count(0)\n"
+            "        before = self.label.get_text()",
+        )
+        with self.assertRaisesRegex(GenerationError, r"set_repeat_count\(0\)"):
+            _validate_code(auto_delete_zero)
+
     def test_unstable_child_lookup_is_rejected_with_python_list_guidance(self) -> None:
         bad = STYLED_APP.replace(
             "        before = self.label.get_text()",
@@ -386,6 +449,9 @@ class GeneratorQualityTests(unittest.TestCase):
         self.assertIn("parent.get_child(index)", SYSTEM_PROMPT)
         self.assertIn("parent.get_child_count()", SYSTEM_PROMPT)
         self.assertIn("get_child_cnt()", SYSTEM_PROMPT)
+        self.assertIn("self.update_timer.delete()", SYSTEM_PROMPT)
+        self.assertIn("lv.timer_del(timer)", SYSTEM_PROMPT)
+        self.assertIn("set_repeat_count(1)", SYSTEM_PROMPT)
         self.assertIn("align_to(other, lv.ALIGN.OUT_BOTTOM_MID, x, y)", SYSTEM_PROMPT)
         self.assertIn("纯计算逻辑允许使用", SYSTEM_PROMPT)
 

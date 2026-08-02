@@ -59,6 +59,8 @@ SYSTEM_PROMPT = """
 - 计算器解析表达式等纯计算逻辑允许使用有明确退出条件的有限 `while`；
   循环体必须推进索引或缩小集合。动画、倒计时和游戏更新仍必须使用 lv.timer_create
 - 动画和游戏更新必须使用 `self.update_timer = lv.timer_create(self.update_frame, 33, None)`；回调接收 timer 参数，不能自己写主循环
+- `lv.timer_create(...)` 返回的定时器必须保存为 Python 引用；停止周期定时器时先判断引用不为 None，再调用 `self.update_timer.delete()` 并把引用设回 None
+- 严禁 `lv.timer_del(timer)`、`timer._del()` 和 `set_repeat_count(0)`；一次性定时器使用 `set_repeat_count(1)`，且不要再手工删除
 - 每个 App 都必须实现 `self_test(self)`，程序化调用真实功能方法并比较操作前后的状态，返回至少两个布尔结果组成的 dict
 - `self_test()` 不能直接返回写死的 True；必须包含方法调用和前后值比较，并在结束前恢复被修改的状态，保证用户看到的是初始界面
 - 所有代码必须放在一个入口 Python 文件中
@@ -69,7 +71,7 @@ SYSTEM_PROMPT = """
   align(align, x, y)、align_to(other, align, x, y)、center、
   set_flex_flow(flow)、set_flex_align(main, cross, track)
 - set_flex_flow 只能传一个 flow 参数，正确示例：`container.set_flex_flow(lv.FLEX_FLOW.ROW_WRAP)`；严禁额外传 selector 或 0
-- 交互：add_event_cb(callback, lv.EVENT.CLICKED, None)、lv.timer_create(callback, milliseconds, None)
+- 交互：add_event_cb(callback, lv.EVENT.CLICKED, None)、lv.timer_create(callback, milliseconds, None)、timer_handle.delete()
 - 文字：label.set_text、label.get_text
 - 颜色：lv.color_hex(0xRRGGBB)
 - 安全样式：set_style_bg_color、set_style_bg_opa、set_style_text_color、set_style_radius、
@@ -609,6 +611,16 @@ def _validate_code(code: str) -> list[str]:
                 hits.append(
                     "align(base, align, x, y)（请改用 align_to(base, align, x, y)）"
                 )
+            elif (
+                isinstance(node.func, ast.Attribute)
+                and node.func.attr == "set_repeat_count"
+                and len(node.args) == 1
+                and isinstance(node.args[0], ast.Constant)
+                and node.args[0].value == 0
+            ):
+                hits.append(
+                    "set_repeat_count(0)（一次性定时器请使用 set_repeat_count(1)）"
+                )
         elif isinstance(node, ast.While) and id(node) in blocking_while_nodes:
             line_number = blocking_while_nodes[id(node)]
             hits.append(
@@ -632,6 +644,8 @@ def _validate_code(code: str) -> list[str]:
             hits.append(f"lv.{node.attr}（当前 Web LVGL 不支持）")
         elif isinstance(node, ast.Attribute) and node.attr == "set_text_align":
             hits.append("set_text_align（请使用 label.align 定位）")
+        elif isinstance(node, ast.Attribute) and node.attr == "_del":
+            hits.append("_del（定时器请使用公开方法 timer.delete()）")
         elif (
             isinstance(node, ast.Attribute)
             and node.attr
@@ -913,6 +927,11 @@ def _api_indexes() -> dict[str, Any]:
     widget_records = {
         item["name"]: item for item in lvgl_summary.get("widgets", [])
     }
+    data_class_records = {
+        item["name"]: item
+        for item in lvgl_summary.get("data_classes", [])
+        if isinstance(item, dict) and item.get("name")
+    }
 
     def inherited_methods(name: str, seen: set[str] | None = None) -> set[str]:
         if seen is None:
@@ -932,8 +951,22 @@ def _api_indexes() -> dict[str, Any]:
     for name in widgets:
         if name != "obj":
             widgets[name].update(object_methods)
+    data_classes = {
+        name: {
+            method["name"]
+            for method in item.get("methods", [])
+            if isinstance(method, dict) and method.get("name")
+        }
+        for name, item in data_class_records.items()
+    }
+    object_types = {**widgets, **data_classes}
     functions = {
         item["name"]
+        for item in lvgl_summary.get("functions", [])
+        if isinstance(item, dict) and item.get("name")
+    }
+    function_returns = {
+        item["name"]: str(item.get("returns") or "").strip().strip("\"'")
         for item in lvgl_summary.get("functions", [])
         if isinstance(item, dict) and item.get("name")
     }
@@ -949,7 +982,9 @@ def _api_indexes() -> dict[str, Any]:
     }
     return {
         "widgets": widgets,
+        "object_types": object_types,
         "functions": functions,
+        "function_returns": function_returns,
         "enums": enums,
         "mpos_exports": exports,
         "lvgl_generated_at": lvgl_summary.get("generated_at"),
@@ -985,17 +1020,24 @@ def _validate_api_summaries(code: str) -> tuple[list[str], dict[str, Any]]:
         if isinstance(node, (ast.Assign, ast.AnnAssign)):
             value = node.value
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            inferred_type: str | None = None
             if (
                 isinstance(value, ast.Call)
                 and isinstance(value.func, ast.Attribute)
                 and isinstance(value.func.value, ast.Name)
                 and value.func.value.id == "lv"
-                and value.func.attr in indexes["widgets"]
             ):
+                if value.func.attr in indexes["object_types"]:
+                    inferred_type = value.func.attr
+                else:
+                    returned_type = indexes["function_returns"].get(value.func.attr)
+                    if returned_type in indexes["object_types"]:
+                        inferred_type = returned_type
+            if inferred_type:
                 for target in targets:
                     name = _dotted_name(target)
                     if name:
-                        object_types[name] = value.func.attr
+                        object_types[name] = inferred_type
 
     for node in ast.walk(tree):
         if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
@@ -1010,6 +1052,7 @@ def _validate_api_summaries(code: str) -> tuple[list[str], dict[str, Any]]:
                 planned.add(dotted)
                 if (
                     symbol not in indexes["widgets"]
+                    and symbol not in indexes["object_types"]
                     and symbol not in indexes["functions"]
                     and symbol not in indexes["enums"]
                 ):
@@ -1021,7 +1064,7 @@ def _validate_api_summaries(code: str) -> tuple[list[str], dict[str, Any]]:
         if widget_name:
             symbol = f"lv.{widget_name}.{method_name}"
             planned.add(symbol)
-            if method_name not in indexes["widgets"][widget_name]:
+            if method_name not in indexes["object_types"][widget_name]:
                 missing.add(symbol)
 
     if missing:
@@ -1067,6 +1110,44 @@ def _normalize_lvgl_code(code: str) -> tuple[str, list[str]]:
     )
     if legacy_child_count:
         applied.append("已将旧式 get_child_cnt() 转换为 get_child_count()")
+    try:
+        timer_tree = ast.parse(normalized)
+    except SyntaxError:
+        timer_tree = None
+    timer_replacements: list[tuple[int, int, bytes]] = []
+    if timer_tree is not None:
+        encoded = normalized.encode("utf-8")
+        line_offsets: list[int] = []
+        offset = 0
+        for line in normalized.splitlines(keepends=True):
+            line_offsets.append(offset)
+            offset += len(line.encode("utf-8"))
+        for node in ast.walk(timer_tree):
+            if (
+                not isinstance(node, ast.Call)
+                or not isinstance(node.func, ast.Attribute)
+                or not isinstance(node.func.value, ast.Name)
+                or node.func.value.id != "lv"
+                or node.func.attr != "timer_del"
+                or len(node.args) != 1
+                or node.keywords
+                or node.end_lineno is None
+                or node.end_col_offset is None
+            ):
+                continue
+            timer_name = _dotted_name(node.args[0])
+            if not timer_name:
+                continue
+            start = line_offsets[node.lineno - 1] + node.col_offset
+            end = line_offsets[node.end_lineno - 1] + node.end_col_offset
+            timer_replacements.append(
+                (start, end, f"{timer_name}.delete()".encode("utf-8"))
+            )
+        for start, end, replacement in sorted(timer_replacements, reverse=True):
+            encoded = encoded[:start] + replacement + encoded[end:]
+        normalized = encoded.decode("utf-8")
+    if timer_replacements:
+        applied.append("已将旧式 lv.timer_del(timer) 转换为 timer.delete()")
     normalized, legacy_align_count = re.subn(
         r"(?P<target>[A-Za-z_][\w.]*)\.align\(\s*"
         r"(?P<base>[A-Za-z_][\w.]*)\s*,\s*"
@@ -1114,6 +1195,16 @@ def _build_correction(
             "不要使用旧式 get_child_cnt 或不稳定的 get_child_by_type。"
             "创建控件时优先把引用加入 self.day_buttons，需要数量时使用 "
             "len(self.day_buttons) 或当前绑定支持的 get_child_count()。"
+        )
+    if "timer_del" in message or "._del" in message:
+        suggestions.append(
+            "当前绑定删除周期定时器必须使用保存下来的 timer 引用调用 timer.delete()；"
+            "不要使用 lv.timer_del(timer) 或 timer._del()。删除后把引用设为 None，避免重复删除。"
+        )
+    if "set_repeat_count(0)" in message:
+        suggestions.append(
+            "不要使用 set_repeat_count(0)，它会自动删除定时器并可能导致后续重复释放。"
+            "一次性定时器使用 set_repeat_count(1)，且不要再手工删除。"
         )
     if "set_text_align" in message:
         suggestions.append("删除 set_text_align，使用 label.align(...) 摆放标签。")
