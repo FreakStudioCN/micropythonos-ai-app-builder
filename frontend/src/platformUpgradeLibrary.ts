@@ -26,12 +26,22 @@ export const normalizePublicSystemStatus = (
   if (!value || typeof value !== "object") return null;
   const payload = value as Record<string, unknown>;
   if (payload.status !== "ready" && payload.status !== "maintenance") return null;
-  if (typeof payload.maintenance !== "boolean") return null;
-  if ((payload.status === "maintenance") !== payload.maintenance) return null;
+  const maintenance = typeof payload.maintenance_mode === "boolean"
+    ? payload.maintenance_mode
+    : typeof payload.maintenance === "boolean"
+      ? payload.maintenance
+      : null;
+  if (maintenance === null) return null;
+  if (
+    typeof payload.maintenance_mode === "boolean"
+    && typeof payload.maintenance === "boolean"
+    && payload.maintenance_mode !== payload.maintenance
+  ) return null;
+  if ((payload.status === "maintenance") !== maintenance) return null;
   const retry = Number(payload.retry_after_seconds);
   return {
     status: payload.status,
-    maintenance: payload.maintenance,
+    maintenance,
     message: typeof payload.message === "string" ? payload.message : "",
     retry_after_seconds: Number.isFinite(retry) && retry > 0 ? retry : 15,
   };
