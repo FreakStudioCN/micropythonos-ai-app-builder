@@ -354,6 +354,66 @@ class ProviderPrivacyMiddleware:
         await self.app(scope, receive, send_private)
 
 
+def _frontend_cache_headers(path: str, content_type: str) -> dict[str, str]:
+    """Return safe cache rules for the frontend shell and hashed assets.
+
+    The HTML shell must be revalidated on every visit so a browser cannot keep
+    pointing at an older frontend bundle after a production deployment. Vite's
+    hashed assets are content-addressed and can be cached indefinitely.
+    """
+    if path.startswith("/api/"):
+        return {}
+    if "text/html" in content_type.lower():
+        return {
+            "Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Expires": "0",
+        }
+    if path.startswith("/assets/"):
+        return {"Cache-Control": "public, max-age=31536000, immutable"}
+    return {}
+
+
+class FrontendCacheControlMiddleware:
+    """Keep browser deployments current without buffering response bodies."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or scope["method"] not in {"GET", "HEAD"}:
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_cache_policy(message) -> None:
+            if message["type"] == "http.response.start":
+                headers = message.get("headers", [])
+                content_type = next(
+                    (
+                        value.decode("latin-1")
+                        for key, value in headers
+                        if key.lower() == b"content-type"
+                    ),
+                    "",
+                )
+                directives = _frontend_cache_headers(scope["path"], content_type)
+                if directives:
+                    replaced = {key.lower().encode("latin-1") for key in directives}
+                    headers = [
+                        (key, value)
+                        for key, value in headers
+                        if key.lower() not in replaced
+                    ]
+                    headers.extend(
+                        (key.encode("latin-1"), value.encode("latin-1"))
+                        for key, value in directives.items()
+                    )
+                    message = {**message, "headers": headers}
+            await send(message)
+
+        await self.app(scope, receive, send_with_cache_policy)
+
+
 app.add_middleware(ProviderPrivacyMiddleware)
 app.add_middleware(AuthenticatedUserMiddleware)
 app.add_middleware(
@@ -363,6 +423,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+app.add_middleware(FrontendCacheControlMiddleware)
 
 
 @app.get("/api/health")
