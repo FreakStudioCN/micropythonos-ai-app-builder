@@ -192,6 +192,8 @@ jobs:
           DIGEST: ${{ needs.image.outputs.digest }}
           SOURCE_SHA: ${{ needs.image.outputs.source_sha }}
           GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PRODUCTION_KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
+          PRODUCTION_ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
           # /srv/upypi is where the stack actually lives: the plugin backend's
           # merged deploy job cd's there today. Overridable if the ops owner
           # moves it; a wrong value fails loudly at the cd below, so the default
@@ -276,6 +278,61 @@ jobs:
           WANT_ID=$(docker inspect --format '{{.Id}}' "${IMAGE}")
 
           cd "${STACK_DIR}"
+
+          # AI provider credentials are runtime configuration, never image
+          # contents. Store them in a dedicated mode-0600 env file and register
+          # a persistent compose override so later compose operations do not
+          # recreate mpos-app without GLM/Kimi access.
+          if [ -z "${PRODUCTION_KIMI_API_KEY}" ] || [ -z "${PRODUCTION_ZHIPU_API_KEY}" ]; then
+            echo "production KIMI_API_KEY and ZHIPU_API_KEY secrets are required" >&2
+            exit 1
+          fi
+          umask 077
+          provider_env_tmp=$(mktemp "${STACK_DIR}/.mpos-ai-providers.env.XXXXXX")
+          {
+            printf 'KIMI_API_KEY=%s\n' "${PRODUCTION_KIMI_API_KEY}"
+            printf 'ZHIPU_API_KEY=%s\n' "${PRODUCTION_ZHIPU_API_KEY}"
+          } > "${provider_env_tmp}"
+          chmod 600 "${provider_env_tmp}"
+          mv "${provider_env_tmp}" .mpos-ai-providers.env
+
+          provider_override=compose.mpos-ai-providers.yml
+          override_tmp=$(mktemp "${STACK_DIR}/${provider_override}.XXXXXX")
+          cat > "${override_tmp}" <<'YAML'
+          services:
+            mpos-app:
+              env_file:
+                - ./.mpos-ai-providers.env
+          YAML
+          chmod 600 "${override_tmp}"
+          mv "${override_tmp}" "${provider_override}"
+
+          existing_compose_file=""
+          if [ -f .env ]; then
+            existing_compose_file=$(sed -n 's/^COMPOSE_FILE=//p' .env | tail -1)
+          fi
+          if [ -z "${existing_compose_file}" ]; then
+            base_compose=""
+            for candidate in compose.yaml compose.yml docker-compose.yaml docker-compose.yml; do
+              if [ -f "${candidate}" ]; then base_compose="${candidate}"; break; fi
+            done
+            if [ -z "${base_compose}" ]; then
+              echo "no compose file found in ${STACK_DIR}" >&2
+              exit 1
+            fi
+            existing_compose_file="${base_compose}"
+          fi
+          case ":${existing_compose_file}:" in
+            *":${provider_override}:"*) compose_files="${existing_compose_file}" ;;
+            *) compose_files="${existing_compose_file}:${provider_override}" ;;
+          esac
+          stack_env_tmp=$(mktemp "${STACK_DIR}/.env.XXXXXX")
+          if [ -f .env ]; then grep -v '^COMPOSE_FILE=' .env > "${stack_env_tmp}" || true; fi
+          printf 'COMPOSE_FILE=%s\n' "${compose_files}" >> "${stack_env_tmp}"
+          chmod 600 "${stack_env_tmp}"
+          mv "${stack_env_tmp}" .env
+          export COMPOSE_FILE="${compose_files}"
+
           deploy_ok=""
           # Scoped to mpos-app (compose still starts its depends_on) so a mpos
           # deployment never restarts the plugin backend in the same file.
@@ -296,8 +353,11 @@ jobs:
             # Compare image IDs, not `.Config.Image`: with a mutable tag that
             # field just reads back "…:latest" and would match no matter which
             # build is actually running, i.e. a check that can never fail.
-            if RUNNING_ID=$(docker inspect "$(docker compose ps -q mpos-app | head -1)" --format '{{.Image}}') \
-               && [ "${RUNNING_ID}" = "${WANT_ID}" ]; then
+            RUNNING_CONTAINER=$(docker compose ps -q mpos-app | head -1)
+            if RUNNING_ID=$(docker inspect "${RUNNING_CONTAINER}" --format '{{.Image}}') \
+               && [ "${RUNNING_ID}" = "${WANT_ID}" ] \
+               && docker exec "${RUNNING_CONTAINER}" sh -c \
+                    'test -n "$KIMI_API_KEY" && test -n "$ZHIPU_API_KEY"'; then
               deploy_ok=1
             fi
           fi
@@ -314,3 +374,4 @@ jobs:
             exit 1
           fi
           echo "deployed source_sha=${SOURCE_SHA} digest=${DIGEST}" >> "${GITHUB_STEP_SUMMARY}"
+          echo "GLM/Kimi provider credentials: present in running container" >> "${GITHUB_STEP_SUMMARY}"
