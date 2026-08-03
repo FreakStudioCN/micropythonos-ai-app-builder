@@ -28,9 +28,11 @@ def main() -> int:
         default="做一个极简四则运算计算器，按钮要大，适合触摸屏",
     )
     parser.add_argument("--package-name", default="com.example.speedtest")
+    parser.add_argument("--provider", default="auto")
     args = parser.parse_args()
 
     started = time.monotonic()
+    quality_attempts: list[dict[str, object]] = []
     try:
         result = asyncio.run(
             generate_app(
@@ -38,16 +40,39 @@ def main() -> int:
                     prompt=args.prompt,
                     package_name=args.package_name,
                     display_name="Generation Speed Test",
-                )
+                    ai_provider=args.provider,
+                ),
+                attempt_sink=quality_attempts.append,
             )
         )
     except Exception as exc:  # benchmark should always print elapsed time
+        safe_details = getattr(exc, "details", {})
+        if not isinstance(safe_details, dict):
+            safe_details = {}
         print(
             json.dumps(
                 {
                     "ok": False,
                     "elapsed_seconds": round(time.monotonic() - started, 2),
+                    "error_code": str(getattr(exc, "code", type(exc).__name__)),
                     "error": str(exc),
+                    "attempted_providers": safe_details.get(
+                        "attempted_providers", []
+                    ),
+                    "provider_attempts": safe_details.get("provider_attempts", []),
+                    "quality_attempts": [
+                        {
+                            "attempt": item.get("attempt"),
+                            "status": item.get("status"),
+                            "provider": (
+                                item.get("model_meta", {}).get("provider")
+                                if isinstance(item.get("model_meta"), dict)
+                                else None
+                            ),
+                            "validation": item.get("validation", {}),
+                        }
+                        for item in quality_attempts
+                    ],
                 },
                 ensure_ascii=False,
             )

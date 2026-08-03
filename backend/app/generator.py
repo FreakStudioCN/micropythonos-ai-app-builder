@@ -530,6 +530,32 @@ def _parse_model_json(message: dict[str, Any]) -> dict[str, Any]:
                     "Primary controls update the visible App state",
                 ],
             }
+    # Some coding models honor the requested program contract but ignore the
+    # JSON envelope and emit bare Python.  Recover that complete source instead
+    # of throwing away an otherwise usable result.  Syntax and all product/API
+    # validators still run after this parser, so this does not weaken checks.
+    for raw in candidates:
+        cleaned = raw.strip().lstrip("\ufeff")
+        source_start = re.search(
+            r"(?m)^(?:import\s+lvgl\s+as\s+lv|from\s+mpos\s+import\s+Activity)\s*$",
+            cleaned,
+        )
+        if not source_start:
+            continue
+        code = cleaned[source_start.start() :].strip()
+        try:
+            ast.parse(code)
+        except SyntaxError:
+            continue
+        if "import lvgl" in code and "class " in code:
+            return {
+                "summary": "Generated MicroPythonOS App",
+                "app_code": code,
+                "acceptance_tests": [
+                    "App starts without an exception",
+                    "Primary controls update the visible App state",
+                ],
+            }
     raise GenerationError("AI 生成服务没有返回可解析的生成结果")
 
 
@@ -1459,6 +1485,17 @@ def _normalize_lvgl_code(code: str) -> tuple[str, list[str]]:
         "lv.EVENT_VALUE_CHANGED": "lv.EVENT.VALUE_CHANGED",
         "lv.EVENT_PRESSED": "lv.EVENT.PRESSED",
         "lv.EVENT_RELEASED": "lv.EVENT.RELEASED",
+        # LVGL 9 renamed clear_flag() to remove_flag().  Models commonly emit
+        # the LVGL 8 spelling even when every other call targets the current
+        # MicroPythonOS binding.  This is a mechanical compatibility fix, not
+        # a reason to discard an otherwise valid generated application.
+        ".clear_flag(": ".remove_flag(",
+        # Some providers copy the C enum name (lv_obj_flag_t) into a Pythonic
+        # looking ``lv.obj_flag`` namespace.  The MicroPythonOS LVGL binding
+        # exposes these values through ``lv.obj.FLAG`` instead.  Static API
+        # summaries can miss this because ``remove_flag`` itself is valid, so
+        # normalize the enum namespace before validation and WASM execution.
+        "lv.obj_flag.": "lv.obj.FLAG.",
     }
     normalized = code
     applied: list[str] = []
@@ -1530,6 +1567,82 @@ def _normalize_lvgl_code(code: str) -> tuple[str, list[str]]:
         applied.append(
             "已将旧式 align(base, align, x, y) 转换为 align_to(base, align, x, y)"
         )
+
+    # Clamp only literal set_pos(x, y) calls for widgets whose literal size is
+    # known.  A model can produce a polished, functional app with one object a
+    # few pixels outside the 320x240 preview.  Sending the entire app through
+    # another slow model round-trip for that arithmetic slip made generation
+    # stochastic and needlessly expensive.  Dynamic/game coordinates remain
+    # untouched and still go through the deterministic visual validator.
+    try:
+        position_tree = ast.parse(normalized)
+    except SyntaxError:
+        position_tree = None
+    position_replacements: list[tuple[int, int, bytes]] = []
+    if position_tree is not None:
+        widget_sizes: dict[str, tuple[float, float]] = {}
+        for node in ast.walk(position_tree):
+            if (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "set_size"
+                and len(node.args) >= 2
+            ):
+                receiver = _dotted_name(node.func.value)
+                width = _numeric_literal(node.args[0])
+                height = _numeric_literal(node.args[1])
+                if receiver and width is not None and height is not None:
+                    widget_sizes[receiver] = (width, height)
+
+        encoded = normalized.encode("utf-8")
+        line_offsets: list[int] = []
+        offset = 0
+        for line in normalized.splitlines(keepends=True):
+            line_offsets.append(offset)
+            offset += len(line.encode("utf-8"))
+
+        def literal_replacement(
+            node: ast.AST, value: float
+        ) -> tuple[int, int, bytes] | None:
+            if node.end_lineno is None or node.end_col_offset is None:
+                return None
+            start = line_offsets[node.lineno - 1] + node.col_offset
+            end = line_offsets[node.end_lineno - 1] + node.end_col_offset
+            text = str(int(value)) if float(value).is_integer() else repr(value)
+            return start, end, text.encode("utf-8")
+
+        for node in ast.walk(position_tree):
+            if (
+                not isinstance(node, ast.Call)
+                or not isinstance(node.func, ast.Attribute)
+                or node.func.attr != "set_pos"
+                or len(node.args) < 2
+            ):
+                continue
+            receiver = _dotted_name(node.func.value)
+            size = widget_sizes.get(receiver or "")
+            x = _numeric_literal(node.args[0])
+            y = _numeric_literal(node.args[1])
+            if size is None or x is None or y is None:
+                continue
+            width, height = size
+            if width > 320 or height > 240:
+                continue
+            clamped_x = min(max(x, 0), 320 - width)
+            clamped_y = min(max(y, 0), 240 - height)
+            if clamped_x != x:
+                replacement = literal_replacement(node.args[0], clamped_x)
+                if replacement is not None:
+                    position_replacements.append(replacement)
+            if clamped_y != y:
+                replacement = literal_replacement(node.args[1], clamped_y)
+                if replacement is not None:
+                    position_replacements.append(replacement)
+        for start, end, replacement in sorted(position_replacements, reverse=True):
+            encoded = encoded[:start] + replacement + encoded[end:]
+        normalized = encoded.decode("utf-8")
+    if position_replacements:
+        applied.append("已自动将超出 320x240 预览区域的固定控件坐标移回屏幕内")
     font_free_lines: list[str] = []
     for line in normalized.splitlines():
         if "set_style_text_font" in line or "lv.font_" in line:
@@ -2234,9 +2347,15 @@ async def _call_provider_with_retries(
         "kimi_k27": "KIMI_READ_TIMEOUT_SECONDS",
         "deepseek": "DEEPSEEK_READ_TIMEOUT_SECONDS",
     }.get(config.id, "AI_READ_TIMEOUT_SECONDS")
+    provider_default_timeout = {
+        "zhipu_glm52": 120.0,
+        "kimi": 120.0,
+        "kimi_k27": 120.0,
+        "deepseek": 90.0,
+    }.get(config.id, 120.0)
     read_timeout = _bounded_float_env(
         provider_timeout_env,
-        default=60.0,
+        default=provider_default_timeout,
         minimum=0.1,
         maximum=600.0,
         fallbacks=("AI_READ_TIMEOUT_SECONDS", "DEEPSEEK_REQUEST_TIMEOUT_SECONDS"),
@@ -2454,7 +2573,7 @@ async def _call_deepseek(
     )
     provider_timeout = _bounded_float_env(
         "AI_READ_TIMEOUT_SECONDS",
-        default=60.0,
+        default=120.0,
         minimum=3.0,
         maximum=600.0,
         fallbacks=("DEEPSEEK_REQUEST_TIMEOUT_SECONDS",),
@@ -2607,16 +2726,27 @@ async def generate_app(
     )
     request_timeout_seconds = _bounded_float_env(
         "AI_READ_TIMEOUT_SECONDS",
-        default=60.0,
+        default=120.0,
         minimum=3.0,
         maximum=600.0,
         fallbacks=("DEEPSEEK_REQUEST_TIMEOUT_SECONDS",),
     )
     max_attempts = _bounded_int_env(
         "DEEPSEEK_MAX_ATTEMPTS",
-        default=3,
+        # Give every configured provider one original attempt plus one
+        # provider-local repair attempt.  The previous default of three meant
+        # that GLM, Kimi and DeepSeek each received only one quality-check
+        # attempt, so a harmless JSON/LVGL slip permanently discarded the
+        # provider before it could apply the validator's concrete correction.
+        default=6,
         minimum=1,
-        maximum=5,
+        maximum=12,
+    )
+    quality_attempts_per_provider = _bounded_int_env(
+        "AI_QUALITY_ATTEMPTS_PER_PROVIDER",
+        default=2,
+        minimum=1,
+        maximum=4,
     )
     deadline = (
         time.monotonic() + budget_seconds
@@ -2634,13 +2764,25 @@ async def generate_app(
     model_meta: dict[str, Any] = {}
     attempts_used = 0
     rejected_providers: set[str] = set()
+    provider_quality_failures: dict[str, int] = {}
 
-    def reject_current_provider(meta: dict[str, Any]) -> None:
+    def record_provider_quality_failure(meta: dict[str, Any]) -> None:
+        """Keep a provider for one corrected retry before failing over.
+
+        HTTP/auth/time-out failover is handled inside ``_call_deepseek``.  This
+        counter is only for successful upstream responses that fail parsing or
+        our deterministic product/API checks.  Retrying the same provider with
+        ``correction`` is important: it is the only model that has just seen
+        the complete candidate it needs to repair.
+        """
         if (getattr(request, "ai_provider", "auto") or "auto") != "auto":
             return
         provider = meta.get("provider")
         if isinstance(provider, str) and provider:
-            rejected_providers.add(provider)
+            failure_count = provider_quality_failures.get(provider, 0) + 1
+            provider_quality_failures[provider] = failure_count
+            if failure_count >= quality_attempts_per_provider:
+                rejected_providers.add(provider)
 
     for attempt in range(1, max_attempts + 1):
         remaining = deadline - time.monotonic() if deadline is not None else None
@@ -2680,7 +2822,7 @@ async def generate_app(
         except GenerationError as exc:
             last_error = exc
             safe_meta = exc.details if isinstance(exc.details, dict) else {}
-            reject_current_provider(safe_meta)
+            record_provider_quality_failure(safe_meta)
             _emit_generation_attempt(
                 attempt_sink,
                 attempt=attempt,
@@ -2712,7 +2854,7 @@ async def generate_app(
                 error=last_error,
                 model_meta=model_meta,
             )
-            reject_current_provider(model_meta)
+            record_provider_quality_failure(model_meta)
             correction = _build_correction(last_error, attempt=attempt)
             continue
         if (
@@ -2729,7 +2871,7 @@ async def generate_app(
                 error=last_error,
                 model_meta=model_meta,
             )
-            reject_current_provider(model_meta)
+            record_provider_quality_failure(model_meta)
             correction = _build_correction(last_error, candidate, attempt)
             continue
         candidate, compatibility_warnings = _normalize_lvgl_code(candidate)
@@ -2770,7 +2912,7 @@ async def generate_app(
                 error=exc,
                 model_meta=model_meta,
             )
-            reject_current_provider(model_meta)
+            record_provider_quality_failure(model_meta)
             correction = _build_correction(exc, candidate, attempt)
     if last_error is not None or not code:
         budget_label = (

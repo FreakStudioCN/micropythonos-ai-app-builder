@@ -152,6 +152,22 @@ class GeneratorQualityTests(unittest.TestCase):
         self.assertIn("class GeneratedApp", parsed["app_code"])
         self.assertEqual(len(parsed["acceptance_tests"]), 2)
 
+    def test_model_json_parser_accepts_bare_python_as_last_resort(self) -> None:
+        parsed = _parse_model_json(
+            {
+                "content": (
+                    "import lvgl as lv\n"
+                    "from mpos import Activity\n\n"
+                    "class GeneratedApp(Activity):\n"
+                    "    def onCreate(self):\n"
+                    "        screen = lv.obj()\n"
+                    "        self.setContentView(screen)\n"
+                )
+            }
+        )
+        self.assertIn("class GeneratedApp", parsed["app_code"])
+        self.assertEqual(len(parsed["acceptance_tests"]), 2)
+
     def test_generation_payload_accepts_code_alias_and_nested_tests(self) -> None:
         normalized = _normalize_generation_payload(
             {
@@ -428,6 +444,49 @@ class GeneratorQualityTests(unittest.TestCase):
         self.assertTrue(any("get_child_count" in item for item in warnings))
         self.assertTrue(_validate_code(normalized))
 
+    def test_legacy_clear_flag_is_normalized_to_current_binding(self) -> None:
+        legacy = STYLED_APP.replace(
+            "        self.label = lv.label(card)",
+            "        card.clear_flag(lv.obj.FLAG.SCROLLABLE)\n"
+            "        self.label = lv.label(card)",
+        )
+        normalized, warnings = _normalize_lvgl_code(legacy)
+        self.assertNotIn("clear_flag", normalized)
+        self.assertIn("card.remove_flag(lv.obj.FLAG.SCROLLABLE)", normalized)
+        self.assertTrue(any("clear_flag" in item for item in warnings))
+        self.assertTrue(_validate_api_summaries(normalized))
+
+    def test_invalid_obj_flag_namespace_is_normalized_for_runtime(self) -> None:
+        legacy = STYLED_APP.replace(
+            "        self.label = lv.label(card)",
+            "        card.remove_flag(lv.obj_flag.SCROLLABLE)\n"
+            "        self.label = lv.label(card)",
+        )
+        normalized, warnings = _normalize_lvgl_code(legacy)
+        self.assertNotIn("lv.obj_flag.", normalized)
+        self.assertIn("card.remove_flag(lv.obj.FLAG.SCROLLABLE)", normalized)
+        self.assertTrue(any("lv.obj_flag" in item for item in warnings))
+        self.assertTrue(_validate_api_summaries(normalized))
+
+    def test_literal_widget_overflow_is_clamped_before_visual_validation(self) -> None:
+        overflow = STYLED_APP.replace(
+            "card.set_pos(20, 40)",
+            "card.set_pos(60, 100)",
+        )
+        normalized, warnings = _normalize_lvgl_code(overflow)
+        self.assertIn("card.set_pos(40, 80)", normalized)
+        self.assertTrue(any("320x240" in item for item in warnings))
+        self.assertTrue(_validate_visual_contract(normalized))
+
+    def test_dynamic_widget_position_is_not_rewritten(self) -> None:
+        dynamic = STYLED_APP.replace(
+            "card.set_pos(20, 40)",
+            "card.set_pos(self.card_x, self.card_y)",
+        )
+        normalized, warnings = _normalize_lvgl_code(dynamic)
+        self.assertIn("card.set_pos(self.card_x, self.card_y)", normalized)
+        self.assertFalse(any("320x240" in item for item in warnings))
+
     def test_legacy_timer_del_is_normalized_to_instance_delete(self) -> None:
         legacy = STYLED_APP.replace(
             "        self.setContentView(screen)",
@@ -655,7 +714,7 @@ class GeneratorRetryDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(call_timeouts), 2)
         self.assertGreaterEqual(min(call_timeouts), 55.0)
 
-    async def test_unparseable_provider_is_excluded_from_next_attempt(self) -> None:
+    async def test_unparseable_provider_gets_one_corrected_retry(self) -> None:
         records: list[dict[str, object]] = []
         malformed = GenerationError(
             "AI 生成服务没有返回可解析的生成结果",
@@ -683,9 +742,34 @@ class GeneratorRetryDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             call_mock.await_args_list[1].kwargs["excluded_providers"],
-            {"zhipu_glm52"},
+            set(),
         )
         self.assertEqual(records[0]["model_meta"]["provider"], "zhipu_glm52")
+
+    async def test_provider_is_excluded_only_after_two_quality_failures(self) -> None:
+        malformed = GenerationError(
+            "AI 生成服务没有返回可解析的生成结果",
+            details={"provider": "zhipu_glm52", "model": "glm-5.2"},
+        )
+        success = (
+            self._payload(STYLED_APP),
+            "kimi-k2.7-code",
+            {"provider": "kimi_k27", "model": "kimi-k2.7-code"},
+        )
+        with patch(
+            "app.generator._call_deepseek",
+            new=AsyncMock(side_effect=[malformed, malformed, success]),
+        ) as call_mock:
+            with patch.dict("app.generator.os.environ", {}, clear=True):
+                result = await generate_app(
+                    GenerateRequest(prompt="Build a styled status panel")
+                )
+
+        self.assertEqual(result.model, "kimi-k2.7-code")
+        self.assertEqual(
+            [call.kwargs["excluded_providers"] for call in call_mock.await_args_list],
+            [set(), set(), {"zhipu_glm52"}],
+        )
 
     async def test_failed_attempts_are_all_emitted(self) -> None:
         blocking = STYLED_APP.replace(
