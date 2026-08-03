@@ -13,7 +13,7 @@ import uuid
 import zipfile
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from fastapi.encoders import jsonable_encoder
 
@@ -49,6 +49,15 @@ SESSION_ROOT = Path(
 ).resolve()
 ARTIFACT_ID_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
 INSTALLER_URL = "https://install.micropythonos.com/"
+SAFE_AI_PROVIDER_IDS = {
+    "deepseek",
+    "kimi",
+    "kimi_k27",
+    "zhipu_glm52",
+    "deepseek_primary",
+    "deepseek_secondary",
+    "aigocode",
+}
 
 DEMO_SEEDS: dict[str, dict[str, str]] = {
     "countdown": {
@@ -194,6 +203,41 @@ class SessionService:
         self._action_by_session: dict[str, str] = {}
         self._event_cache = EventLogCache()
         self._index = SessionIndex(SESSION_ROOT)
+        self._generation_success_handler: Callable[[dict[str, Any]], None] | None = None
+
+    def set_generation_success_handler(
+        self,
+        handler: Callable[[dict[str, Any]], None] | None,
+    ) -> None:
+        self._generation_success_handler = handler
+
+    def configure_generation_billing(
+        self,
+        session_id: str,
+        *,
+        action_idempotency_key: str,
+        unlimited: bool,
+    ) -> dict[str, Any]:
+        state = self._read(session_id)
+        revision_id = str(state.get("revision_id", "r1"))
+        previous = state.get("billing") or {}
+        is_initial_revision = revision_id == "r1"
+        state["billing"] = {
+            "charge_on_success": is_initial_revision,
+            "settled": bool(previous.get("settled")) if is_initial_revision else False,
+            "settled_at": previous.get("settled_at") if is_initial_revision else None,
+            "idempotency_key": (
+                previous.get("idempotency_key")
+                or f"generation:{session_id}:r1"
+                if is_initial_revision
+                else None
+            ),
+            "action_idempotency_key": action_idempotency_key,
+            "unlimited": unlimited,
+            "exempt_reason": None if is_initial_revision else "continued_revision",
+        }
+        self._write_state(state)
+        return self.get(session_id)
 
     @property
     def object_storage_enabled(self) -> bool:
@@ -683,6 +727,20 @@ class GeneratedApp(Activity):
     def _write_state(self, state: dict[str, Any]) -> None:
         state = dict(state)
         state.pop("events", None)
+        billing = state.get("billing") or {}
+        should_settle = (
+            state.get("status") == "completed"
+            and billing.get("charge_on_success") is True
+            and billing.get("settled") is not True
+            and bool(billing.get("action_idempotency_key"))
+            and state.get("last_action_idempotency_key")
+            == billing.get("action_idempotency_key")
+        )
+        if should_settle and self._generation_success_handler is not None:
+            self._generation_success_handler(state)
+            billing["settled"] = True
+            billing["settled_at"] = _now()
+            state["billing"] = billing
         state["updated_at"] = _now()
         _json_dump(self._state_path(state["session_id"]), state)
         self._index.register_state(state)
@@ -746,6 +804,15 @@ class GeneratedApp(Activity):
             "session_id": session_id,
             "owner_user_id": user_id,
             "revision_id": "r1",
+            "billing": {
+                "charge_on_success": True,
+                "settled": False,
+                "settled_at": None,
+                "idempotency_key": f"generation:{session_id}:r1",
+                "action_idempotency_key": None,
+                "unlimited": False,
+                "exempt_reason": None,
+            },
             "create_idempotency_key": request.idempotency_key,
             "status": "blocked",
             "current_phase": "mpos-plan-app-web",
@@ -775,7 +842,6 @@ class GeneratedApp(Activity):
                 "publisher": request.publisher,
                 "version": request.version,
                 "targets": request.targets,
-                "ai_provider": request.ai_provider,
             },
             "capabilities": request.capabilities.model_dump(),
             "repo_commit": self.capabilities()["repo_commit"],
@@ -801,14 +867,14 @@ class GeneratedApp(Activity):
                 {
                     "permission_id": network_permission_id,
                     "permission_type": "network_read",
-                    "title": "允许调用 DeepSeek",
+                    "title": "允许调用 AI 生成服务",
                     "description": (
-                        "把当前 App 需求和运行错误发送到 DeepSeek API；"
-                        "API Key 只保存在服务端。"
+                        "把当前 App 需求和运行错误发送到 AI 生成服务；"
+                        "服务凭据只保存在服务端。"
                     ),
                     "risk": "medium",
                     "required": True,
-                    "command_preview": "POST DeepSeek /chat/completions",
+                    "command_preview": "POST AI generation service",
                     "choices": ["allow_once", "deny"],
                     "decision": "pending",
                     "expires_at": None,
@@ -1047,8 +1113,6 @@ class GeneratedApp(Activity):
         if state["status"] in {"failed", "timeout", "cancelled"}:
             self._archive_failed_attempt(state, request.idempotency_key)
             state = self._read(session_id)
-        if request.ai_provider is not None:
-            state["input"]["ai_provider"] = request.ai_provider
         state["last_action_idempotency_key"] = request.idempotency_key
         previous_code = request.previous_code
         if not previous_code and state.get("generation"):
@@ -1172,7 +1236,13 @@ class GeneratedApp(Activity):
         raw_model_meta = record.get("model_meta")
         safe_model_meta: dict[str, Any] = {}
         if isinstance(raw_model_meta, dict):
-            for key in ("provider", "model", "request_id"):
+            for key in (
+                "provider",
+                "model",
+                "request_id",
+                "routing_tier",
+                "routing_reason",
+            ):
                 value = raw_model_meta.get(key)
                 if isinstance(value, str) and value:
                     safe_model_meta[key] = value[:200]
@@ -1184,7 +1254,7 @@ class GeneratedApp(Activity):
                 safe_model_meta["attempted_providers"] = [
                     value
                     for value in attempted_providers
-                    if isinstance(value, str) and value in {"deepseek_primary", "deepseek_secondary", "aigocode"}
+                    if isinstance(value, str) and value in SAFE_AI_PROVIDER_IDS
                 ]
             provider_attempts = raw_model_meta.get("provider_attempts")
             if isinstance(provider_attempts, list):
@@ -1196,7 +1266,7 @@ class GeneratedApp(Activity):
                     outcome = item.get("outcome")
                     attempt = item.get("attempt")
                     if (
-                        provider not in {"deepseek_primary", "deepseek_secondary", "aigocode"}
+                        provider not in SAFE_AI_PROVIDER_IDS
                         or not isinstance(outcome, str)
                         or not isinstance(attempt, int)
                     ):
@@ -1236,7 +1306,6 @@ class GeneratedApp(Activity):
                 {
                     "status": "generation_attempt",
                     "attempt": attempt_number,
-                    "model_meta": safe_model_meta,
                 },
             )
 
@@ -1379,10 +1448,7 @@ class GeneratedApp(Activity):
                             revision=int(state["revision_id"].removeprefix("r")),
                             previous_code=previous_code,
                             runtime_error=request.runtime_error,
-                            ai_provider=(
-                                request.ai_provider
-                                or user_input.get("ai_provider", "auto")
-                            ),
+                            ai_provider="auto",
                         )
                     )
                     state["generation"] = generated.model_dump()
@@ -1736,12 +1802,19 @@ class GeneratedApp(Activity):
 
         state["revision_id"] = f"r{current_revision + 1}"
         state["revision_idempotency_key"] = request.idempotency_key
+        state["billing"] = {
+            "charge_on_success": False,
+            "settled": False,
+            "settled_at": None,
+            "idempotency_key": None,
+            "action_idempotency_key": None,
+            "unlimited": False,
+            "exempt_reason": "continued_revision",
+        }
         state["input"]["prompt_original"] = request.prompt
         state["input"]["prompt_language"] = request.prompt_language
         state["input"]["prompt_normalized_zh"] = request.prompt
         state["input"]["prompt_normalized_en"] = request.prompt
-        if request.ai_provider is not None:
-            state["input"]["ai_provider"] = request.ai_provider
         state["status"] = "created"
         state["current_phase"] = "mpos-analyze-app-web"
         state["checkpoint_id"] = "session_created"
@@ -1884,7 +1957,7 @@ class GeneratedApp(Activity):
                     "start_phase",
                     "mpos-gen-app-web",
                     {
-                        "message": "DeepSeek 正在生成并修复 MicroPythonOS App",
+                        "message": "AI 正在生成并修复 MicroPythonOS App",
                         **mpos_skill_adapter.describe("generate"),
                     },
                 )
@@ -1904,7 +1977,7 @@ class GeneratedApp(Activity):
                         revision=int(state["revision_id"].removeprefix("r")),
                         previous_code=state.get("pending_repair", {}).get("previous_code"),
                         runtime_error=state.get("pending_repair", {}).get("runtime_error"),
-                        ai_provider=user_input.get("ai_provider", "auto"),
+                        ai_provider="auto",
                     ),
                     attempt_sink=lambda record: self._write_generation_attempt(
                         state, generation_run, record

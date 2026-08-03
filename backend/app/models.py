@@ -3,7 +3,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
 PROTOCOL_VERSION = "mpos-ai-app/v1"
-AIProviderId = Literal["auto", "deepseek_primary", "deepseek_secondary", "aigocode"]
+# Provider identifiers are an internal routing detail. Keeping the public schema as
+# a plain string avoids publishing the provider/model inventory through OpenAPI.
+AIProviderId = str
 
 
 class SystemStatusResponse(BaseModel):
@@ -13,7 +15,7 @@ class SystemStatusResponse(BaseModel):
     retry_after_seconds: int = Field(ge=1, le=86400)
 
 
-class GenerateRequest(BaseModel):
+class PublicGenerateRequest(BaseModel):
     prompt: str = Field(min_length=3, max_length=4000)
     package_name: str = "com.example.myapp"
     display_name: str = "我的 App"
@@ -22,7 +24,6 @@ class GenerateRequest(BaseModel):
     revision: int = Field(default=1, ge=1, le=9999)
     previous_code: str | None = Field(default=None, max_length=100_000)
     runtime_error: str | None = Field(default=None, max_length=8000)
-    ai_provider: AIProviderId = "auto"
 
     @field_validator("package_name")
     @classmethod
@@ -31,6 +32,12 @@ class GenerateRequest(BaseModel):
         if len(parts) < 3 or any(not part.replace("_", "").isalnum() for part in parts):
             raise ValueError("包名必须类似 com.example.myapp")
         return value.lower()
+
+
+class GenerateRequest(PublicGenerateRequest):
+    """Internal generation request; provider routing is never client-controlled."""
+
+    ai_provider: AIProviderId = "auto"
 
 
 class GeneratedFile(BaseModel):
@@ -49,6 +56,23 @@ class GenerateResponse(BaseModel):
     failover_used: bool = False
     attempted_providers: list[str] = Field(default_factory=list)
     provider_attempts: list[dict[str, Any]] = Field(default_factory=list)
+    routing_tier: str = ""
+    routing_reason: str = ""
+    warnings: list[str] = []
+    acceptance_tests: list[str] = []
+    mpk_filename: str
+    revision: int = 1
+    prompt_normalized_zh: str = ""
+    prompt_normalized_en: str = ""
+    store_metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+class PublicGenerateResponse(BaseModel):
+    package_name: str
+    summary: str
+    manifest: dict[str, Any]
+    files: list[GeneratedFile]
+    mpk_base64: str
     warnings: list[str] = []
     acceptance_tests: list[str] = []
     mpk_filename: str
@@ -76,7 +100,6 @@ class RequirementChatResponse(BaseModel):
     refined_prompt: str = ""
     missing_fields: list[str] = Field(default_factory=list)
     brief: dict[str, Any] = Field(default_factory=dict)
-    model: str
 
 
 class Capabilities(BaseModel):
@@ -119,7 +142,6 @@ class SessionCreateRequest(BaseModel):
     category: str = "generated"
     publisher: str = "erkou111"
     version: str = "0.1.0"
-    ai_provider: AIProviderId = "auto"
     targets: list[
         Literal["desktop-preview", "web-preview", "physical-device", "package-only"]
     ] = ["web-preview", "package-only"]
@@ -143,7 +165,6 @@ class SessionActionRequest(BaseModel):
     previous_code: str | None = Field(default=None, max_length=100_000)
     runtime_error: str | None = Field(default=None, max_length=8000)
     timeout_seconds: int = Field(default=180, ge=10, le=600)
-    ai_provider: AIProviderId | None = None
 
 
 class AuthCredentials(BaseModel):
@@ -171,7 +192,6 @@ class RevisionRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=200)
     prompt: str = Field(min_length=3, max_length=4000)
     prompt_language: Literal["zh-CN", "en-US", "mixed", "unknown"] = "unknown"
-    ai_provider: AIProviderId | None = None
 
 
 class PreviewResultRequest(SessionActionRequest):

@@ -25,13 +25,17 @@ export const UPLOAD_CHUNK_SIZE = (() => {
 
 export const GENERATION_IDLE_TIMEOUT_MS = (() => {
   const raw = Number(env.VITE_GENERATION_IDLE_TIMEOUT_MS);
-  if (!Number.isFinite(raw) || raw < 30_000) return 90_000;
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  if (raw < 30_000) return 30_000;
   return raw;
 })();
 
 export const GENERATION_OVERALL_TIMEOUT_MS = (() => {
   const raw = Number(env.VITE_GENERATION_OVERALL_TIMEOUT_MS || env.VITE_GENERATION_TIMEOUT_MS);
-  if (!Number.isFinite(raw) || raw < GENERATION_IDLE_TIMEOUT_MS) return 600_000;
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  if (GENERATION_IDLE_TIMEOUT_MS > 0 && raw < GENERATION_IDLE_TIMEOUT_MS) {
+    return GENERATION_IDLE_TIMEOUT_MS;
+  }
   return raw;
 })();
 

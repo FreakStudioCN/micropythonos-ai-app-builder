@@ -128,6 +128,19 @@ class BillingService:
                 unlimited=False,
             )
 
+    def ensure_generation_available(
+        self,
+        user_id: str,
+        *,
+        unlimited: bool = False,
+    ) -> dict[str, Any]:
+        """Validate that a new App can start without consuming credits yet."""
+        with self._lock, self.engine.begin() as connection:
+            account = self._load_or_create(connection, user_id, for_update=True)
+            if not unlimited and account["credits"] < GENERATION_COST:
+                raise InsufficientCredits(account["credits"], GENERATION_COST)
+            return self._public(account, unlimited=unlimited)
+
     def _load_or_create(
         self,
         connection: Connection,

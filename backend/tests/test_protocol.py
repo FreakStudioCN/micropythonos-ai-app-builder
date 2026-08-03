@@ -59,6 +59,77 @@ class ProtocolTests(unittest.TestCase):
             self.assertEqual(contract.name, expected_name)
             self.assertEqual(len(contract.sha256), 64)
 
+    def test_initial_revision_settles_only_after_success_and_only_once(self) -> None:
+        state = self.service.create(
+            SessionCreateRequest(
+                idempotency_key="create-billing-success-0001",
+                prompt="做一个喝水提醒",
+                package_name="com.example.billing_success",
+                targets=["package-only"],
+            )
+        )
+        settled: list[str] = []
+        self.service.set_generation_success_handler(
+            lambda item: settled.append(item["session_id"])
+        )
+        action_key = "generate-billing-success-0001"
+        self.service.configure_generation_billing(
+            state["session_id"],
+            action_idempotency_key=action_key,
+            unlimited=False,
+        )
+
+        failed = self.service._read(state["session_id"])
+        failed["last_action_idempotency_key"] = action_key
+        failed["status"] = "failed"
+        self.service._write_state(failed)
+        self.assertEqual(settled, [])
+        self.assertFalse(self.service.get(state["session_id"])["billing"]["settled"])
+
+        completed = self.service._read(state["session_id"])
+        completed["status"] = "completed"
+        self.service._write_state(completed)
+        self.service._write_state(self.service._read(state["session_id"]))
+
+        self.assertEqual(settled, [state["session_id"]])
+        self.assertTrue(self.service.get(state["session_id"])["billing"]["settled"])
+
+    def test_continued_revision_is_free_even_when_completed(self) -> None:
+        state = self.service.create(
+            SessionCreateRequest(
+                idempotency_key="create-free-revision-0001",
+                prompt="做一个日历",
+                package_name="com.example.free_revision",
+                targets=["package-only"],
+            )
+        )
+        revised = self.service.create_revision(
+            state["session_id"],
+            RevisionRequest(
+                idempotency_key="revision-free-0001",
+                prompt="给日历增加返回今天按钮",
+            ),
+        )
+        settled: list[str] = []
+        self.service.set_generation_success_handler(
+            lambda item: settled.append(item["session_id"])
+        )
+        action_key = "generate-free-revision-0001"
+        self.service.configure_generation_billing(
+            revised["session_id"],
+            action_idempotency_key=action_key,
+            unlimited=False,
+        )
+        completed = self.service._read(revised["session_id"])
+        completed["last_action_idempotency_key"] = action_key
+        completed["status"] = "completed"
+        self.service._write_state(completed)
+
+        final = self.service.get(revised["session_id"])
+        self.assertEqual(settled, [])
+        self.assertFalse(final["billing"]["charge_on_success"])
+        self.assertEqual(final["billing"]["exempt_reason"], "continued_revision")
+
     def test_permission_decisions_are_idempotent(self) -> None:
         state = self.service.create(
             SessionCreateRequest(
@@ -165,7 +236,7 @@ class ProtocolTests(unittest.TestCase):
             revised["pending_repair"]["previous_code"],
             "print('r1 calendar')\n",
         )
-        self.assertEqual(revised["input"]["ai_provider"], "aigocode")
+        self.assertNotIn("ai_provider", revised["input"])
         snapshot = (
             Path(self.temp.name)
             / state["session_id"]
@@ -636,7 +707,7 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
     def tearDown(self) -> None:
         self.temp.cleanup()
 
-    async def test_start_generation_updates_selected_provider(self) -> None:
+    async def test_start_generation_ignores_client_provider_selection(self) -> None:
         state = self.service.create(
             SessionCreateRequest(
                 idempotency_key="provider-switch-create-0001",
@@ -669,16 +740,12 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             )
             await self.service._tasks[state["session_id"]]
 
-        self.assertEqual(
-            started["input"]["ai_provider"],
-            "deepseek_secondary",
-        )
-        self.assertEqual(
-            self.service.get(state["session_id"])["input"]["ai_provider"],
-            "deepseek_secondary",
+        self.assertNotIn("ai_provider", started["input"])
+        self.assertNotIn(
+            "ai_provider", self.service.get(state["session_id"])["input"]
         )
 
-    async def test_revision_and_action_provider_reach_generate_request(self) -> None:
+    async def test_revision_and_action_cannot_override_automatic_routing(self) -> None:
         async def run_case(
             *,
             suffix: str,
@@ -772,13 +839,13 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             suffix="revision",
             revision_provider="aigocode",
             action_provider=None,
-            expected_provider="aigocode",
+            expected_provider="auto",
         )
         await run_case(
             suffix="action",
             revision_provider=None,
             action_provider="deepseek_secondary",
-            expected_provider="deepseek_secondary",
+            expected_provider="auto",
         )
 
     async def test_pipeline_writes_required_protocol_artifacts(self) -> None:

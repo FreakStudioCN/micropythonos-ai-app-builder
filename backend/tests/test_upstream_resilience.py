@@ -7,7 +7,11 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
-from app.generator import UpstreamGenerationError, _call_deepseek
+from app.generator import (
+    UpstreamGenerationError,
+    _call_deepseek,
+    _reset_provider_circuits,
+)
 from app.models import (
     GenerateRequest,
     PermissionDecisionRequest,
@@ -50,7 +54,10 @@ def _mock_client(*outcomes):
 
 
 class DeepSeekResilienceTests(unittest.IsolatedAsyncioTestCase):
-    async def test_timeout_retries_are_bounded_and_structured(self) -> None:
+    def setUp(self) -> None:
+        _reset_provider_circuits()
+
+    async def test_timeout_fails_over_without_repeating_the_same_provider(self) -> None:
         client = _mock_client(
             httpx.ReadTimeout("late"),
             httpx.ReadTimeout("late"),
@@ -61,21 +68,24 @@ class DeepSeekResilienceTests(unittest.IsolatedAsyncioTestCase):
             "app.generator.os.environ",
             {
                 "DEEPSEEK_API_KEY": "sk-test",
-                "DEEPSEEK_UPSTREAM_MAX_RETRIES": "2",
-                "DEEPSEEK_RETRY_BACKOFF_SECONDS": "0.01",
-                "DEEPSEEK_OVERALL_TIMEOUT_SECONDS": "10",
+                "AI_UPSTREAM_MAX_RETRIES": "2",
+                "AI_RETRY_BACKOFF_SECONDS": "0.01",
+                "AI_OVERALL_TIMEOUT_SECONDS": "10",
             },
         ), patch(
             "app.generator.httpx.AsyncClient", return_value=client
         ), patch("app.generator.asyncio.sleep", new=sleep):
             with self.assertRaises(UpstreamGenerationError) as raised:
                 await _call_deepseek(
-                    GenerateRequest(prompt="Build a calculator"),
+                    GenerateRequest(
+                        prompt="Build a calculator",
+                        ai_provider="deepseek",
+                    ),
                     timeout_seconds=10,
                 )
         self.assertEqual(raised.exception.code, "AI_UPSTREAM_TIMEOUT")
-        self.assertEqual(client.post.await_count, 3)
-        self.assertEqual(sleep.await_count, 2)
+        self.assertEqual(client.post.await_count, 1)
+        self.assertEqual(sleep.await_count, 0)
 
     async def test_429_and_5xx_retry_but_400_does_not(self) -> None:
         for status_code in (429, 503):
@@ -88,14 +98,17 @@ class DeepSeekResilienceTests(unittest.IsolatedAsyncioTestCase):
                     "app.generator.os.environ",
                     {
                         "DEEPSEEK_API_KEY": "sk-test",
-                        "DEEPSEEK_UPSTREAM_MAX_RETRIES": "2",
-                        "DEEPSEEK_RETRY_BACKOFF_SECONDS": "0",
+                        "AI_UPSTREAM_MAX_RETRIES": "2",
+                        "AI_RETRY_BACKOFF_SECONDS": "0",
                     },
                 ), patch(
                     "app.generator.httpx.AsyncClient", return_value=client
                 ):
                     generated, model, _meta = await _call_deepseek(
-                        GenerateRequest(prompt="Build a calculator"),
+                        GenerateRequest(
+                            prompt="Build a calculator",
+                            ai_provider="deepseek",
+                        ),
                         timeout_seconds=10,
                     )
                 self.assertEqual(generated["summary"], "ok")
@@ -107,12 +120,15 @@ class DeepSeekResilienceTests(unittest.IsolatedAsyncioTestCase):
             "app.generator.os.environ",
             {
                 "DEEPSEEK_API_KEY": "sk-test",
-                "DEEPSEEK_UPSTREAM_MAX_RETRIES": "2",
+                "AI_UPSTREAM_MAX_RETRIES": "2",
             },
         ), patch("app.generator.httpx.AsyncClient", return_value=client):
             with self.assertRaises(UpstreamGenerationError) as raised:
                 await _call_deepseek(
-                    GenerateRequest(prompt="Build a calculator"),
+                    GenerateRequest(
+                        prompt="Build a calculator",
+                        ai_provider="deepseek",
+                    ),
                     timeout_seconds=10,
                 )
         self.assertEqual(raised.exception.code, "AI_UPSTREAM_REJECTED")

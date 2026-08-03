@@ -30,6 +30,21 @@ class BillingServiceTests(unittest.TestCase):
         self.assertEqual(first["credits"], 40)
         self.assertEqual(second["credits"], 40)
 
+    def test_availability_check_does_not_consume_credits(self) -> None:
+        first = self.service.ensure_generation_available(self.user_id)
+        second = self.service.ensure_generation_available(self.user_id)
+
+        self.assertEqual(first["credits"], 50)
+        self.assertEqual(second["credits"], 50)
+        with self.service.engine.connect() as connection:
+            generation_entries = connection.execute(
+                select(billing_ledger).where(
+                    billing_ledger.c.user_id == self.user_id,
+                    billing_ledger.c.entry_type == "generation",
+                )
+            ).all()
+        self.assertEqual(generation_entries, [])
+
     def test_generation_is_rejected_when_balance_is_empty(self) -> None:
         for revision in range(1, 6):
             self.service.consume_generation(
@@ -41,6 +56,8 @@ class BillingServiceTests(unittest.TestCase):
                 self.user_id,
                 "generation:sess:r6",
             )
+        with self.assertRaises(InsufficientCredits):
+            self.service.ensure_generation_available(self.user_id)
 
     def test_unlimited_generation_keeps_balance_and_writes_no_consumption(self) -> None:
         account = self.service.account(self.user_id, unlimited=True)

@@ -158,29 +158,95 @@ class AccessControlTests(unittest.TestCase):
         self.assertEqual(selected["generations_remaining"], 5)
         self.assertFalse(selected["unlimited_credits"])
 
-    def test_provider_metadata_requires_login_and_is_safe(self) -> None:
+    def test_credits_settle_only_for_successful_initial_revision(self) -> None:
+        self._register(self.client_a, "billing_maker")
+        created = self.client_a.post(
+            "/api/sessions",
+            json=self._session_payload(),
+        ).json()
+        session_id = created["session_id"]
+        first_action_key = "billing-run-r1-0001"
+
+        with patch.object(
+            main_module.session_service,
+            "start_generation",
+            return_value=created,
+        ):
+            started = self.client_a.post(
+                f"/api/sessions/{session_id}/actions/run",
+                json={"idempotency_key": first_action_key},
+            )
+        self.assertEqual(started.status_code, 202, started.text)
+        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 50)
+
+        failed = main_module.session_service._read(session_id)
+        failed["last_action_idempotency_key"] = first_action_key
+        failed["status"] = "failed"
+        main_module.session_service._write_state(failed)
+        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 50)
+
+        completed = main_module.session_service._read(session_id)
+        completed["status"] = "completed"
+        main_module.session_service._write_state(completed)
+        main_module.session_service._write_state(
+            main_module.session_service._read(session_id)
+        )
+        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 40)
+
+        revised = self.client_a.post(
+            f"/api/sessions/{session_id}/revisions",
+            json={
+                "idempotency_key": "billing-revision-r2-0001",
+                "prompt": "继续修改这个 App，增加提醒开关",
+            },
+        )
+        self.assertEqual(revised.status_code, 201, revised.text)
+        second_action_key = "billing-run-r2-0001"
+        with patch.object(
+            main_module.session_service,
+            "start_generation",
+            return_value=revised.json(),
+        ):
+            started_revision = self.client_a.post(
+                f"/api/sessions/{session_id}/actions/run",
+                json={"idempotency_key": second_action_key},
+            )
+        self.assertEqual(started_revision.status_code, 202, started_revision.text)
+        revision_completed = main_module.session_service._read(session_id)
+        revision_completed["last_action_idempotency_key"] = second_action_key
+        revision_completed["status"] = "completed"
+        main_module.session_service._write_state(revision_completed)
+        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 40)
+
+    def test_provider_inventory_is_not_public(self) -> None:
         self.assertEqual(self.client_a.get("/api/ai/providers").status_code, 401)
         self._register(self.client_a, "provider_reader")
-        secret = "provider-secret-must-not-leak"
-        with patch.dict(
-            main_module.os.environ,
-            {
-                "DEEPSEEK_PRIMARY_API_KEY": secret,
-                "DEEPSEEK_PRIMARY_BASE_URL": "https://secret-provider.invalid/v1",
-            },
-        ):
-            response = self.client_a.get("/api/ai/providers")
+        response = self.client_a.get("/api/ai/providers")
+        self.assertEqual(response.status_code, 404, response.text)
 
-        self.assertEqual(response.status_code, 200, response.text)
-        payload = response.json()
-        self.assertEqual(payload["default_provider"], "auto")
-        self.assertEqual(
-            [item["id"] for item in payload["providers"]],
-            ["auto", "deepseek_primary", "deepseek_secondary", "aigocode"],
+    def test_public_api_payload_removes_routing_metadata(self) -> None:
+        payload = main_module._public_api_payload(
+            {
+                "generation": {
+                    "provider": "zhipu_glm52",
+                    "model": "glm-5.2",
+                    "routing_tier": "complex",
+                    "summary": "DeepSeek generated the app",
+                    "files": [
+                        {
+                            "path": "assets/main.py",
+                            "content": "# Keep source content unchanged: DeepSeek",
+                        }
+                    ],
+                },
+                "input": {"ai_provider": "auto", "prompt_original": "timer"},
+            }
         )
         serialized = json.dumps(payload)
-        self.assertNotIn(secret, serialized)
-        self.assertNotIn("secret-provider.invalid", serialized)
+        self.assertNotIn("provider", serialized)
+        self.assertNotIn("glm-5.2", serialized)
+        self.assertEqual(payload["generation"]["summary"], "AI generated the app")
+        self.assertIn("DeepSeek", payload["generation"]["files"][0]["content"])
 
     def test_registration_cannot_claim_superadmin_role(self) -> None:
         response = self.client_a.post(

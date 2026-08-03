@@ -121,6 +121,8 @@ describe("onboarding stage mapping", () => {
   it("maps deploy and publish to separate stages", () => {
     expect(stageIndexForError("deploy")).toBe(5);
     expect(stageIndexForError("publish")).toBe(6);
+    expect(stageIndexForCheckpoint("requirements_analyzed")).toBe(1);
+    expect(stageIndexForCheckpoint("dependencies_prepared")).toBe(2);
     expect(stageIndexForCheckpoint("package_done")).toBe(5);
     expect(stageIndexForCheckpoint("device_deploy_done")).toBe(6);
   });

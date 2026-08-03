@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { apiErrorMessage, apiFetch } from "./apiFetch";
 import {
   API_BASE_URL,
   GENERATION_IDLE_TIMEOUT_MS,
@@ -6,14 +7,6 @@ import {
   WASM_RUNTIME_URL,
 } from "./config";
 import { WebSerialDeviceClient, type DeviceConnectionState } from "./deviceSerial";
-import {
-  describeProviderResult,
-  emptyProviderCatalog,
-  isAiProviderId,
-  normalizeProviderCatalog,
-  type AiProviderId,
-  type AiProviderMetadata,
-} from "./providerRouting";
 import {
   buildShowcaseRunMessage,
   encodeShowcaseMpk,
@@ -42,14 +35,10 @@ interface GenerationResult {
   manifest: Record<string, unknown>;
   files: GeneratedFile[];
   mpk_base64: string;
-  model: string;
   warnings: string[];
   acceptance_tests: string[];
   mpk_filename: string;
   revision: number;
-  provider?: string;
-  failover_used?: boolean;
-  attempted_providers?: string[];
   prompt_normalized_zh?: string;
   prompt_normalized_en?: string;
   store_metadata?: Record<string, string>;
@@ -99,7 +88,6 @@ interface SessionState {
     display_name: string;
     publisher: string;
     version: string;
-    ai_provider?: string;
     targets: string[];
     prompt_normalized_zh?: string;
     prompt_normalized_en?: string;
@@ -127,7 +115,6 @@ interface RequirementChatResult {
   refined_prompt: string;
   missing_fields: string[];
   brief: Record<string, unknown>;
-  model: string;
 }
 interface SaveFileHandle {
   createWritable(): Promise<{
@@ -157,6 +144,7 @@ interface ShowcaseApp {
   featured: boolean;
 }
 export type GenerationWaitTimeoutKind = "idle" | "overall";
+const MAX_AUTOMATIC_REPAIR_ATTEMPTS = 3;
 export const getGenerationWaitTimeoutKind = (
   now: number,
   startedAt: number,
@@ -164,8 +152,8 @@ export const getGenerationWaitTimeoutKind = (
   idleTimeoutMs: number,
   overallTimeoutMs: number,
 ): GenerationWaitTimeoutKind | null => {
-  if (now - startedAt >= overallTimeoutMs) return "overall";
-  if (now - lastActivityAt >= idleTimeoutMs) return "idle";
+  if (overallTimeoutMs > 0 && now - startedAt >= overallTimeoutMs) return "overall";
+  if (idleTimeoutMs > 0 && now - lastActivityAt >= idleTimeoutMs) return "idle";
   return null;
 };
 
@@ -175,10 +163,6 @@ const wasmRuntimeUrl = WASM_RUNTIME_URL;
 const apiUrl = API_BASE_URL;
 const bridgePageUrl = typeof window === "undefined" ? "https://localhost/" : window.location.href;
 const wasmRuntimeOrigin = getBridgeTargetOrigin(wasmRuntimeUrl, bridgePageUrl);
-const apiFetch = (input: RequestInfo | URL, init: RequestInit = {}) => fetch(
-  input,
-  { ...init, credentials: "include" },
-);
 export const stages = [
   ["analysis", "需求分析"],
   ["api_check", "MicroPythonOS / LVGL API 校验"],
@@ -205,7 +189,12 @@ export const stageIndexForCheckpoint = (checkpoint?: string) => {
   const indexByCheckpoint: Record<string, number> = {
     session_created: 0,
     requirements_analyzed: 1,
+    // Dependency preparation is the final local/API planning step. Once it is
+    // complete the backend is already waiting for an AI provider, so keep the
+    // UI on "generation" instead of falling back to "analysis".
+    dependencies_prepared: 2,
     api_checked: 2,
+    generation_started: 2,
     code_generated: 3,
     desktop_test_done: 4,
     web_preview_done: 4,
@@ -303,11 +292,6 @@ export default function App() {
   const [displayName, setDisplayName] = useState("我的 App");
   const [publisher, setPublisher] = useState("erkou111");
   const [version, setVersion] = useState("0.1.0");
-  const [aiProvider, setAiProvider] = useState<AiProviderId>("auto");
-  const [providerMetadata, setProviderMetadata] = useState<AiProviderMetadata[]>(
-    () => emptyProviderCatalog().providers,
-  );
-  const [providerStatus, setProviderStatus] = useState<"loading" | "ready" | "error">("loading");
   const [desktopTarget, setDesktopTarget] = useState(false);
   const [desktopAvailable, setDesktopAvailable] = useState(false);
   const [webTarget, setWebTarget] = useState(true);
@@ -382,13 +366,17 @@ export default function App() {
   languageRef.current = language;
   const liveText = (zh: string, en: string) => languageRef.current === "zh" ? zh : en;
   const markGenerationActivity = (snapshot: GenerationActivitySnapshot) => {
-    if (!hasGenerationActivityChanged(generationActivitySnapshot.current, snapshot)) return;
-    generationActivitySnapshot.current = {
-      status: snapshot.status,
-      checkpoint_id: snapshot.checkpoint_id,
-      revision_id: snapshot.revision_id,
-    };
+    // Every successful poll proves that the backend session is alive.  Do not
+    // mistake a long model call (where the checkpoint legitimately stays the
+    // same) for an idle task.
     generationActivityAt.current = Date.now();
+    if (hasGenerationActivityChanged(generationActivitySnapshot.current, snapshot)) {
+      generationActivitySnapshot.current = {
+        status: snapshot.status,
+        checkpoint_id: snapshot.checkpoint_id,
+        revision_id: snapshot.revision_id,
+      };
+    }
   };
   const showcaseCategoryText = (category: string) => {
     if (!isZh) return category.charAt(0).toUpperCase() + category.slice(1);
@@ -422,10 +410,6 @@ export default function App() {
   const visibleShowcaseApps = showAllShowcase
     ? filteredShowcaseApps
     : orderedShowcaseApps.filter((item) => item.featured).slice(0, 12);
-  const selectedProvider = providerMetadata.find((provider) => provider.id === aiProvider);
-  const providerReady = providerStatus === "ready" && selectedProvider?.configured === true;
-  const providerResult = result ? describeProviderResult(result, providerMetadata) : null;
-
   const clearRuntimeTimers = () => {
     if (executionTimer.current !== null) window.clearTimeout(executionTimer.current);
     if (wasmTimer.current !== null) window.clearTimeout(wasmTimer.current);
@@ -504,33 +488,6 @@ export default function App() {
   useEffect(() => {
     localStorage.setItem("mpos-language", language);
   }, [language]);
-  useEffect(() => {
-    if (authStatus !== "signed_in") return;
-    const controller = new AbortController();
-    const loadProviders = async () => {
-      setProviderStatus("loading");
-      try {
-        const response = await apiFetch(`${apiUrl}/api/ai/providers`, {
-          signal: controller.signal,
-        });
-        if (!response.ok) throw new Error(`provider metadata returned ${response.status}`);
-        const catalog = normalizeProviderCatalog(await response.json());
-        if (!catalog) throw new Error("provider metadata has an invalid shape");
-        setProviderMetadata(catalog.providers);
-        setAiProvider((current) => catalog.providers.some(
-          (provider) => provider.id === current && provider.configured,
-        ) ? current : catalog.defaultProvider);
-        setProviderStatus("ready");
-      } catch {
-        if (!controller.signal.aborted) {
-          setProviderMetadata(emptyProviderCatalog().providers);
-          setProviderStatus("error");
-        }
-      }
-    };
-    void loadProviders();
-    return () => controller.abort();
-  }, [authStatus]);
   useEffect(() => {
     if (status === "idle" && !wasmReady) {
       setRuntimeStatus(tr("正在启动 MicroPythonOS WASM…", "Starting MicroPythonOS WASM…"));
@@ -639,7 +596,6 @@ export default function App() {
     setDisplayName(session.input.display_name);
     setPublisher(session.input.publisher);
     setVersion(session.input.version);
-    if (isAiProviderId(session.input.ai_provider)) setAiProvider(session.input.ai_provider);
     setDesktopTarget(session.input.targets.includes("desktop-preview"));
     setWebTarget(session.input.targets.includes("web-preview"));
     setPhysicalTarget(session.input.targets.includes("physical-device"));
@@ -824,7 +780,10 @@ export default function App() {
               result: "success",
               message: "MicroPythonOS WASM installed and launched the generated app through AppManager",
             }),
-          }).then((response) => response.json()).then((session: SessionState) => setSessionState(session));
+          }).then((response) => response.json()).then((session: SessionState) => {
+            setSessionState(session);
+            void refreshBilling().catch(() => undefined);
+          });
         }
       } else if (message.type === "MPOS_ERROR") {
         if (executionTimer.current !== null) window.clearTimeout(executionTimer.current);
@@ -839,7 +798,7 @@ export default function App() {
           return;
         }
         if (repairHandler.current(detail)) {
-          setRuntimeStatus(liveText(`发现兼容问题，DeepSeek 正在自动修复（${repairAttempts.current}/2）…`, `Compatibility issue found. DeepSeek is repairing it (${repairAttempts.current}/2)…`));
+          setRuntimeStatus(liveText(`发现兼容问题，AI 正在自动修复（${repairAttempts.current}/${MAX_AUTOMATIC_REPAIR_ATTEMPTS}）…`, `Compatibility issue found. AI is repairing it (${repairAttempts.current}/${MAX_AUTOMATIC_REPAIR_ATTEMPTS})…`));
           setLogs((items) => [...items, liveText(`[repair] WASM 发现兼容错误，正在自动修复：${detail}`, `[repair] WASM compatibility error found; repairing: ${detail}`)]);
           return;
         }
@@ -882,7 +841,7 @@ export default function App() {
         iframeRef.current.src = `${wasmRuntimeUrl}&recovery=${Date.now()}`;
       }
       if (repairHandler.current(detail)) {
-        setRuntimeStatus(liveText(`发现阻塞代码，DeepSeek 正在自动修复（${repairAttempts.current}/2）…`, `Blocking code found. DeepSeek is repairing it (${repairAttempts.current}/2)…`));
+        setRuntimeStatus(liveText(`发现阻塞代码，AI 正在自动修复（${repairAttempts.current}/${MAX_AUTOMATIC_REPAIR_ATTEMPTS}）…`, `Blocking code found. AI is repairing it (${repairAttempts.current}/${MAX_AUTOMATIC_REPAIR_ATTEMPTS})…`));
         setLogs((items) => [...items, liveText(`[repair] ${detail} 已重载 WASM，正在自动修复。`, `[repair] ${detail} WASM reloaded; automatic repair started.`)]);
         return;
       }
@@ -922,6 +881,7 @@ export default function App() {
     }
     if (
       !repair
+      && !continuing
       && billingAccount
       && !billingAccount.unlimited_credits
       && billingAccount.credits < billingAccount.generation_cost
@@ -946,10 +906,10 @@ export default function App() {
       repairAttempts.current = 0;
       setLogs([
         tr("[analysis] 已把你的需求发送到后端", "[analysis] Request sent to the backend"),
-        tr("[generation] 正在等待所选 AI Provider 生成 MicroPythonOS 代码…", "[generation] Waiting for the selected AI provider to generate MicroPythonOS code…"),
+        tr("[generation] 正在生成 MicroPythonOS 代码…", "[generation] Generating MicroPythonOS code…"),
       ]);
     } else {
-      setLogs((items) => [...items, tr(`[repair] 第 ${repairAttempts.current}/2 次自动修复：正在让 DeepSeek 重写不兼容代码…`, `[repair] Automatic repair ${repairAttempts.current}/2: DeepSeek is rewriting incompatible code…`)]);
+      setLogs((items) => [...items, tr(`[repair] 第 ${repairAttempts.current}/${MAX_AUTOMATIC_REPAIR_ATTEMPTS} 次自动修复：AI 正在重写不兼容代码…`, `[repair] Automatic repair ${repairAttempts.current}/${MAX_AUTOMATIC_REPAIR_ATTEMPTS}: AI is rewriting incompatible code…`)]);
     }
     setCurrentStage(0);
     const controller = new AbortController();
@@ -970,7 +930,16 @@ export default function App() {
       if (clientTimeoutKind) controller.abort();
     }, 1_000);
     try {
-      let sessionId = repair || continuing || sessionState?.status === "blocked" || sessionState?.status === "created"
+      const canReusePendingSession = Boolean(
+        sessionState
+        && ["blocked", "created"].includes(sessionState.status)
+        && sessionState.input.prompt_original.trim() === prompt.trim()
+        && sessionState.input.package_name === packageName
+        && sessionState.input.display_name === displayName
+        && sessionState.input.publisher === publisher
+        && sessionState.input.version === version
+      );
+      let sessionId = repair || continuing || canReusePendingSession
         ? localStorage.getItem("mpos-session-id")
         : null;
       if (!sessionId) {
@@ -993,7 +962,6 @@ export default function App() {
             display_name: displayName,
             publisher,
             version,
-            ai_provider: aiProvider,
             targets: selectedTargets,
             capabilities: {
               file_operation: true,
@@ -1018,7 +986,12 @@ export default function App() {
           }),
           signal: controller.signal,
         });
-        if (!createResponse.ok) throw new Error(tr("无法创建生成会话", "Could not create session"));
+        if (!createResponse.ok) {
+          throw new Error(await apiErrorMessage(
+            createResponse,
+            tr("无法创建生成会话", "Could not create session"),
+          ));
+        }
         const created = await createResponse.json() as SessionState;
         latestSession = created;
         markGenerationActivity(created);
@@ -1039,11 +1012,15 @@ export default function App() {
             idempotency_key: `revision-${crypto.randomUUID()}`,
             prompt,
             prompt_language: isZh ? "zh-CN" : "en-US",
-            ai_provider: aiProvider,
           }),
           signal: controller.signal,
         });
-        if (!revisionResponse.ok) throw new Error(tr("无法创建新版本", "Could not create revision"));
+        if (!revisionResponse.ok) {
+          throw new Error(await apiErrorMessage(
+            revisionResponse,
+            tr("无法创建新版本", "Could not create revision"),
+          ));
+        }
         const revised = await revisionResponse.json() as SessionState;
         latestSession = revised;
         markGenerationActivity(revised);
@@ -1058,7 +1035,6 @@ export default function App() {
           idempotency_key: `${repair ? "repair" : "generate"}-${crypto.randomUUID()}`,
           previous_code: repair?.previousCode,
           runtime_error: repair?.runtimeError,
-          ai_provider: aiProvider,
         }),
         signal: controller.signal,
       });
@@ -1071,10 +1047,13 @@ export default function App() {
             || tr("内测点数已用完，请联系项目管理员", "Beta credits are depleted. Contact the project administrator."),
           );
         }
-        throw new Error(tr("后端拒绝启动生成任务", "Backend refused to start generation"));
+        throw new Error(
+          failure?.detail?.message
+          || failure?.detail
+          || failure?.error?.message
+          || tr("后端拒绝启动生成任务", "Backend refused to start generation"),
+        );
       }
-      if (!repair) await refreshBilling().catch(() => undefined);
-
       let session = await actionResponse.json() as SessionState;
       latestSession = session;
       markGenerationActivity(session);
@@ -1107,7 +1086,7 @@ export default function App() {
       setCurrentStage(3);
       setLogs((items) => [
         ...items,
-        tr(`[generation] ${generated.provider || aiProvider} · ${generated.model} 已返回真实代码 ✓`, `[generation] ${generated.provider || aiProvider} · ${generated.model} returned real code ✓`),
+        tr("[generation] AI 已返回真实代码 ✓", "[generation] AI returned real code ✓"),
         tr("[validation] Python 语法和基础安全检查通过 ✓", "[validation] Python syntax and safety checks passed ✓"),
         tr(`[validation] 已生成 ${generated.acceptance_tests.length} 项功能验收，并将在 WASM 中执行 self_test ✓`, `[validation] Created ${generated.acceptance_tests.length} acceptance checks; self_test will run in WASM ✓`),
       ]);
@@ -1120,7 +1099,10 @@ export default function App() {
       setResult(generated);
       resultRef.current = generated;
       setCurrentStage(stageIndexForSession(session));
-      if (session.status === "completed") setStatus("completed");
+      if (session.status === "completed") {
+        setStatus("completed");
+        await refreshBilling().catch(() => undefined);
+      }
       if (session.status === "waiting_device") setStatus("waiting_device");
       setActiveTab("preview");
     } catch (error) {
@@ -1167,7 +1149,12 @@ export default function App() {
           decision,
         }),
       });
-      if (!response.ok) throw new Error(tr("权限决定保存失败", "Could not save permission decision"));
+      if (!response.ok) {
+        throw new Error(await apiErrorMessage(
+          response,
+          tr("权限决定保存失败", "Could not save permission decision"),
+        ));
+      }
       const session = await response.json() as SessionState;
       applySession(session);
       if (decision === "deny") {
@@ -1192,7 +1179,7 @@ export default function App() {
     }
     setPermissionBusy("__all__");
     try {
-      const response = await fetch(
+      const response = await apiFetch(
         `${apiUrl}/api/sessions/${sessionState.session_id}/permissions/allow-all`,
         {
           method: "POST",
@@ -1202,14 +1189,13 @@ export default function App() {
           }),
         },
       );
-      const payload = await response.json().catch(() => null);
       if (!response.ok) {
-        throw new Error(
-          typeof payload?.detail === "string"
-            ? payload.detail
-            : tr("一键确认权限失败", "Could not approve all permissions"),
-        );
+        throw new Error(await apiErrorMessage(
+          response,
+          tr("一键确认权限失败", "Could not approve all permissions"),
+        ));
       }
+      const payload = await response.json();
       applySession(payload as SessionState);
       setPermissionOpen(false);
       setToast(tr(`已一次确认 ${pending.length} 项权限`, `Approved ${pending.length} permissions`));
@@ -1225,7 +1211,11 @@ export default function App() {
     const generated = resultRef.current;
     const appCode = generated?.files.find((file) => file.path === "assets/main.py" || file.path === "app.py")?.content;
     if (repairing.current) return true;
-    if (!generated || !appCode || repairAttempts.current >= 2) return false;
+    if (
+      !generated
+      || !appCode
+      || repairAttempts.current >= MAX_AUTOMATIC_REPAIR_ATTEMPTS
+    ) return false;
     repairAttempts.current += 1;
     repairing.current = true;
     void run({ runtimeError: detail, previousCode: appCode });
@@ -1251,7 +1241,7 @@ export default function App() {
   };
 
   const retry = () => {
-    setToast(tr("正在重新调用 DeepSeek", "Calling DeepSeek again"));
+    setToast(tr("正在重新生成", "Generating again"));
     void run();
   };
 
@@ -1416,7 +1406,11 @@ export default function App() {
         }),
       });
       if (response.ok) {
-        setSessionState(await response.json() as SessionState);
+        const session = await response.json() as SessionState;
+        setSessionState(session);
+        if (session.status === "completed") {
+          await refreshBilling().catch(() => undefined);
+        }
         refreshHistory();
       }
     } catch {
@@ -1698,7 +1692,7 @@ export default function App() {
     setRequirementBusy(true);
     setRequirementError("");
     try {
-      const response = await fetch(`${apiUrl}/api/requirements/chat`, {
+      const response = await apiFetch(`${apiUrl}/api/requirements/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1816,7 +1810,7 @@ export default function App() {
                 <h1>{authMode === "login" ? tr("欢迎回来", "Welcome back") : tr("创建内测账号", "Create your beta account")}</h1>
                 <p>{authMode === "login"
                   ? tr("登录后继续查看自己的项目和剩余点数。", "Sign in to restore your projects and credits.")
-                  : tr("每个账号获得 50 个免费内测点数，可生成约 5 个版本。", "Each account receives 50 beta credits, enough for about 5 revisions.")}</p>
+                  : tr("每个账号获得 50 个免费内测点数，可成功生成约 5 个新 App；失败和继续修改不扣点。", "Each account receives 50 beta credits for about 5 successful new Apps. Failed runs and continued revisions are free.")}</p>
               </div>
               <form className="auth-form" onSubmit={submitAuth}>
                 <label htmlFor="auth-username">{tr("用户名", "Username")}</label>
@@ -1927,33 +1921,6 @@ export default function App() {
                 <label>{tr("显示名", "Display name")}<input value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label>
                 <label>Publisher<input value={publisher} onChange={(event) => setPublisher(event.target.value)} /></label>
                 <label>Version<input value={version} onChange={(event) => setVersion(event.target.value)} /></label>
-                <label>AI Provider
-                  <select
-                    value={aiProvider}
-                    disabled={providerStatus !== "ready"}
-                    onChange={(event) => {
-                      if (isAiProviderId(event.target.value)) setAiProvider(event.target.value);
-                    }}
-                  >
-                    {providerMetadata.map((provider) => (
-                      <option
-                        value={provider.id}
-                        disabled={!provider.configured}
-                        title={provider.model || undefined}
-                        key={provider.id}
-                      >
-                        {provider.label}{provider.configured ? provider.model ? ` · ${provider.model}` : "" : tr(" · 未配置", " · Not configured")}
-                      </option>
-                    ))}
-                  </select>
-                  <small>{providerStatus === "loading"
-                    ? tr("正在读取可用 Provider…", "Loading available providers…")
-                    : providerStatus === "error"
-                      ? tr("无法读取 Provider 配置，暂时不能生成。", "Provider metadata is unavailable. Generation is temporarily disabled.")
-                      : selectedProvider?.configured
-                        ? tr("仅发送 Provider ID；密钥始终保留在后端。", "Only the provider ID is sent; credentials remain on the backend.")
-                        : tr("此 Provider 尚未配置。", "This provider is not configured.")}</small>
-                </label>
               </div>
             </details>
 
@@ -2027,8 +1994,8 @@ export default function App() {
             <div className="actions">
               {status === "running"
                 ? <button className="danger-button" onClick={stop}>{tr("停止任务", "Stop")}</button>
-                : <button className="main-button" disabled={!providerReady || !systemStatusConfirmed || !prompt.trim() || !(desktopTarget || webTarget || physicalTarget || packageTarget)} onClick={() => void run()}>{continuing ? tr("生成新版本", "Generate revision") : ["completed", "failed", "cancelled", "timeout"].includes(status) ? tr("重新生成 App", "Regenerate App") : tr("开始生成 App", "Generate App")}</button>}
-              <span className="real-badge">{tr("真实调用 AI Provider", "Real AI provider")}</span>
+                : <button className="main-button" disabled={!systemStatusConfirmed || !prompt.trim() || !(desktopTarget || webTarget || physicalTarget || packageTarget)} onClick={() => void run()}>{continuing ? tr("生成新版本", "Generate revision") : ["completed", "failed", "cancelled", "timeout"].includes(status) ? tr("重新生成 App", "Regenerate App") : tr("开始生成 App", "Generate App")}</button>}
+              <span className="real-badge">{tr("AI 自动生成", "AI generation")}</span>
             </div>
           </section>
 
@@ -2043,7 +2010,7 @@ export default function App() {
                 })}
               </ol>
             )}
-            {status === "completed" && <div className="success-box"><strong>{sessionState?.input.targets.includes("web-preview") ? tr("App 已在 MicroPythonOS WASM 中真实运行", "App is running in MicroPythonOS WASM") : tr("所选生成和打包阶段已完成", "Selected generation and packaging stages are complete")}</strong>{providerResult && <span>AI: {providerResult.provider} · {providerResult.model}{providerResult.failoverUsed ? tr(` · 已安全切换（${providerResult.attempted.join(" → ")}）`, ` · Safe failover (${providerResult.attempted.join(" → ")})`) : ""}</span>}<span>{tr(`当前版本 ${sessionState?.revision_id || "r1"}；可以继续描述修改，不会覆盖上一成功版本。`, `Current revision ${sessionState?.revision_id || "r1"}. Continue editing without overwriting the last successful revision.`)}</span><button onClick={() => { setContinuing(true); setStatus("idle"); setToast(tr("请修改上方需求，然后点击“生成新版本”", "Edit the prompt, then click Generate revision")); }}>{tr("继续修改这个 App", "Continue editing this app")}</button></div>}
+            {status === "completed" && <div className="success-box"><strong>{sessionState?.input.targets.includes("web-preview") ? tr("App 已在 MicroPythonOS WASM 中真实运行", "App is running in MicroPythonOS WASM") : tr("所选生成和打包阶段已完成", "Selected generation and packaging stages are complete")}</strong><span>{tr(`当前版本 ${sessionState?.revision_id || "r1"}；可以继续描述修改，不会覆盖上一成功版本。`, `Current revision ${sessionState?.revision_id || "r1"}. Continue editing without overwriting the last successful revision.`)}</span><button onClick={() => { setContinuing(true); setStatus("idle"); setToast(tr("请修改上方需求，然后点击“生成新版本”", "Edit the prompt, then click Generate revision")); }}>{tr("继续修改这个 App", "Continue editing this app")}</button></div>}
             {["failed", "timeout", "cancelled", "blocked"].includes(status) && <div className={`error-box state-${status}`}>
               <strong>{status === "timeout" ? tr("运行超时", "Timed out") : status === "cancelled" ? tr("任务已取消", "Cancelled") : status === "blocked" ? tr("等待处理", "Blocked") : tr("真实生成失败", "Generation failed")}</strong>
               {sessionState?.last_error && <code>{sessionState.last_error.code} · {sessionState.last_error.stage} · owner: {sessionState.last_error.owner}</code>}
@@ -2248,7 +2215,7 @@ export default function App() {
                 </div>
                 {sessionState?.artifacts.find((item) => item.role === "desktop_screenshot") && <img className="desktop-screenshot" src={`${apiUrl}/api/artifacts/${sessionState.artifacts.find((item) => item.role === "desktop_screenshot")!.id}`} alt={tr("桌面测试截图", "Desktop smoke screenshot")} />}
                 {result && <>
-                  <small className="preview-summary">{result.summary} · {providerResult?.provider} · {providerResult?.model}{providerResult?.failoverUsed ? tr(" · 已执行安全 failover", " · Safe failover used") : ""}</small>
+                  <small className="preview-summary">{result.summary}</small>
                   <small className="preview-summary">{tr(
                     `AI 规范化需求：${result.prompt_normalized_zh || sessionState?.input.prompt_normalized_zh || prompt}`,
                     `Normalized requirement: ${result.prompt_normalized_en || sessionState?.input.prompt_normalized_en || prompt}`,
@@ -2372,7 +2339,7 @@ export default function App() {
             </article>
           ))}
         </div>
-        <small>{tr("API Key 只保存在 backend/.env。模型不能发送任意 shell，也不能绕过这些权限。", "The API key stays in backend/.env. The model cannot send arbitrary shell commands or bypass these permissions.")}</small>
+        <small>{tr("服务凭据只保存在后端。生成服务不能发送任意 shell，也不能绕过这些权限。", "Service credentials stay on the backend. The generation service cannot send arbitrary shell commands or bypass these permissions.")}</small>
         <div>
           <button className="secondary-button" onClick={() => setPermissionOpen(false)}>{tr("稍后处理", "Later")}</button>
           <button

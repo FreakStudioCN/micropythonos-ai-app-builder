@@ -2,6 +2,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,7 @@ from .auth import (
 )
 from .billing import InsufficientCredits, billing_service
 from .database import database_engine
-from .generator import GenerationError, generate_app, provider_metadata
+from .generator import GenerationError, generate_app
 from .cors import compute_frontend_origins
 from .requirements_chat import RequirementChatError, clarify_requirements
 from .models import (
@@ -39,6 +40,8 @@ from .models import (
     PermissionBatchDecisionRequest,
     PermissionDecisionRequest,
     PreviewResultRequest,
+    PublicGenerateRequest,
+    PublicGenerateResponse,
     RequirementChatRequest,
     RequirementChatResponse,
     RevisionRequest,
@@ -133,6 +136,41 @@ def _account_payload(user: dict) -> dict:
     }
 
 
+def _settle_successful_generation(state: dict[str, Any]) -> None:
+    billing = state.get("billing") or {}
+    billing_service.consume_generation(
+        state["owner_user_id"],
+        billing["idempotency_key"],
+        unlimited=bool(billing.get("unlimited")),
+    )
+
+
+def _prepare_generation_billing(
+    session_id: str,
+    payload: SessionActionRequest,
+    user: dict,
+) -> None:
+    state = session_service.get(session_id)
+    billing = state.get("billing") or {}
+    is_initial_revision = str(state.get("revision_id", "r1")) == "r1"
+    if is_initial_revision and billing.get("settled") is not True:
+        billing_service.ensure_generation_available(
+            user["id"],
+            unlimited=_is_superadmin(user),
+        )
+    session_service.set_generation_success_handler(_settle_successful_generation)
+    session_service.configure_generation_billing(
+        session_id,
+        action_idempotency_key=payload.idempotency_key,
+        unlimited=_is_superadmin(user),
+    )
+
+
+# Keep success settlement active after a backend restart, including sessions that
+# are waiting for a browser preview or physical-device result.
+session_service.set_generation_success_handler(_settle_successful_generation)
+
+
 class AuthenticatedUserMiddleware:
     """Pure ASGI auth middleware so streaming responses remain streaming."""
 
@@ -207,6 +245,116 @@ class AuthenticatedUserMiddleware:
         await self.app(scope, receive, send)
 
 
+_PRIVATE_ROUTING_FIELDS = {
+    "ai_provider",
+    "provider",
+    "model",
+    "attempted_providers",
+    "provider_attempts",
+    "routing_tier",
+    "routing_reason",
+    "model_meta",
+}
+_PUBLIC_TEXT_FIELDS = {
+    "message",
+    "title",
+    "description",
+    "command_preview",
+    "summary",
+    "detail",
+    "error",
+    "last_error",
+    "warnings",
+    "logs",
+}
+
+
+def _neutralize_provider_names(value: str) -> str:
+    return re.sub(
+        r"(?i)\b(?:deepseek(?:[_-][a-z0-9.]+)*|kimi(?:[_\s-][a-z0-9.]+)*|moonshot(?:[_-][a-z0-9.]+)*|zhipu(?:[_-][a-z0-9.]+)*|glm(?:[_\s-][a-z0-9.]+)*)\b|智谱",
+        "AI",
+        value,
+    )
+
+
+def _public_api_payload(value: Any, field_name: str = "") -> Any:
+    if isinstance(value, dict):
+        return {
+            key: _public_api_payload(item, key)
+            for key, item in value.items()
+            if key not in _PRIVATE_ROUTING_FIELDS
+        }
+    if isinstance(value, list):
+        return [_public_api_payload(item, field_name) for item in value]
+    if isinstance(value, str) and field_name in _PUBLIC_TEXT_FIELDS:
+        return _neutralize_provider_names(value)
+    return value
+
+
+class ProviderPrivacyMiddleware:
+    """Remove internal routing metadata from public JSON API responses."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send) -> None:
+        if scope["type"] != "http" or not scope["path"].startswith("/api/"):
+            await self.app(scope, receive, send)
+            return
+
+        response_start = None
+        response_body: list[bytes] = []
+        is_json = False
+
+        async def send_private(message) -> None:
+            nonlocal response_start, is_json
+            if message["type"] == "http.response.start":
+                headers = message.get("headers", [])
+                content_type = next(
+                    (
+                        value.decode("latin-1").lower()
+                        for key, value in headers
+                        if key.lower() == b"content-type"
+                    ),
+                    "",
+                )
+                is_json = "application/json" in content_type
+                if is_json:
+                    response_start = message
+                else:
+                    await send(message)
+                return
+            if message["type"] != "http.response.body" or not is_json:
+                await send(message)
+                return
+
+            response_body.append(message.get("body", b""))
+            if message.get("more_body", False):
+                return
+            raw_body = b"".join(response_body)
+            try:
+                payload = json.loads(raw_body)
+                raw_body = json.dumps(
+                    _public_api_payload(payload),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+                pass
+            if response_start is not None:
+                headers = [
+                    (key, value)
+                    for key, value in response_start.get("headers", [])
+                    if key.lower() != b"content-length"
+                ]
+                headers.append((b"content-length", str(len(raw_body)).encode("ascii")))
+                await send({**response_start, "headers": headers})
+            await send({"type": "http.response.body", "body": raw_body})
+
+        await self.app(scope, receive, send_private)
+
+
+app.add_middleware(ProviderPrivacyMiddleware)
 app.add_middleware(AuthenticatedUserMiddleware)
 app.add_middleware(
     CORSMiddleware,
@@ -219,16 +367,13 @@ app.add_middleware(
 
 @app.get("/api/health")
 def health() -> dict[str, Any]:
-    key = os.getenv("DEEPSEEK_API_KEY", "").strip()
-    configured = bool(key)
+    configured = any(
+        os.getenv(name, "").strip()
+        for name in ("DEEPSEEK_API_KEY", "KIMI_API_KEY", "ZHIPU_API_KEY")
+    )
     return {
         "status": "ok",
-        "deepseek_configured": configured,
-        "deepseek_key_fingerprint": (
-            hashlib.sha256(key.encode("utf-8")).hexdigest()[:8]
-            if configured
-            else None
-        ),
+        "ai_service_configured": configured,
         "database_backend": database_engine.dialect.name,
         "object_storage_enabled": session_service.object_storage_enabled,
         "durable_storage_required": _enabled("MPOS_REQUIRE_DURABLE_STORAGE"),
@@ -243,11 +388,6 @@ def system_status() -> dict[str, Any]:
 @app.get("/api/capabilities")
 def capabilities() -> dict:
     return session_service.capabilities()
-
-
-@app.get("/api/ai/providers")
-def ai_providers() -> dict[str, Any]:
-    return {"providers": provider_metadata(), "default_provider": "auto"}
 
 
 @app.post("/api/requirements/chat", response_model=RequirementChatResponse)
@@ -337,7 +477,10 @@ def create_demo_session(payload: DemoSessionRequest, request: Request) -> dict:
 
 @app.post("/api/sessions", status_code=201)
 def create_session(payload: SessionCreateRequest, request: Request) -> dict:
-    return session_service.create(payload, _current_user_id(request))
+    return session_service.create(
+        payload,
+        _current_user_id(request),
+    )
 
 
 @app.get("/api/sessions/{session_id}")
@@ -364,10 +507,11 @@ async def session_events(
             events = session_service.events(session_id)
             for event in events[cursor:]:
                 cursor += 1
+                public_event = _public_api_payload(event)
                 yield (
                     f"id: {event['seq']}\n"
                     f"event: {event['type']}\n"
-                    f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+                    f"data: {json.dumps(public_event, ensure_ascii=False)}\n\n"
                 )
                 idle_ticks = 0
             state = session_service.get(session_id)
@@ -406,14 +550,11 @@ async def generate_session(
     request: Request,
 ) -> dict:
     try:
-        state = session_service.get(session_id)
         user = _current_user(request)
-        billing_service.consume_generation(
-            user["id"],
-            f"generation:{session_id}:{state['revision_id']}",
-            unlimited=_is_superadmin(user),
-        )
+        _prepare_generation_billing(session_id, payload, user)
         return _start_action(session_id, "generate", payload)
+    except SessionNotFound as exc:
+        raise HTTPException(status_code=404, detail="Session 不存在") from exc
     except InsufficientCredits as exc:
         raise HTTPException(
             status_code=402,
@@ -433,14 +574,12 @@ async def run_session(
     request: Request,
 ) -> dict:
     try:
-        state = session_service.get(session_id)
         user = _current_user(request)
-        billing_service.consume_generation(
-            user["id"],
-            f"generation:{session_id}:{state['revision_id']}",
-            unlimited=_is_superadmin(user),
+        _prepare_generation_billing(session_id, payload, user)
+        return session_service.start_generation(
+            session_id,
+            payload,
         )
-        return session_service.start_generation(session_id, payload)
     except SessionNotFound as exc:
         raise HTTPException(status_code=404, detail="Session 不存在") from exc
     except InsufficientCredits as exc:
@@ -464,7 +603,11 @@ async def prepare_deps_session(
 
 def _start_action(session_id: str, action: str, request: SessionActionRequest) -> dict:
     try:
-        return session_service.start_action(session_id, action, request)
+        return session_service.start_action(
+            session_id,
+            action,
+            request,
+        )
     except SessionNotFound as exc:
         raise HTTPException(status_code=404, detail="Session 不存在") from exc
     except ValueError as exc:
@@ -507,17 +650,38 @@ def record_preview(
 
 
 @app.post("/api/sessions/{session_id}/retry", status_code=202)
-async def retry_session(session_id: str, request: SessionActionRequest) -> dict:
+async def retry_session(
+    session_id: str,
+    payload: SessionActionRequest,
+    request: Request,
+) -> dict:
     try:
-        return session_service.start_generation(session_id, request)
+        _prepare_generation_billing(session_id, payload, _current_user(request))
+        return session_service.start_generation(
+            session_id,
+            payload,
+        )
     except SessionNotFound as exc:
         raise HTTPException(status_code=404, detail="Session 不存在") from exc
+    except InsufficientCredits as exc:
+        raise HTTPException(
+            status_code=402,
+            detail={
+                "code": "INSUFFICIENT_CREDITS",
+                "message": str(exc),
+                "balance": exc.balance,
+                "required": exc.required,
+            },
+        ) from exc
 
 
 @app.post("/api/sessions/{session_id}/revisions", status_code=201)
 def create_revision(session_id: str, request: RevisionRequest) -> dict:
     try:
-        return session_service.create_revision(session_id, request)
+        return session_service.create_revision(
+            session_id,
+            request,
+        )
     except SessionNotFound as exc:
         raise HTTPException(status_code=404, detail="Session 不存在") from exc
 
@@ -666,16 +830,27 @@ def upload_screenshot(session_id: str, request: ScreenshotUploadRequest) -> dict
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
-@app.post("/api/generate", response_model=GenerateResponse)
-async def generate(payload: GenerateRequest, request: Request) -> GenerateResponse:
+@app.post("/api/generate", response_model=PublicGenerateResponse)
+async def generate(payload: PublicGenerateRequest, request: Request) -> GenerateResponse:
     try:
         user = _current_user(request)
+        unlimited = _is_superadmin(user)
+        billing_service.ensure_generation_available(
+            user["id"],
+            unlimited=unlimited,
+        )
+        idempotency_key = (
+            f"legacy-generation:{hashlib.sha256(os.urandom(32)).hexdigest()}"
+        )
+        result = await generate_app(
+            GenerateRequest(**payload.model_dump(), ai_provider="auto")
+        )
         billing_service.consume_generation(
             user["id"],
-            f"legacy-generation:{hashlib.sha256(os.urandom(32)).hexdigest()}",
-            unlimited=_is_superadmin(user),
+            idempotency_key,
+            unlimited=unlimited,
         )
-        return await generate_app(payload)
+        return result
     except InsufficientCredits as exc:
         raise HTTPException(
             status_code=402,

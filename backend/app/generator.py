@@ -78,9 +78,10 @@ SYSTEM_PROMPT = """
   set_style_border_width、set_style_border_color、set_style_pad_all、set_style_pad_hor、
   set_style_pad_ver、set_style_shadow_width、set_style_shadow_color、set_style_shadow_opa
 
-视觉质量是验收条件，不是可选项。默认采用精致深色界面：
-- 只使用 4 到 6 种协调颜色：背景 0x0F172A、卡片 0x1E293B、主色 0x6366F1、
-  强调色 0x22D3EE、正文 0xF8FAFC、次要文字 0x94A3B8
+视觉质量是验收条件，不是可选项。界面风格必须根据 App 主题变化：
+- 不要机械复用固定的深蓝色模板；除非用户明确要求深色科技风，否则不要默认使用
+  0x0F172A、0x1E293B、0x6366F1 这组旧配色
+- 只使用 4 到 6 种协调颜色，确保背景、卡片、主色、强调色、正文和次要文字之间有足够对比度
 - screen 必须设置背景色；内容区域要有清晰的标题、状态/分数和主操作区
 - 卡片或控制区使用 10 到 16px 圆角、合理内边距和无边框或细边框
 - 主按钮使用主色背景和高对比文字；次按钮降低视觉权重
@@ -133,7 +134,7 @@ class GeneratedApp(Activity):
 
 VISUAL_REQUIREMENTS = """
 本次 App 必须达到可直接展示的视觉质量：
-1. 使用统一深色调色板和高对比文字，不允许默认白底灰按钮。
+1. 严格使用本次需求后附带的专属视觉方向，不允许套用固定深蓝色模板，也不允许默认白底灰按钮。
 2. 必须设置 screen 背景色、至少一个表面/控件背景色、文本色和圆角；主要内容卡片必须有内边距。
 3. 信息需要有标题层、内容层和操作层，不能把控件随意堆在一起。
 4. 游戏必须有 HUD、明确的玩家/敌人/子弹颜色和整齐的底部触控按钮。
@@ -148,13 +149,180 @@ VISUAL_REQUIREMENTS = """
 
 GENERAL_UI_BLUEPRINT = """
 请按下面的安全设计系统组织界面：
-- screen 使用深色背景；顶部放 32-40px 高的标题/状态区。
+- screen 使用本次专属调色板的页面背景；顶部放 32-40px 高的标题/状态区。
 - 中间使用一个或多个有圆角、内边距和细边框的内容卡片。
 - 底部或卡片内放主要操作区；同组按钮等高、等宽、间距一致。
 - 标题文字明亮，说明文字使用次要颜色，关键数字或状态使用强调色。
 - screen 设置页面背景；内容卡片设置背景、圆角、内边距和边框；主要按钮设置强调色、圆角和一致尺寸。
 - 只使用系统提示列出的稳定 LVGL API，不使用主题、字体、grid、style 对象或坐标读取。
+- 参考 MicroPythonOS 内置 App 的成品规律：主状态一眼可见、控件紧凑但不拥挤、每个操作都有明确反馈；
+  只学习这些设计规律，不复制任何内置 App 的源码、素材或固定配色。
 """
+
+
+APP_UI_BLUEPRINTS = {
+    "calendar": """
+日历成品骨架：
+- 顶部 36px 月份导航条，左侧 PREV、中间英文月份和年份、右侧 NEXT。
+- 导航条下方放 MON-SUN 七列星期标题，再放 6x7 日期触控网格；今天、选中日和普通日期必须有不同状态。
+- 底部放 TODAY 主操作和当前选择摘要。日期按钮统一尺寸、圆角和间距，不能只显示一串数字文本。
+- 月份切换和日期选择必须立即重绘网格并更新摘要。
+""",
+    "timer": """
+计时与提醒成品骨架：
+- 顶部 32px 标题/模式栏，中间使用大号视觉区域突出唯一主状态（剩余时间、进度或下次提醒）。
+- 主状态下放一条简短状态说明；底部放 START/PAUSE、RESET 和必要的设置按钮，按钮等高等宽。
+- 计时、暂停、重置必须由真实 Python 状态驱动；界面刷新统一使用 lv.timer_create，不能阻塞等待。
+- 若需求包含记录，使用紧凑记录卡片显示最近状态，不要把记录与主数字混在同一行。
+""",
+    "calculator": """
+计算器成品骨架：
+- 顶部显示卡片清楚区分表达式和结果；下方使用 4 列触控键盘，数字键、运算符、清除键和等号键分级配色。
+- 所有按键至少 34px 高，同类键等宽等高；等号是最醒目的主操作，清除键使用警示色但不抢占结果层级。
+- 运算采用明确的数字/运算符状态机，支持用户要求的连续运算；严禁 eval/exec。
+""",
+    "dashboard": """
+仪表盘成品骨架：
+- 顶部显示标题和连接/刷新状态；中间用 2x2 或纵向指标卡展示 label、value、unit，关键数值使用强调色。
+- 指标卡必须对齐并保留安全间距；底部放 REFRESH 或主要控制按钮，并提供最近更新时间/状态反馈。
+- 不要用纯文本列表冒充仪表盘，不要让不同单位和值挤在一起。
+""",
+    "habit": """
+习惯与喝水记录成品骨架：
+- 顶部是今日目标和状态；中间用大数字/进度卡显示已完成量、目标量和下一次提醒。
+- 主要操作（例如 +1 CUP / DONE）必须最大最醒目，旁边或下方放 UNDO/RESET/SET 等次操作。
+- 若包含历史记录，使用最多 3 条的紧凑记录卡；每次操作后立即更新主状态、进度和提示文字。
+""",
+    "game": """
+触控游戏成品骨架：
+- 顶部 28-32px HUD 显示 TITLE、SCORE、LIVES/STATUS；中间是边界清晰的游戏场景；底部是完整触控操作区。
+- 玩家、目标、障碍物和场景背景必须使用明显不同的颜色或形状，不能用文字标签代替全部游戏对象。
+- 开始、游戏中、结束三个状态都要有明确画面反馈和可见 RESTART 操作。
+""",
+    "generic": """
+通用工具成品骨架：
+- 顶部 32-36px 标题/状态区；中间只突出一个核心任务，用 1-2 张卡片组织内容；底部放一个主操作和必要的次操作。
+- 用户每次点击后必须看到文字、数值、颜色或控件状态发生变化，不能只有静态说明。
+""",
+}
+
+
+VISUAL_PALETTES = (
+    (
+        "清新薄荷",
+        "明亮、轻盈、适合健康与生活记录",
+        "页面背景 0xF0FDF4、卡片 0xFFFFFF、主色 0x10B981、强调色 0xF59E0B、正文 0x16302B、次要文字 0x64748B",
+    ),
+    (
+        "暖沙日光",
+        "温暖、清楚、适合日历与效率工具",
+        "页面背景 0xFFF7ED、卡片 0xFFFFFF、主色 0xF97316、强调色 0x7C3AED、正文 0x292524、次要文字 0x78716C",
+    ),
+    (
+        "柔和薰衣草",
+        "友好、精致、适合个人工具和创意应用",
+        "页面背景 0xF5F3FF、卡片 0xFFFFFF、主色 0x8B5CF6、强调色 0xEC4899、正文 0x2E1065、次要文字 0x6B7280",
+    ),
+    (
+        "晴空柠檬",
+        "活泼、清爽、适合天气、学习与轻量互动",
+        "页面背景 0xEFF6FF、卡片 0xFFFFFF、主色 0x0EA5E9、强调色 0xEAB308、正文 0x172554、次要文字 0x64748B",
+    ),
+    (
+        "珊瑚奶油",
+        "亲和、有温度、适合提醒、习惯和日常应用",
+        "页面背景 0xFFF1F2、卡片 0xFFFFFF、主色 0xFB7185、强调色 0x14B8A6、正文 0x3F1D2E、次要文字 0x78716C",
+    ),
+)
+
+
+def _visual_direction_for_prompt(prompt: str) -> str:
+    """Choose a stable, varied palette without exposing model routing."""
+
+    normalized = prompt.lower()
+    game_hints = ("game", "游戏", "射击", "跑酷", "碰撞", "闯关")
+    health_hints = ("健康", "喝水", "饮水", "习惯", "运动", "health", "water")
+    productivity_hints = (
+        "日历", "calendar", "待办", "清单", "番茄", "计时", "提醒", "计划"
+    )
+    if any(hint in normalized for hint in game_hints):
+        return (
+            "本次专属视觉方向：霓虹竞技场。使用页面背景 0x1C1026、卡片 0x2D1B3D、"
+            "主色 0xA855F7、强调色 0xF59E0B、正文 0xFFF7ED、次要文字 0xC4B5FD。"
+            "游戏场景可以深色，但不要使用旧的深蓝色模板。"
+        )
+    if any(hint in normalized for hint in health_hints):
+        palette = VISUAL_PALETTES[0]
+    elif any(hint in normalized for hint in productivity_hints):
+        palette = VISUAL_PALETTES[1]
+    else:
+        # crc32 is deterministic across processes, unlike Python's hash().
+        palette = VISUAL_PALETTES[zlib.crc32(normalized.encode("utf-8")) % len(VISUAL_PALETTES)]
+    name, mood, colors = palette
+    return (
+        f"本次专属视觉方向：{name}。{mood}。{colors}。"
+        "必须明显区别于固定深蓝模板，并保证文字与背景对比清晰。"
+    )
+
+
+def _app_archetype_for_prompt(prompt: str) -> str:
+    """Map a product request to a deterministic, screen-sized UI archetype."""
+
+    normalized = prompt.casefold()
+    rules = (
+        ("calendar", ("日历", "calendar", "日期选择", "month view")),
+        ("calculator", ("计算器", "calculator", "四则运算")),
+        (
+            "game",
+            (
+                "游戏", "game", "跑酷", "射击", "闯关", "碰撞", "reaction",
+                "反应力", "连连看", "棋", "迷宫",
+            ),
+        ),
+        (
+            "habit",
+            (
+                "喝水", "饮水", "习惯", "打卡", "water reminder", "habit",
+                "饮水记录", "完成一杯",
+            ),
+        ),
+        (
+            "timer",
+            (
+                "番茄", "倒计时", "计时器", "timer", "pomodoro", "闹铃",
+                "提醒", "reminder", "秒表", "stopwatch",
+            ),
+        ),
+        (
+            "dashboard",
+            (
+                "仪表盘", "dashboard", "状态面板", "监控", "传感器", "sensor",
+                "数据面板", "空气质量", "天气", "weather",
+            ),
+        ),
+    )
+    for archetype, hints in rules:
+        if any(hint in normalized for hint in hints):
+            return archetype
+    return "generic"
+
+
+def _ui_blueprint_for_prompt(prompt: str) -> str:
+    archetype = _app_archetype_for_prompt(prompt)
+    labels = {
+        "calendar": "日历",
+        "timer": "计时与提醒",
+        "calculator": "计算器",
+        "dashboard": "数据仪表盘",
+        "habit": "习惯与记录",
+        "game": "触控游戏",
+        "generic": "通用工具",
+    }
+    return (
+        f"本次产品界面类型：{labels[archetype]}。以下骨架属于验收条件，"
+        "必须在 320x240 内完整实现：\n"
+        f"{APP_UI_BLUEPRINTS[archetype].strip()}"
+    )
 
 
 SHOOTER_UI_BLUEPRINT = """
@@ -169,7 +337,14 @@ SHOOTER_UI_BLUEPRINT = """
 
 
 class GenerationError(RuntimeError):
-    pass
+    def __init__(
+        self,
+        message: str,
+        *,
+        details: dict[str, Any] | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.details = details or {}
 
 
 class UpstreamGenerationError(GenerationError):
@@ -202,13 +377,16 @@ GenerationAttemptSink = Callable[[dict[str, Any]], None]
 
 
 def _build_user_prompt(request: GenerateRequest, correction: str = "") -> str:
+    visual_direction = _visual_direction_for_prompt(request.prompt)
+    ui_blueprint = _ui_blueprint_for_prompt(request.prompt)
     user_prompt = (
         "请生成 JSON。用户需求：\n"
         f"{request.prompt}\n\n"
         f"显示名：{request.display_name}\n"
         f"包名：{request.package_name}\n"
         "入口文件固定为 app.py，入口类固定为 GeneratedApp。\n\n"
-        f"{VISUAL_REQUIREMENTS}\n{GENERAL_UI_BLUEPRINT}"
+        f"{VISUAL_REQUIREMENTS}\n{visual_direction}\n{GENERAL_UI_BLUEPRINT}"
+        f"\n{ui_blueprint}"
     )
     if _is_shooter_prompt(request.prompt):
         user_prompt += (
@@ -225,6 +403,8 @@ def _build_user_prompt(request: GenerateRequest, correction: str = "") -> str:
             "\n\n<PREVIOUS_CODE_REFERENCE>\n"
             "这是已有 App 的连续修改参考，不是正确答案。"
             "必须保留未被用户要求删除的功能，同时修复后续 correction 指出的全部问题。\n"
+            "允许重新组织整个视图层级和调色板来提升成品感；不能机械保留旧版布局或固定深蓝配色。"
+            "但必须保持已有核心功能、数据状态和用户未要求删除的交互。\n"
             f"运行错误（如果为空则表示功能修改）：\n{request.runtime_error or '无'}\n\n"
             f"上一次 app.py：\n{request.previous_code}\n"
             "</PREVIOUS_CODE_REFERENCE>"
@@ -238,15 +418,34 @@ def _message_text(value: Any) -> str:
     """Normalize OpenAI-compatible string and multipart message content."""
     if isinstance(value, str):
         return value.strip()
+    if isinstance(value, dict):
+        # Some OpenAI-compatible providers return a single content part as an
+        # object instead of wrapping it in a list.  Preserve generated JSON
+        # objects and recursively unwrap the common text containers.
+        if any(
+            key in value
+            for key in (
+                "app_code",
+                "code",
+                "python_code",
+                "source_code",
+                "files",
+                "result",
+                "generated_app",
+            )
+        ):
+            return json.dumps(value, ensure_ascii=False)
+        for key in ("text", "content", "value", "output_text"):
+            text = _message_text(value.get(key))
+            if text:
+                return text
+        return ""
     if isinstance(value, list):
         parts: list[str] = []
         for item in value:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text = item.get("text")
-                if isinstance(text, str):
-                    parts.append(text)
+            text = _message_text(item)
+            if text:
+                parts.append(text)
         return "\n".join(parts).strip()
     return ""
 
@@ -269,6 +468,24 @@ def _parse_model_json(message: dict[str, Any]) -> dict[str, Any]:
                     candidates.append(arguments.strip())
 
     decoder = json.JSONDecoder()
+
+    def load_object(raw: str) -> dict[str, Any] | None:
+        # A few compatible APIs JSON-encode the JSON payload twice.  Unwrap at
+        # most two string layers so malformed or adversarial output cannot
+        # cause an unbounded parsing loop.
+        current = raw
+        for _ in range(3):
+            try:
+                parsed = json.loads(current)
+            except json.JSONDecodeError:
+                return None
+            if isinstance(parsed, dict):
+                return parsed
+            if not isinstance(parsed, str) or parsed == current:
+                return None
+            current = parsed.strip()
+        return None
+
     for raw in candidates:
         if not raw:
             continue
@@ -280,12 +497,9 @@ def _parse_model_json(message: dict[str, Any]) -> dict[str, Any]:
         )
         if fenced:
             cleaned = fenced.group(1).strip()
-        try:
-            parsed = json.loads(cleaned)
-            if isinstance(parsed, dict):
-                return parsed
-        except json.JSONDecodeError:
-            pass
+        parsed_object = load_object(cleaned)
+        if parsed_object is not None:
+            return parsed_object
         for match in re.finditer(r"\{", cleaned):
             try:
                 parsed, _end = decoder.raw_decode(cleaned[match.start() :])
@@ -293,7 +507,30 @@ def _parse_model_json(message: dict[str, Any]) -> dict[str, Any]:
                 continue
             if isinstance(parsed, dict):
                 return parsed
-    raise GenerationError("DeepSeek 没有返回可解析的生成结果")
+
+    # Last-resort compatibility for models that ignored JSON mode but still
+    # returned one complete Python source fence.  The normal code/API/product
+    # validators still run afterwards, so accepting the envelope does not skip
+    # any safety or MicroPythonOS compatibility checks.
+    for raw in candidates:
+        code_fence = re.search(
+            r"```(?:python|py)\s*(.*?)\s*```",
+            raw,
+            flags=re.IGNORECASE | re.DOTALL,
+        )
+        if not code_fence:
+            continue
+        code = code_fence.group(1).strip()
+        if "import lvgl" in code and "class " in code:
+            return {
+                "summary": "Generated MicroPythonOS App",
+                "app_code": code,
+                "acceptance_tests": [
+                    "App starts without an exception",
+                    "Primary controls update the visible App state",
+                ],
+            }
+    raise GenerationError("AI 生成服务没有返回可解析的生成结果")
 
 
 def _normalize_generation_payload(payload: dict[str, Any]) -> dict[str, Any]:
@@ -407,7 +644,7 @@ def _normalize_generation_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def _settings() -> tuple[str, str, str]:
     key = os.getenv("DEEPSEEK_API_KEY", "").strip()
     base_url = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
-    model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash").strip()
+    model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat").strip()
     if not key or key == "replace_with_your_deepseek_api_key":
         raise GenerationError(
             "未配置 DEEPSEEK_API_KEY。请复制 backend/.env.example 为 backend/.env 并填写 Key。"
@@ -421,8 +658,29 @@ async def _call_deepseek_legacy(
     timeout_seconds: float | None = None,
 ) -> tuple[dict[str, Any], str, dict[str, Any]]:
     key, base_url, model = _settings()
+    active_provider = _ACTIVE_PROVIDER_CONFIG.get()
     user_prompt = _build_user_prompt(request, correction)
-    max_tokens = max(2200, min(6000, int(os.getenv("DEEPSEEK_MAX_TOKENS", "3200"))))
+    provider_id = active_provider.id if active_provider is not None else "deepseek"
+    provider_token_env = {
+        "zhipu_glm52": "ZHIPU_MAX_OUTPUT_TOKENS",
+        "kimi": "KIMI_MAX_OUTPUT_TOKENS",
+        "kimi_k27": "KIMI_MAX_OUTPUT_TOKENS",
+        "deepseek": "DEEPSEEK_MAX_OUTPUT_TOKENS",
+    }.get(provider_id, "AI_MAX_OUTPUT_TOKENS")
+    max_tokens = max(
+        2200,
+        min(
+            8000,
+            int(
+                _first_env(
+                    provider_token_env,
+                    "AI_MAX_OUTPUT_TOKENS",
+                    "DEEPSEEK_MAX_TOKENS",
+                    default="6000",
+                )
+            ),
+        ),
+    )
     payload = {
         "model": model,
         "messages": [
@@ -430,14 +688,24 @@ async def _call_deepseek_legacy(
             {"role": "user", "content": user_prompt},
         ],
         "response_format": {"type": "json_object"},
-        "temperature": 0.12 if correction else 0.25,
         "max_tokens": max_tokens,
+        # GLM-5.2 enables deep thinking by default. App generation already has
+        # deterministic validators and repair passes, so disabling model-side
+        # thinking removes a long, invisible reasoning phase and makes JSON
+        # output far more predictable. Kimi rejects this parameter with 400.
         **(
             {"thinking": {"type": "disabled"}}
-            if _ACTIVE_PROVIDER_CONFIG.get() is None
-            or _ACTIVE_PROVIDER_CONFIG.get().id.startswith("deepseek_")
+            if provider_id in {"deepseek", "zhipu_glm52"}
             else {}
         ),
+        # Kimi K2.6 and K2.7 reject custom temperature values with HTTP 400.
+        # Let those models use their required server-side default.
+        **(
+            {"temperature": 0.12 if correction else 0.25}
+            if provider_id not in {"kimi", "kimi_k27", "zhipu_glm52"}
+            else {}
+        ),
+        **({"do_sample": False} if provider_id == "zhipu_glm52" else {}),
     }
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
     request_timeout = timeout_seconds
@@ -476,11 +744,29 @@ async def _call_deepseek_legacy(
         message = choice["message"]
         if not isinstance(message, dict):
             raise TypeError("message is not an object")
-        generated = _parse_model_json(message)
+        try:
+            generated = _parse_model_json(message)
+        except GenerationError as exc:
+            finish_reason = choice.get("finish_reason")
+            exc.details = {
+                **exc.details,
+                "model": str(body.get("model") or model),
+                "finish_reason": (
+                    str(finish_reason)[:80]
+                    if finish_reason is not None
+                    else None
+                ),
+                "content_type": type(message.get("content")).__name__,
+                "has_reasoning_content": bool(message.get("reasoning_content")),
+            }
+            raise
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-        raise GenerationError("DeepSeek 没有返回可解析的生成结果") from exc
+        raise GenerationError("AI 生成服务没有返回可解析的生成结果") from exc
     selected_model = str(body.get("model") or model)
     model_meta: dict[str, Any] = {"model": selected_model}
+    finish_reason = choice.get("finish_reason")
+    if finish_reason is not None:
+        model_meta["finish_reason"] = str(finish_reason)[:80]
     request_id = body.get("id")
     if isinstance(request_id, str) and request_id:
         model_meta["request_id"] = request_id[:200]
@@ -818,7 +1104,20 @@ def _validate_product_contract(code: str, prompt: str) -> list[str]:
     return [f"产品语义验收通过：{prompt[:80]}"]
 
 
-def _validate_visual_contract(code: str) -> list[str]:
+def _numeric_literal(node: ast.AST) -> float | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
+        return float(node.value)
+    if (
+        isinstance(node, ast.UnaryOp)
+        and isinstance(node.op, ast.USub)
+        and isinstance(node.operand, ast.Constant)
+        and isinstance(node.operand.value, (int, float))
+    ):
+        return -float(node.operand.value)
+    return None
+
+
+def _validate_visual_contract(code: str, prompt: str = "") -> list[str]:
     """Reject functional-but-unstyled prototypes before they reach the user."""
     tree = ast.parse(code)
     attributes = [
@@ -844,13 +1143,56 @@ def _validate_visual_contract(code: str) -> list[str]:
         if not methods.intersection(attributes)
     ]
     color_calls = 0
+    color_values: set[int] = set()
+    button_names: set[str] = set()
+    widget_sizes: dict[str, tuple[float, float]] = {}
+    widget_positions: dict[str, tuple[float, float]] = {}
+    explicit_button_heights: dict[str, float] = {}
     for node in ast.walk(tree):
+        if isinstance(node, (ast.Assign, ast.AnnAssign)):
+            value = node.value
+            if (
+                isinstance(value, ast.Call)
+                and _dotted_name(value.func) == "lv.button"
+            ):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    target_name = _dotted_name(target)
+                    if target_name:
+                        button_names.add(target_name)
         if not isinstance(node, ast.Call):
             continue
         if _dotted_name(node.func) == "lv.color_hex":
             color_calls += 1
+            if node.args:
+                color_value = _numeric_literal(node.args[0])
+                if color_value is not None:
+                    color_values.add(int(color_value))
+        if not isinstance(node.func, ast.Attribute):
+            continue
+        receiver = _dotted_name(node.func.value)
+        if not receiver:
+            continue
+        if node.func.attr == "set_size" and len(node.args) >= 2:
+            width = _numeric_literal(node.args[0])
+            height = _numeric_literal(node.args[1])
+            if width is not None and height is not None:
+                widget_sizes[receiver] = (width, height)
+                if receiver in button_names:
+                    explicit_button_heights[receiver] = height
+        elif node.func.attr == "set_height" and node.args:
+            height = _numeric_literal(node.args[0])
+            if height is not None and receiver in button_names:
+                explicit_button_heights[receiver] = height
+        elif node.func.attr == "set_pos" and len(node.args) >= 2:
+            x = _numeric_literal(node.args[0])
+            y = _numeric_literal(node.args[1])
+            if x is not None and y is not None:
+                widget_positions[receiver] = (x, y)
     if color_calls < 4:
         missing.append("至少 4 个协调的 lv.color_hex 颜色")
+    if {0x0F172A, 0x1E293B, 0x6366F1}.issubset(color_values):
+        missing.append("删除固定的深蓝 0x0F172A/0x1E293B/0x6366F1 模板并使用本次专属调色板")
     if attributes.count("set_style_bg_color") < 3:
         missing.append("screen、内容卡片与主要操作的三层背景")
     if attributes.count("set_style_radius") < 2:
@@ -895,11 +1237,39 @@ def _validate_visual_contract(code: str) -> list[str]:
         )
     ):
         missing.append("卡片细边框或轻阴影")
+    undersized_buttons = sorted(
+        name
+        for name, height in explicit_button_heights.items()
+        if height < 34
+    )
+    if undersized_buttons:
+        missing.append(
+            "触控按钮高度不得小于 34px：" + ", ".join(undersized_buttons[:5])
+        )
+    if button_names and not explicit_button_heights:
+        missing.append("为主要触控按钮明确设置至少 34px 高度")
+    overflow_widgets: list[str] = []
+    for name, (x, y) in widget_positions.items():
+        size = widget_sizes.get(name)
+        if size is None:
+            continue
+        width, height = size
+        if x < 0 or y < 0 or x + width > 320 or y + height > 240:
+            overflow_widgets.append(name)
+    if overflow_widgets:
+        missing.append(
+            "以下控件的明确坐标超出 320x240 安全区域："
+            + ", ".join(sorted(overflow_widgets)[:5])
+        )
     if missing:
         raise GenerationError(
             "界面仍像未设计的原型，必须补齐：" + "、".join(dict.fromkeys(missing))
         )
-    return ["已通过三层背景、配色、圆角、间距、尺寸和卡片细节检查"]
+    archetype = _app_archetype_for_prompt(prompt) if prompt else "generic"
+    return [
+        "已通过三层背景、专属配色、圆角、间距、触控尺寸、屏幕边界和卡片细节检查"
+        f"（{archetype}）"
+    ]
 
 
 @lru_cache(maxsize=1)
@@ -1222,10 +1592,26 @@ def _build_correction(
         )
     if "界面仍像未设计的原型" in message:
         suggestions.append(
-            "按照三层设计系统完整重做界面：screen、内容卡片和主要按钮分别设置背景；"
+            "不要只在失败代码上补几行样式；按照本次需求中的专属 App 成品骨架完整重做视图层级："
+            "screen、内容卡片和主要按钮分别设置背景；"
             "至少两处圆角、内容卡片的一处明确内边距、三个明确尺寸/布局设置，"
             "并增加细边框或轻阴影。"
             "颜色统一使用 4-6 个协调的 lv.color_hex。"
+        )
+    if "固定的深蓝" in message:
+        suggestions.append(
+            "删除 0x0F172A、0x1E293B、0x6366F1 这一整套旧模板色，"
+            "严格改用用户提示中给出的本次专属调色板，并保持 4-6 种颜色。"
+        )
+    if "34px" in message:
+        suggestions.append(
+            "所有可点击主控件必须显式 set_size 或 set_height，触控高度不小于 34px；"
+            "同组按钮保持等高、等宽、等间距。"
+        )
+    if "320x240" in message:
+        suggestions.append(
+            "重新计算固定坐标和尺寸，确保 set_pos(x, y) 与 set_size(w, h) 满足 "
+            "0<=x、0<=y、x+w<=320、y+h<=240；四周保留至少 8px 安全边距。"
         )
     if "API summary" in message:
         suggestions.append(
@@ -1387,10 +1773,30 @@ def _build_mpk(package_name: str, manifest: dict[str, Any], app_code: str) -> st
 
 
 AI_PROVIDER_IDS = (
-    "deepseek_primary",
-    "deepseek_secondary",
-    "aigocode",
+    "deepseek",
+    "kimi",
+    "kimi_k27",
+    "zhipu_glm52",
 )
+
+LEGACY_PROVIDER_ALIASES = {
+    "deepseek_primary": "deepseek",
+    "deepseek_secondary": "deepseek",
+    "aigocode": "zhipu_glm52",
+    "zhipu_glm45": "zhipu_glm52",
+    "zhipu_glm47": "zhipu_glm52",
+}
+
+DEFAULT_PROVIDER_ORDERS = {
+    # App generation is a coding task even when the requested product is
+    # simple. K2.7 Code reliably returns final content, while K2.6 may spend a
+    # truncated response entirely on reasoning and leave content empty.
+    "simple": ("zhipu_glm52", "kimi_k27", "deepseek"),
+    "standard": ("zhipu_glm52", "kimi_k27", "deepseek"),
+    "complex": ("zhipu_glm52", "kimi_k27", "deepseek"),
+    "revision": ("zhipu_glm52", "kimi_k27", "deepseek"),
+    "repair": ("zhipu_glm52", "kimi_k27", "deepseek"),
+}
 
 
 class _ProviderHTTPStatusError(Exception):
@@ -1399,7 +1805,7 @@ class _ProviderHTTPStatusError(Exception):
     def __init__(self, status_code: int, request_id: str | None = None) -> None:
         self.status_code = status_code
         self.request_id = request_id
-        message = f"AI provider returned HTTP {status_code}"
+        message = f"AI generation service returned HTTP {status_code}"
         if request_id:
             message += f" (request_id={request_id})"
         super().__init__(message)
@@ -1429,6 +1835,8 @@ class AIProviderConfig:
             not in {
                 "replace_with_your_deepseek_api_key",
                 "replace_with_your_aigocode_api_key",
+                "replace_with_your_kimi_api_key",
+                "replace_with_your_zhipu_api_key",
             }
         )
 
@@ -1465,6 +1873,30 @@ def _bounded_float_env(
     return max(minimum, min(maximum, value))
 
 
+def _optional_timeout_env(
+    name: str,
+    *,
+    default: float = 0.0,
+    maximum: float = 3600.0,
+    fallbacks: tuple[str, ...] = (),
+) -> float | None:
+    """Return None when an aggregate timeout is disabled with zero.
+
+    Individual HTTP requests still have their own read timeout, so disabling the
+    aggregate deadline cannot leave a dead upstream connection running forever.
+    It only prevents one slow provider or one validation repair from consuming
+    the budget needed by later fallbacks.
+    """
+    raw = _first_env(name, *fallbacks, default=str(default))
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        value = default
+    if value <= 0:
+        return None
+    return min(maximum, max(1.0, value))
+
+
 def _bounded_int_env(
     name: str,
     *,
@@ -1480,50 +1912,58 @@ def _bounded_int_env(
 
 
 def _provider_configs() -> dict[str, AIProviderConfig]:
-    primary = AIProviderConfig(
-        id="deepseek_primary",
-        label="DeepSeek Primary",
-        api_key=_first_env("DEEPSEEK_PRIMARY_API_KEY", "DEEPSEEK_API_KEY"),
+    deepseek = AIProviderConfig(
+        id="deepseek",
+        label="DeepSeek · 快速代码",
+        api_key=_first_env("DEEPSEEK_API_KEY", "DEEPSEEK_PRIMARY_API_KEY"),
         base_url=_first_env(
-            "DEEPSEEK_PRIMARY_BASE_URL",
             "DEEPSEEK_BASE_URL",
+            "DEEPSEEK_PRIMARY_BASE_URL",
             default="https://api.deepseek.com",
         ).rstrip("/"),
         model=_first_env(
-            "DEEPSEEK_PRIMARY_MODEL",
             "DEEPSEEK_MODEL",
-            default="deepseek-v4-flash",
+            "DEEPSEEK_PRIMARY_MODEL",
+            default="deepseek-chat",
         ),
     )
-    secondary = AIProviderConfig(
-        id="deepseek_secondary",
-        label="DeepSeek Secondary",
-        api_key=_first_env(
-            "DEEPSEEK_SECONDARY_API_KEY",
-            "DEEPSEEK_BACKUP_API_KEY",
-        ),
+    kimi = AIProviderConfig(
+        id="kimi",
+        label="Kimi K2.6 · 通用",
+        api_key=_first_env("KIMI_API_KEY", "MOONSHOT_API_KEY"),
         base_url=_first_env(
-            "DEEPSEEK_SECONDARY_BASE_URL",
-            "DEEPSEEK_BACKUP_BASE_URL",
-            default="https://api.deepseek.com",
+            "KIMI_BASE_URL",
+            "MOONSHOT_BASE_URL",
+            default="https://api.moonshot.cn/v1",
         ).rstrip("/"),
-        model=_first_env(
-            "DEEPSEEK_SECONDARY_MODEL",
-            "DEEPSEEK_BACKUP_MODEL",
-            default="deepseek-v4-flash",
-        ),
+        model=_first_env("KIMI_MODEL", default="kimi-k2.6"),
     )
-    aigocode = AIProviderConfig(
-        id="aigocode",
-        label="AIGoCode GLM",
-        api_key=_first_env("AIGOCODE_API_KEY"),
+    kimi_k27 = AIProviderConfig(
+        id="kimi_k27",
+        label="Kimi K2.7 Code · 复杂代码",
+        api_key=_first_env("KIMI_API_KEY", "MOONSHOT_API_KEY"),
         base_url=_first_env(
-            "AIGOCODE_BASE_URL",
-            default="https://api.aigocode.app/v1",
+            "KIMI_BASE_URL",
+            "MOONSHOT_BASE_URL",
+            default="https://api.moonshot.cn/v1",
         ).rstrip("/"),
-        model=_first_env("AIGOCODE_MODEL", default="glm-4.7"),
+        model=_first_env("KIMI_K27_MODEL", default="kimi-k2.7-code"),
     )
-    return {item.id: item for item in (primary, secondary, aigocode)}
+    zhipu_key = _first_env("ZHIPU_API_KEY", "BIGMODEL_API_KEY", "AIGOCODE_API_KEY")
+    zhipu_base_url = _first_env(
+        "ZHIPU_BASE_URL",
+        "BIGMODEL_BASE_URL",
+        default="https://open.bigmodel.cn/api/paas/v4",
+    ).rstrip("/")
+    zhipu_glm52 = AIProviderConfig(
+        id="zhipu_glm52",
+        label="智谱 GLM-5.2 · 高质量",
+        api_key=zhipu_key,
+        base_url=zhipu_base_url,
+        model=_first_env("ZHIPU_GLM52_MODEL", "AIGOCODE_MODEL", default="glm-5.2"),
+    )
+    configs = (deepseek, kimi, kimi_k27, zhipu_glm52)
+    return {item.id: item for item in configs}
 
 
 def provider_metadata() -> list[dict[str, str | bool]]:
@@ -1532,9 +1972,9 @@ def provider_metadata() -> list[dict[str, str | bool]]:
     providers: list[dict[str, str | bool]] = [
         {
             "id": "auto",
-            "label": "Automatic failover",
+            "label": "自动选择（按复杂度）",
             "configured": configured_any,
-            "model": "",
+            "model": "动态路由",
         }
     ]
     providers.extend(
@@ -1550,11 +1990,11 @@ def provider_metadata() -> list[dict[str, str | bool]]:
 
 
 def _settings() -> tuple[str, str, str]:
-    config = _ACTIVE_PROVIDER_CONFIG.get() or _provider_configs()["deepseek_primary"]
+    config = _ACTIVE_PROVIDER_CONFIG.get() or _provider_configs()["deepseek"]
     if not config.configured:
         raise UpstreamGenerationError(
             "AI_UPSTREAM_UNAVAILABLE",
-            f"AI provider {config.id} is not configured",
+            "AI generation service is not configured",
             retryable=False,
             failover_allowed=False,
             details={"provider": config.id},
@@ -1562,17 +2002,81 @@ def _settings() -> tuple[str, str, str]:
     return config.api_key, config.base_url, config.model
 
 
-def _provider_order() -> list[str]:
-    raw = os.getenv(
-        "AI_PROVIDER_ORDER",
-        "deepseek_primary,deepseek_secondary,aigocode",
+def _canonical_provider_id(provider_id: str) -> str:
+    return LEGACY_PROVIDER_ALIASES.get(provider_id, provider_id)
+
+
+def _classify_request_complexity(
+    request: GenerateRequest,
+    correction: str = "",
+) -> tuple[str, str]:
+    """Return a deterministic routing tier without sending content elsewhere."""
+
+    # Existing code is also supplied when a user creates a normal revision.  It
+    # is useful context, but it does not by itself mean that the request is an
+    # error repair.  Treat only an actual validation/runtime error (or an
+    # internal correction produced by the validator) as repair work.  This
+    # prevents a fresh app idea from being sent through the slow repair-model
+    # route merely because an older successful revision exists.
+    if correction or request.runtime_error:
+        return "repair", "validation or runtime error requires repair"
+
+    # A user-requested continuation must understand both the previous program
+    # and the requested delta.  Route it to the higher-quality coding models,
+    # even when the new instruction itself is short.
+    if request.previous_code:
+        return "revision", "continuing an existing app requires change-aware generation"
+
+    prompt = request.prompt.lower()
+    complex_hints = (
+        "game", "游戏", "射击", "跑酷", "动画", "animation", "multi-screen",
+        "多页面", "多步骤", "multi-step", "workflow", "dashboard", "仪表盘", "network", "联网",
+        "sensor", "传感器", "camera", "摄像头", "audio", "音频", "chart", "图表",
+        "bluetooth", "蓝牙", "wifi", "拖拽", "drag", "碰撞", "collision",
     )
+    simple_hints = (
+        "calculator", "计算器", "timer", "计时器", "倒计时", "clock", "时钟",
+        "counter", "计数器", "status", "状态", "hello", "文本", "calendar", "日历",
+    )
+    interaction_hints = (
+        "点击", "点一下", "按钮", "输入", "选择", "切换", "开始", "暂停", "重置",
+        "记录", "提醒", "每隔", "定时", "下一步", "返回", "提交", "滑动", "跳跃",
+        "click", "button", "input", "select", "switch", "start", "pause", "reset",
+        "record", "remind", "every hour", "next", "back", "submit", "swipe",
+    )
+    complex_matches = sum(hint in prompt for hint in complex_hints)
+    simple_matches = sum(hint in prompt for hint in simple_hints)
+    interaction_matches = sum(hint in prompt for hint in interaction_hints)
+    score = complex_matches * 2 - min(simple_matches, 1)
+    if len(prompt) >= 500:
+        score += 2
+    elif len(prompt) >= 220:
+        score += 1
+    if any(separator in prompt for separator in ("并且", "同时", "以及", " and ")):
+        score += 1
+
+    # Two or more explicit user actions/states indicate a multi-step product,
+    # even when the request is short (for example: record + hourly reminder).
+    if interaction_matches >= 2:
+        return "complex", "multiple controls, states, or timed interactions"
+
+    if score >= 4:
+        return "complex", "interactive, hardware, or multi-feature request"
+    if score <= 0 and len(prompt) < 180:
+        return "simple", "short single-purpose request"
+    return "standard", "general app generation request"
+
+
+def _provider_order(tier: str = "standard") -> list[str]:
+    defaults = DEFAULT_PROVIDER_ORDERS.get(tier, DEFAULT_PROVIDER_ORDERS["standard"])
+    env_name = f"AI_PROVIDER_ORDER_{tier.upper()}"
+    raw = _first_env(env_name, "AI_PROVIDER_ORDER", default=",".join(defaults))
     ordered: list[str] = []
     for provider_id in raw.split(","):
-        provider_id = provider_id.strip()
+        provider_id = _canonical_provider_id(provider_id.strip())
         if provider_id in AI_PROVIDER_IDS and provider_id not in ordered:
             ordered.append(provider_id)
-    return ordered or list(AI_PROVIDER_IDS)
+    return ordered or list(defaults)
 
 
 def _circuit_open(provider_id: str) -> bool:
@@ -1620,7 +2124,7 @@ def _record_provider_failure(provider_id: str) -> None:
     )
     cooldown = _bounded_float_env(
         "AI_PROVIDER_CIRCUIT_COOLDOWN_SECONDS",
-        default=30.0,
+        default=60.0,
         minimum=0.1,
         maximum=3600.0,
     )
@@ -1651,14 +2155,19 @@ def _reset_provider_circuits() -> None:
         _PROVIDER_CIRCUITS.clear()
 
 
-def _provider_candidates(requested_provider: str) -> tuple[list[AIProviderConfig], bool]:
+def _provider_candidates(
+    requested_provider: str,
+    request: GenerateRequest,
+    correction: str = "",
+) -> tuple[list[AIProviderConfig], bool, str, str]:
     configs = _provider_configs()
     if requested_provider != "auto":
-        config = configs.get(requested_provider)
+        canonical_id = _canonical_provider_id(requested_provider)
+        config = configs.get(canonical_id)
         if config is None:
             raise UpstreamGenerationError(
                 "AI_UPSTREAM_UNAVAILABLE",
-                f"Unknown AI provider {requested_provider}",
+                "The requested AI generation service is unavailable",
                 retryable=False,
                 failover_allowed=False,
                 details={"provider": requested_provider},
@@ -1666,35 +2175,36 @@ def _provider_candidates(requested_provider: str) -> tuple[list[AIProviderConfig
         if not config.configured:
             raise UpstreamGenerationError(
                 "AI_UPSTREAM_UNAVAILABLE",
-                f"AI provider {requested_provider} is not configured",
+                "AI generation service is not configured",
                 retryable=False,
                 failover_allowed=False,
                 details={"provider": requested_provider},
             )
-        if _circuit_open(requested_provider):
+        if _circuit_open(canonical_id):
             raise UpstreamGenerationError(
                 "AI_UPSTREAM_UNAVAILABLE",
-                f"AI provider {requested_provider} is temporarily unavailable",
+                "AI generation service is temporarily unavailable",
                 retryable=True,
                 failover_allowed=False,
                 details={"provider": requested_provider},
             )
-        return [config], True
+        return [config], True, "manual", "model selected manually"
 
+    tier, reason = _classify_request_complexity(request, correction)
     candidates = [
         configs[provider_id]
-        for provider_id in _provider_order()
+        for provider_id in _provider_order(tier)
         if configs[provider_id].configured and not _circuit_open(provider_id)
     ]
     if not candidates:
         raise UpstreamGenerationError(
             "AI_UPSTREAM_UNAVAILABLE",
-            "No configured AI provider is currently available",
+            "AI generation service is currently unavailable",
             retryable=True,
             failover_allowed=False,
             details={"attempted_providers": []},
         )
-    return candidates, False
+    return candidates, False, tier, reason
 
 
 def _status_from_generation_error(message: str) -> int | None:
@@ -1714,16 +2224,22 @@ async def _call_provider_with_retries(
 ) -> tuple[dict[str, Any], str, dict[str, Any], list[dict[str, Any]]]:
     retries = _bounded_int_env(
         "AI_UPSTREAM_MAX_RETRIES",
-        default=2,
+        default=0,
         minimum=0,
         maximum=5,
     )
+    provider_timeout_env = {
+        "zhipu_glm52": "ZHIPU_READ_TIMEOUT_SECONDS",
+        "kimi": "KIMI_READ_TIMEOUT_SECONDS",
+        "kimi_k27": "KIMI_READ_TIMEOUT_SECONDS",
+        "deepseek": "DEEPSEEK_READ_TIMEOUT_SECONDS",
+    }.get(config.id, "AI_READ_TIMEOUT_SECONDS")
     read_timeout = _bounded_float_env(
-        "AI_READ_TIMEOUT_SECONDS",
+        provider_timeout_env,
         default=60.0,
         minimum=0.1,
         maximum=600.0,
-        fallbacks=("DEEPSEEK_REQUEST_TIMEOUT_SECONDS",),
+        fallbacks=("AI_READ_TIMEOUT_SECONDS", "DEEPSEEK_REQUEST_TIMEOUT_SECONDS"),
     )
     backoff = _bounded_float_env(
         "AI_RETRY_BACKOFF_SECONDS",
@@ -1734,11 +2250,12 @@ async def _call_provider_with_retries(
     attempts: list[dict[str, Any]] = []
 
     for attempt in range(1, retries + 2):
+        attempt_started = time.monotonic()
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise UpstreamGenerationError(
                 "AI_UPSTREAM_TIMEOUT",
-                f"AI provider {config.id} exceeded the overall timeout",
+                "AI generation service exceeded the overall timeout",
                 retryable=True,
                 failover_allowed=True,
                 details={
@@ -1748,8 +2265,10 @@ async def _call_provider_with_retries(
                 },
             )
 
-        attempts_remaining = retries + 2 - attempt
-        attempt_timeout = min(read_timeout, remaining / attempts_remaining)
+        # Give the active provider its complete remaining window. Fast 429/5xx
+        # responses can still be retried, while an actual timeout fails over
+        # immediately below and therefore does not need a pre-reserved retry slot.
+        attempt_timeout = min(read_timeout, remaining)
         upstream_request_id: str | None = None
         token = _ACTIVE_PROVIDER_CONFIG.set(config)
         try:
@@ -1778,21 +2297,20 @@ async def _call_provider_with_retries(
                 if status_code in {401, 403}:
                     error_code = "AI_UPSTREAM_AUTH_FAILED"
                     error_message = (
-                        f"AI provider {config.id} rejected its credentials or permissions"
+                        "AI generation service rejected its credentials or permissions"
                     )
                 elif status_code == 404:
                     error_code = "AI_UPSTREAM_CONFIG_ERROR"
-                    error_message = (
-                        f"AI provider {config.id} endpoint or model is not configured"
-                    )
+                    error_message = "AI generation service endpoint is not configured"
                 else:
                     error_code = "AI_UPSTREAM_REJECTED"
-                    error_message = f"AI provider {config.id} rejected the request"
+                    error_message = "AI generation service rejected the request"
                 attempt_record: dict[str, Any] = {
                     "provider": config.id,
                     "attempt": attempt,
                     "outcome": f"http_{status_code}",
                     "status_code": status_code,
+                    "elapsed_seconds": round(time.monotonic() - attempt_started, 3),
                 }
                 if upstream_request_id:
                     attempt_record["request_id"] = upstream_request_id
@@ -1809,6 +2327,27 @@ async def _call_provider_with_retries(
                         "provider_attempts": attempts,
                     },
                 ) from exc
+        except UpstreamGenerationError:
+            raise
+        except GenerationError as exc:
+            # Parsing/contract failures happen after a successful HTTP call.
+            # Attach only safe diagnostics so the outer quality loop can avoid
+            # sending the exact same repair request to the same provider again.
+            exc.details = {
+                **exc.details,
+                "provider": config.id,
+                "model": str(exc.details.get("model") or config.model),
+                "provider_attempts": [
+                    *attempts,
+                    {
+                        "provider": config.id,
+                        "attempt": attempt,
+                        "outcome": "invalid_response",
+                        "elapsed_seconds": round(time.monotonic() - attempt_started, 3),
+                    },
+                ],
+            }
+            raise
         except httpx.HTTPError:
             outcome = "connection_error"
             status_code = None
@@ -1819,6 +2358,7 @@ async def _call_provider_with_retries(
                     "provider": config.id,
                     "attempt": attempt,
                     "outcome": "success",
+                    "elapsed_seconds": round(time.monotonic() - attempt_started, 3),
                 }
             )
             return generated, model, model_meta, attempts
@@ -1829,17 +2369,34 @@ async def _call_provider_with_retries(
             "provider": config.id,
             "attempt": attempt,
             "outcome": outcome,
+            "elapsed_seconds": round(time.monotonic() - attempt_started, 3),
         }
         if status_code is not None:
             attempt_record["status_code"] = status_code
         if upstream_request_id:
             attempt_record["request_id"] = upstream_request_id
         attempts.append(attempt_record)
+        # A timeout has already consumed this provider's allotted budget.
+        # Repeating the same call would starve fallback providers, so switch
+        # provider immediately while retaining retries for 429/5xx failures.
+        if upstream_code == "AI_UPSTREAM_TIMEOUT":
+            raise UpstreamGenerationError(
+                upstream_code,
+                "AI generation service timed out",
+                retryable=True,
+                failover_allowed=True,
+                details={
+                    "provider": config.id,
+                    "status_code": status_code,
+                    "attempts": attempt,
+                    "provider_attempts": attempts,
+                },
+            )
         if attempt > retries:
             message = (
-                f"AI provider {config.id} timed out"
+                "AI generation service timed out"
                 if upstream_code == "AI_UPSTREAM_TIMEOUT"
-                else f"AI provider {config.id} is unavailable"
+                else "AI generation service is unavailable"
             )
             raise UpstreamGenerationError(
                 upstream_code,
@@ -1865,38 +2422,87 @@ async def _call_deepseek(
     request: GenerateRequest,
     correction: str = "",
     timeout_seconds: float | None = None,
+    excluded_providers: set[str] | None = None,
 ) -> tuple[dict[str, Any], str, dict[str, Any]]:
     requested_provider = getattr(request, "ai_provider", "auto") or "auto"
-    candidates, explicit = _provider_candidates(requested_provider)
-    overall_timeout = _bounded_float_env(
+    candidates, explicit, routing_tier, routing_reason = _provider_candidates(
+        requested_provider,
+        request,
+        correction,
+    )
+    excluded = excluded_providers or set()
+    if not explicit and excluded:
+        candidates = [config for config in candidates if config.id not in excluded]
+        if not candidates:
+            raise GenerationError(
+                "所有已配置的 AI 生成服务都已返回不合格结果",
+                details={"excluded_providers": sorted(excluded)},
+            )
+    if not explicit:
+        max_candidates = _bounded_int_env(
+            "AI_MAX_FAILOVER_PROVIDERS",
+            default=3,
+            minimum=1,
+            maximum=len(AI_PROVIDER_IDS),
+        )
+        candidates = candidates[:max_candidates]
+    overall_timeout = _optional_timeout_env(
         "AI_OVERALL_TIMEOUT_SECONDS",
-        default=120.0,
-        minimum=1.0,
-        maximum=900.0,
+        default=0.0,
+        maximum=3600.0,
         fallbacks=("DEEPSEEK_GENERATION_BUDGET_SECONDS",),
+    )
+    provider_timeout = _bounded_float_env(
+        "AI_READ_TIMEOUT_SECONDS",
+        default=60.0,
+        minimum=3.0,
+        maximum=600.0,
+        fallbacks=("DEEPSEEK_REQUEST_TIMEOUT_SECONDS",),
     )
     if timeout_seconds is not None:
         try:
             requested_timeout = float(timeout_seconds)
         except (TypeError, ValueError):
-            requested_timeout = overall_timeout
-        overall_timeout = min(overall_timeout, max(0.05, requested_timeout))
-    deadline = time.monotonic() + overall_timeout
+            requested_timeout = provider_timeout
+        provider_timeout = max(0.05, requested_timeout)
+        if overall_timeout is not None:
+            overall_timeout = min(overall_timeout, provider_timeout)
+    deadline = (
+        time.monotonic() + overall_timeout
+        if overall_timeout is not None
+        else None
+    )
     attempted_providers: list[str] = []
     provider_attempts: list[dict[str, Any]] = []
     last_error: UpstreamGenerationError | None = None
 
     for index, config in enumerate(candidates):
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        providers_remaining = len(candidates) - index
-        provider_deadline = time.monotonic() + (remaining / providers_remaining)
+        if deadline is None:
+            # No aggregate deadline: every configured fallback gets a complete
+            # request window. This favors successful output over an arbitrary
+            # wall-clock cutoff while still failing over a stalled provider.
+            provider_budget = provider_timeout
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            providers_remaining = len(candidates) - index
+            if providers_remaining <= 1:
+                provider_budget = remaining
+            else:
+                # Compatibility mode for deployments that explicitly configure
+                # a finite aggregate timeout.
+                fallback_reserve = min(
+                    10.0,
+                    remaining / (providers_remaining + 1),
+                )
+                provider_budget = remaining - fallback_reserve * (providers_remaining - 1)
+        provider_deadline = time.monotonic() + max(0.05, provider_budget)
         if not _claim_provider_slot(config.id):
             if explicit:
                 raise UpstreamGenerationError(
                     "AI_UPSTREAM_UNAVAILABLE",
-                    f"AI provider {config.id} is temporarily unavailable",
+                    "AI generation service is temporarily unavailable",
                     retryable=True,
                     failover_allowed=False,
                     details={
@@ -1932,6 +2538,21 @@ async def _call_deepseek(
                 }
                 raise
             continue
+        except GenerationError as exc:
+            _release_provider_probe(config.id)
+            safe_attempts = exc.details.get("provider_attempts", [])
+            if isinstance(safe_attempts, list):
+                provider_attempts.extend(safe_attempts)
+            exc.details = {
+                **exc.details,
+                "provider": config.id,
+                "attempted_providers": attempted_providers,
+                "provider_attempts": provider_attempts,
+                "failover_used": len(attempted_providers) > 1,
+                "routing_tier": routing_tier,
+                "routing_reason": routing_reason,
+            }
+            raise
         except BaseException:
             _release_provider_probe(config.id)
             raise
@@ -1944,6 +2565,8 @@ async def _call_deepseek(
             "failover_used": len(attempted_providers) > 1,
             "attempted_providers": attempted_providers,
             "provider_attempts": provider_attempts,
+            "routing_tier": routing_tier,
+            "routing_reason": routing_reason,
         }
         generated = dict(generated)
         generated["ai_routing"] = routing
@@ -1952,9 +2575,9 @@ async def _call_deepseek(
 
     code = last_error.code if last_error else "AI_UPSTREAM_UNAVAILABLE"
     message = (
-        "All configured AI providers timed out"
+        "AI generation service timed out"
         if code == "AI_UPSTREAM_TIMEOUT"
-        else "All configured AI providers are unavailable"
+        else "AI generation service is unavailable"
     )
     raise UpstreamGenerationError(
         code,
@@ -1965,6 +2588,8 @@ async def _call_deepseek(
             "attempted_providers": attempted_providers,
             "provider_attempts": provider_attempts,
             "failover_used": len(attempted_providers) > 1,
+            "routing_tier": routing_tier,
+            "routing_reason": routing_reason,
         },
     )
 
@@ -1974,11 +2599,10 @@ async def generate_app(
     *,
     attempt_sink: GenerationAttemptSink | None = None,
 ) -> GenerateResponse:
-    budget_seconds = _bounded_float_env(
+    budget_seconds = _optional_timeout_env(
         "AI_OVERALL_TIMEOUT_SECONDS",
-        default=120.0,
-        minimum=8.0,
-        maximum=900.0,
+        default=0.0,
+        maximum=3600.0,
         fallbacks=("DEEPSEEK_GENERATION_BUDGET_SECONDS",),
     )
     request_timeout_seconds = _bounded_float_env(
@@ -1988,11 +2612,17 @@ async def generate_app(
         maximum=600.0,
         fallbacks=("DEEPSEEK_REQUEST_TIMEOUT_SECONDS",),
     )
-    max_attempts = max(
-        1,
-        min(2, int(os.getenv("DEEPSEEK_MAX_ATTEMPTS", "2"))),
+    max_attempts = _bounded_int_env(
+        "DEEPSEEK_MAX_ATTEMPTS",
+        default=3,
+        minimum=1,
+        maximum=5,
     )
-    deadline = time.monotonic() + budget_seconds
+    deadline = (
+        time.monotonic() + budget_seconds
+        if budget_seconds is not None
+        else None
+    )
     correction = ""
     generated: dict[str, Any] = {}
     model = ""
@@ -2003,9 +2633,18 @@ async def generate_app(
     last_error: GenerationError | None = None
     model_meta: dict[str, Any] = {}
     attempts_used = 0
+    rejected_providers: set[str] = set()
+
+    def reject_current_provider(meta: dict[str, Any]) -> None:
+        if (getattr(request, "ai_provider", "auto") or "auto") != "auto":
+            return
+        provider = meta.get("provider")
+        if isinstance(provider, str) and provider:
+            rejected_providers.add(provider)
+
     for attempt in range(1, max_attempts + 1):
-        remaining = deadline - time.monotonic()
-        if remaining < 2.0:
+        remaining = deadline - time.monotonic() if deadline is not None else None
+        if remaining is not None and remaining < 2.0:
             last_error = GenerationError(
                 f"生成已达到 {budget_seconds:.0f} 秒时间预算"
             )
@@ -2013,9 +2652,13 @@ async def generate_app(
         attempts_used = attempt
         attempts_after_this = max_attempts - attempts_used
         attempts_including_this = attempts_after_this + 1
-        call_timeout = min(
-            request_timeout_seconds,
-            max(2.0, remaining / attempts_including_this),
+        call_timeout = (
+            min(
+                request_timeout_seconds,
+                max(2.0, remaining / attempts_including_this),
+            )
+            if remaining is not None
+            else request_timeout_seconds
         )
         model_meta = {}
         try:
@@ -2023,6 +2666,7 @@ async def generate_app(
                 request,
                 correction,
                 timeout_seconds=call_timeout,
+                excluded_providers=set(rejected_providers),
             )
         except UpstreamGenerationError as exc:
             _emit_generation_attempt(
@@ -2035,11 +2679,14 @@ async def generate_app(
             raise
         except GenerationError as exc:
             last_error = exc
+            safe_meta = exc.details if isinstance(exc.details, dict) else {}
+            reject_current_provider(safe_meta)
             _emit_generation_attempt(
                 attempt_sink,
                 attempt=attempt,
                 status="model_error",
                 error=exc,
+                model_meta=safe_meta,
             )
             correction = _build_correction(
                 GenerationError(
@@ -2056,7 +2703,7 @@ async def generate_app(
             received_fields = ", ".join(sorted(str(key) for key in generated)[:8])
             field_hint = f"（收到字段：{received_fields}）" if received_fields else ""
             last_error = GenerationError(
-                f"DeepSeek 返回结果中缺少可识别的 App 源码{field_hint}"
+                f"AI 生成结果中缺少可识别的 App 源码{field_hint}"
             )
             _emit_generation_attempt(
                 attempt_sink,
@@ -2065,6 +2712,7 @@ async def generate_app(
                 error=last_error,
                 model_meta=model_meta,
             )
+            reject_current_provider(model_meta)
             correction = _build_correction(last_error, attempt=attempt)
             continue
         if (
@@ -2072,7 +2720,7 @@ async def generate_app(
             or len(candidate_tests) < 2
             or not all(isinstance(item, str) and item.strip() for item in candidate_tests)
         ):
-            last_error = GenerationError("DeepSeek 返回结果中缺少至少两个 acceptance_tests")
+            last_error = GenerationError("AI 生成结果中缺少至少两个 acceptance_tests")
             _emit_generation_attempt(
                 attempt_sink,
                 attempt=attempt,
@@ -2081,6 +2729,7 @@ async def generate_app(
                 error=last_error,
                 model_meta=model_meta,
             )
+            reject_current_provider(model_meta)
             correction = _build_correction(last_error, candidate, attempt)
             continue
         candidate, compatibility_warnings = _normalize_lvgl_code(candidate)
@@ -2090,7 +2739,7 @@ async def generate_app(
                 candidate, request.prompt
             )
             product_warnings = _validate_product_contract(candidate, request.prompt)
-            visual_warnings = _validate_visual_contract(candidate)
+            visual_warnings = _validate_visual_contract(candidate, request.prompt)
             api_warnings, api_usage = _validate_api_summaries(candidate)
             warnings = (
                 compatibility_warnings
@@ -2121,10 +2770,16 @@ async def generate_app(
                 error=exc,
                 model_meta=model_meta,
             )
+            reject_current_provider(model_meta)
             correction = _build_correction(exc, candidate, attempt)
     if last_error is not None or not code:
+        budget_label = (
+            f"{budget_seconds:.0f} 秒预算内"
+            if budget_seconds is not None
+            else "自动修复流程中"
+        )
         raise GenerationError(
-            f"DeepSeek 在 {budget_seconds:.0f} 秒预算内经过 "
+            f"AI 生成服务在{budget_label}经过 "
             f"{attempts_used} 次尝试仍未通过检查：{last_error}"
         )
     manifest = _manifest(request)
@@ -2174,6 +2829,8 @@ async def generate_app(
         "failover_used": bool(model_meta.get("failover_used", False)),
         "attempted_providers": model_meta.get("attempted_providers", []),
         "provider_attempts": model_meta.get("provider_attempts", []),
+        "routing_tier": str(model_meta.get("routing_tier") or ""),
+        "routing_reason": str(model_meta.get("routing_reason") or ""),
         "language": {
             "prompt_original": request.prompt,
             "prompt_normalized_zh": prompt_normalized_zh,
@@ -2215,6 +2872,8 @@ async def generate_app(
         failover_used=bool(model_meta.get("failover_used", False)),
         attempted_providers=model_meta.get("attempted_providers", []),
         provider_attempts=model_meta.get("provider_attempts", []),
+        routing_tier=str(model_meta.get("routing_tier") or ""),
+        routing_reason=str(model_meta.get("routing_reason") or ""),
         warnings=warnings,
         acceptance_tests=acceptance_tests,
         mpk_filename=mpk_filename,

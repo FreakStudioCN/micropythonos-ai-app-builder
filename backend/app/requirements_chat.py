@@ -64,7 +64,7 @@ def _settings() -> tuple[str, str, str]:
     model = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-flash").strip()
     if not key or key == "replace_with_your_deepseek_api_key":
         raise RequirementChatError(
-            "未配置 DEEPSEEK_API_KEY，请先在 backend/.env 中填写 DeepSeek API Key。"
+            "AI 生成服务尚未配置，请联系管理员。"
         )
     return key, base_url, model
 
@@ -126,7 +126,7 @@ def _parse_json_message(message: dict[str, Any]) -> dict[str, Any]:
                 continue
             if isinstance(parsed, dict):
                 return parsed
-    raise RequirementChatError("DeepSeek 没有返回可解析的需求对话结果")
+    raise RequirementChatError("AI 生成服务没有返回可解析的需求对话结果")
 
 
 def _normalize_payload(data: dict[str, Any]) -> dict[str, Any]:
@@ -192,6 +192,38 @@ def _conversation_clarifications(
     return clarifications
 
 
+def _resolved_confirmation(question: str, answer: str) -> str:
+    """Turn short A/B/C replies into the selected requirement text."""
+    normalized = answer.strip()
+    choice = re.fullmatch(r"\s*([A-F])(?:[.)、:：\s].*)?", normalized, re.IGNORECASE)
+    if choice:
+        selected = choice.group(1).upper()
+        for option, text in re.findall(
+            r"(?:^|\n)\s*([A-F])[.)、:：]\s*([^\n]+)",
+            question,
+            flags=re.IGNORECASE,
+        ):
+            if option.upper() == selected:
+                return text.strip().rstrip("。；;")[:240]
+    if normalized in {"按你的建议", "按你建议", "采用你的建议"}:
+        return "采用 AI 建议的默认方案"
+    if normalized.lower() in {"use your suggestion", "as you suggest"}:
+        return "Use the assistant's recommended default"
+    return normalized[:240]
+
+
+def _confirmed_details(request: RequirementChatRequest) -> list[str]:
+    details: list[str] = []
+    seen: set[str] = set()
+    for question, answer in _conversation_clarifications(request):
+        detail = _resolved_confirmation(question, answer)
+        compact = re.sub(r"\s+", "", detail).casefold()
+        if detail and compact not in seen:
+            seen.add(compact)
+            details.append(detail)
+    return details
+
+
 def _synthesize_refined_prompt(
     request: RequirementChatRequest,
     brief: dict[str, Any] | None = None,
@@ -222,13 +254,12 @@ def _synthesize_refined_prompt(
         if detail_lines:
             sections.append("需求摘要：\n" + "\n".join(detail_lines))
 
-        clarifications = _conversation_clarifications(request)
-        if clarifications:
-            lines = [
-                f"- 关于“{question[:180]}”：用户确认“{answer[:240]}”"
-                for question, answer in clarifications
-            ]
-            sections.append("对话中确认的详细需求：\n" + "\n".join(lines))
+        confirmed = _confirmed_details(request)
+        if confirmed:
+            sections.append(
+                "用户确认的补充要求：\n"
+                + "\n".join(f"- {detail}" for detail in confirmed)
+            )
     else:
         labels = {
             "goal": "Goal",
@@ -250,13 +281,12 @@ def _synthesize_refined_prompt(
                 detail_lines.append(f"- {label}: {text}")
         if detail_lines:
             sections.append("Requirement summary:\n" + "\n".join(detail_lines))
-        clarifications = _conversation_clarifications(request)
-        if clarifications:
-            lines = [
-                f'- For "{question[:180]}", the user confirmed: "{answer[:240]}"'
-                for question, answer in clarifications
-            ]
-            sections.append("Confirmed conversation details:\n" + "\n".join(lines))
+        confirmed = _confirmed_details(request)
+        if confirmed:
+            sections.append(
+                "User-confirmed details:\n"
+                + "\n".join(f"- {detail}" for detail in confirmed)
+            )
     return "\n\n".join(section for section in sections if section).strip()[:4000]
 
 
@@ -264,7 +294,7 @@ def _normalize_result(
     data: dict[str, Any],
     *,
     request: RequirementChatRequest,
-    model: str,
+    model: str | None = None,
 ) -> RequirementChatResponse:
     data = _normalize_payload(data)
     ready = bool(data.get("ready")) or request.finalize
@@ -308,14 +338,13 @@ def _normalize_result(
         refined_prompt=refined_prompt[:4000],
         missing_fields=[str(item)[:120] for item in missing_fields[:6]],
         brief=brief,
-        model=model,
     )
 
 
 def _fallback_result(
     request: RequirementChatRequest,
     *,
-    model: str,
+    model: str | None = None,
 ) -> RequirementChatResponse:
     if request.finalize:
         message = (
@@ -329,7 +358,6 @@ def _fallback_result(
             refined_prompt=_synthesize_refined_prompt(request),
             missing_fields=[],
             brief={},
-            model=model,
         )
     message = (
         "这一步我没有完全读懂。请直接说你的选择，或回复“按你的建议”，我会继续帮你完善需求。"
@@ -345,7 +373,6 @@ def _fallback_result(
         refined_prompt="",
         missing_fields=["当前问题的选择"],
         brief={},
-        model=model,
     )
 
 
@@ -388,7 +415,6 @@ async def clarify_requirements(
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
-    last_model = model
     async with httpx.AsyncClient(timeout=60) as client:
         for attempt in range(2):
             attempt_payload = dict(payload)
@@ -414,19 +440,18 @@ async def clarify_requirements(
             except httpx.HTTPError as exc:
                 if attempt == 0:
                     continue
-                raise RequirementChatError(f"无法连接 DeepSeek：{exc}") from exc
+                raise RequirementChatError("暂时无法连接 AI 生成服务，请稍后重试") from exc
             if response.status_code >= 400:
                 if attempt == 0:
                     continue
                 raise RequirementChatError(
-                    f"DeepSeek 返回 {response.status_code}：{response.text[:500]}"
+                    f"AI 生成服务返回状态 {response.status_code}，请稍后重试"
                 )
             try:
                 body = response.json()
                 message = body["choices"][0]["message"]
                 if not isinstance(message, dict):
                     raise TypeError("message is not an object")
-                last_model = str(body.get("model") or model)
                 data = _parse_json_message(message)
             except (
                 ValueError,
@@ -439,6 +464,5 @@ async def clarify_requirements(
             return _normalize_result(
                 data,
                 request=request,
-                model=last_model,
             )
-    return _fallback_result(request, model=last_model)
+    return _fallback_result(request)

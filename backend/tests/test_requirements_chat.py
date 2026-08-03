@@ -148,9 +148,32 @@ class RequirementChatTests(unittest.TestCase):
             finalize=True,
         )
         prompt = _synthesize_refined_prompt(request)
-        self.assertIn("是否支持连续运算", prompt)
         self.assertIn("支持连续运算", prompt)
         self.assertIn("显示最近五条", prompt)
+        self.assertNotIn("是否支持连续运算", prompt)
+        self.assertNotIn("是否显示历史记录", prompt)
+
+    def test_refined_prompt_resolves_letter_choice_without_copying_question(self) -> None:
+        request = RequirementChatRequest(
+            locale="zh-CN",
+            draft_prompt="做一个计算器",
+            messages=[
+                RequirementMessage(role="user", content="做一个计算器"),
+                RequirementMessage(
+                    role="assistant",
+                    content=(
+                        "你希望支持哪些运算？\n"
+                        "A) 加减乘除\n"
+                        "B) 加减乘除 + 正负号、百分号"
+                    ),
+                ),
+                RequirementMessage(role="user", content="B"),
+            ],
+            finalize=True,
+        )
+        prompt = _synthesize_refined_prompt(request)
+        self.assertIn("加减乘除 + 正负号、百分号", prompt)
+        self.assertNotIn("你希望支持哪些运算", prompt)
 
     def test_ready_result_does_not_fall_back_to_original_prompt(self) -> None:
         request = RequirementChatRequest(
@@ -173,7 +196,8 @@ class RequirementChatTests(unittest.TestCase):
             model="deepseek-test",
         )
         self.assertNotEqual(result.refined_prompt, request.draft_prompt)
-        self.assertIn("是否支持连续运算", result.refined_prompt)
+        self.assertIn("支持", result.refined_prompt)
+        self.assertNotIn("是否支持连续运算", result.refined_prompt)
 
 
 if __name__ == "__main__":
