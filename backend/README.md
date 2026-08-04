@@ -61,10 +61,13 @@ API 文档：`http://localhost:8000/docs`
 API key 和数据库/对象存储凭据仍只放在环境变量或未纳入 Git 的
 `backend/.env`。
 
-内测用户通过用户名和密码登录，后端签发 `mpos_session` HttpOnly Cookie。
+用户通过用户名和密码登录，后端签发 `mpos_session` HttpOnly Cookie。
 session、artifact、permission 和 billing 都按数据库用户 UUID 隔离；客户端传入
 的用户 ID 不会被采信。HTTPS 部署设置 `MPOS_COOKIE_SECURE=true`。每个新账号初始
-获得 50 点，每个新 revision 消耗 10 点，最多免费生成 5 次；没有充值或购买入口。
+获得 50 点，每个成功生成的新 revision（包括继续修改）消耗 10 点；生成失败不扣点，
+同一 revision 的成功结算具有幂等性，不会重复扣点。前端提供 Go、Plus、Pro
+订阅套餐及微信群人工付款引导；付款后不会自动增加点数，必须由群主确认收款，
+再通过管理员入口人工开通和加点，以便保留收款、操作人、时间和备注等对账记录。
 
 生成前会完整读取 `vendor/MicroPython_Skills/mpos-dev/reference/` 下的
 `lvgl_api_summary.json` 和 `mpos_api_summary.json`，并把实际计划调用写入

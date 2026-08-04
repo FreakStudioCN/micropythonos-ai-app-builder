@@ -94,19 +94,19 @@ class ProtocolTests(unittest.TestCase):
         self.assertEqual(settled, [state["session_id"]])
         self.assertTrue(self.service.get(state["session_id"])["billing"]["settled"])
 
-    def test_continued_revision_is_free_even_when_completed(self) -> None:
+    def test_continued_revision_settles_only_after_success_and_only_once(self) -> None:
         state = self.service.create(
             SessionCreateRequest(
-                idempotency_key="create-free-revision-0001",
+                idempotency_key="create-billed-revision-0001",
                 prompt="做一个日历",
-                package_name="com.example.free_revision",
+                package_name="com.example.billed_revision",
                 targets=["package-only"],
             )
         )
         revised = self.service.create_revision(
             state["session_id"],
             RevisionRequest(
-                idempotency_key="revision-free-0001",
+                idempotency_key="revision-billed-0001",
                 prompt="给日历增加返回今天按钮",
             ),
         )
@@ -114,21 +114,36 @@ class ProtocolTests(unittest.TestCase):
         self.service.set_generation_success_handler(
             lambda item: settled.append(item["session_id"])
         )
-        action_key = "generate-free-revision-0001"
+        action_key = "generate-billed-revision-0001"
         self.service.configure_generation_billing(
             revised["session_id"],
             action_idempotency_key=action_key,
             unlimited=False,
         )
+        failed = self.service._read(revised["session_id"])
+        failed["last_action_idempotency_key"] = action_key
+        failed["status"] = "failed"
+        self.service._write_state(failed)
+        self.assertEqual(settled, [])
+        self.assertFalse(
+            self.service.get(revised["session_id"])["billing"]["settled"]
+        )
+
         completed = self.service._read(revised["session_id"])
         completed["last_action_idempotency_key"] = action_key
         completed["status"] = "completed"
         self.service._write_state(completed)
+        self.service._write_state(self.service._read(revised["session_id"]))
 
         final = self.service.get(revised["session_id"])
-        self.assertEqual(settled, [])
-        self.assertFalse(final["billing"]["charge_on_success"])
-        self.assertEqual(final["billing"]["exempt_reason"], "continued_revision")
+        self.assertEqual(settled, [revised["session_id"]])
+        self.assertTrue(final["billing"]["charge_on_success"])
+        self.assertTrue(final["billing"]["settled"])
+        self.assertEqual(
+            final["billing"]["idempotency_key"],
+            f"generation:{revised['session_id']}:r2",
+        )
+        self.assertIsNone(final["billing"]["exempt_reason"])
 
     def test_permission_decisions_are_idempotent(self) -> None:
         state = self.service.create(

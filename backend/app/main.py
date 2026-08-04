@@ -152,8 +152,7 @@ def _prepare_generation_billing(
 ) -> None:
     state = session_service.get(session_id)
     billing = state.get("billing") or {}
-    is_initial_revision = str(state.get("revision_id", "r1")) == "r1"
-    if is_initial_revision and billing.get("settled") is not True:
+    if billing.get("settled") is not True:
         billing_service.ensure_generation_available(
             user["id"],
             unlimited=_is_superadmin(user),

@@ -143,6 +143,39 @@ interface ShowcaseApp {
   sha256: string;
   featured: boolean;
 }
+const subscriptionPlans = [
+  {
+    id: "go",
+    name: "Go",
+    price: 19,
+    credits: 100,
+    generations: 10,
+    featured: false,
+    benefitsZh: ["每月 100 点", "最多生成 10 次", "Web 预览与 MPK 打包"],
+    benefitsEn: ["100 credits/month", "Up to 10 generations", "Web preview and MPK packaging"],
+  },
+  {
+    id: "plus",
+    name: "Plus",
+    price: 49,
+    credits: 300,
+    generations: 30,
+    featured: true,
+    benefitsZh: ["每月 300 点", "最多生成 30 次", "优先生成与连续修改", "ESP32 真机部署"],
+    benefitsEn: ["300 credits/month", "Up to 30 generations", "Priority generation and revisions", "ESP32 deployment"],
+  },
+  {
+    id: "pro",
+    name: "Pro",
+    price: 129,
+    credits: 1000,
+    generations: 100,
+    featured: false,
+    benefitsZh: ["每月 1000 点", "最多生成 100 次", "最高优先级", "真机部署与发布检查"],
+    benefitsEn: ["1,000 credits/month", "Up to 100 generations", "Highest priority", "Device deployment and publish checks"],
+  },
+] as const;
+type SubscriptionPlan = (typeof subscriptionPlans)[number];
 export type GenerationWaitTimeoutKind = "idle" | "overall";
 const MAX_AUTOMATIC_REPAIR_ATTEMPTS = 3;
 export const getGenerationWaitTimeoutKind = (
@@ -320,6 +353,8 @@ export default function App() {
   const [screenshotBusy, setScreenshotBusy] = useState(false);
   const [continuing, setContinuing] = useState(false);
   const [billingAccount, setBillingAccount] = useState<BillingAccount | null>(null);
+  const [subscriptionOpen, setSubscriptionOpen] = useState(false);
+  const [selectedPlan, setSelectedPlan] = useState<SubscriptionPlan | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus>("loading");
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [authUsername, setAuthUsername] = useState("");
@@ -886,7 +921,7 @@ export default function App() {
       && !billingAccount.unlimited_credits
       && billingAccount.credits < billingAccount.generation_cost
     ) {
-      setToast(tr("内测点数已用完，请联系项目管理员补充测试点数", "Your beta credits are depleted. Contact the project administrator."));
+      setToast(tr("点数不足，请选择订阅套餐或联系管理员充值", "Not enough credits. Choose a subscription or contact an administrator."));
       return;
     }
     requestAbort.current?.abort();
@@ -1044,7 +1079,7 @@ export default function App() {
           await refreshBilling().catch(() => undefined);
           throw new Error(
             failure?.detail?.message
-            || tr("内测点数已用完，请联系项目管理员", "Beta credits are depleted. Contact the project administrator."),
+            || tr("点数不足，请选择订阅套餐或联系管理员充值", "Not enough credits. Choose a subscription or contact an administrator."),
           );
         }
         throw new Error(
@@ -1802,15 +1837,15 @@ export default function App() {
         <section className="auth-card">
           <div className="auth-brand"><span>BM</span><div><strong>Blockless-Make-APP</strong><small>MicroPythonOS AI Builder</small></div></div>
           {authStatus === "loading" ? (
-            <div className="auth-loading">{tr("正在连接内测服务…", "Connecting to the beta service…")}</div>
+            <div className="auth-loading">{tr("正在连接服务…", "Connecting to the service…")}</div>
           ) : (
             <>
               <div className="auth-heading">
-                <span>{tr("正式内测", "PRIVATE BETA")}</span>
-                <h1>{authMode === "login" ? tr("欢迎回来", "Welcome back") : tr("创建内测账号", "Create your beta account")}</h1>
+                <span>{tr("正式版", "PUBLIC RELEASE")}</span>
+                <h1>{authMode === "login" ? tr("欢迎回来", "Welcome back") : tr("创建账户", "Create your account")}</h1>
                 <p>{authMode === "login"
                   ? tr("登录后继续查看自己的项目和剩余点数。", "Sign in to restore your projects and credits.")
-                  : tr("每个账号获得 50 个免费内测点数，可成功生成约 5 个新 App；失败和继续修改不扣点。", "Each account receives 50 beta credits for about 5 successful new Apps. Failed runs and continued revisions are free.")}</p>
+                  : tr("每个新账号获得 50 个体验点；首次生成或继续修改成功均扣 10 点，生成失败不扣点。", "Each new account receives 50 trial credits. A successful new App or continued revision costs 10 credits; failed runs are free.")}</p>
               </div>
               <form className="auth-form" onSubmit={submitAuth}>
                 <label htmlFor="auth-username">{tr("用户名", "Username")}</label>
@@ -1849,11 +1884,11 @@ export default function App() {
                   setAuthError("");
                 }}
               >{authMode === "login"
-                ? tr("没有账号？免费注册", "No account? Register free")
+                ? tr("没有账号？立即注册", "No account? Create one")
                 : tr("已经有账号？返回登录", "Already registered? Sign in")}</button>
               <small className="auth-notice">{tr(
-                "当前版本不收费、不充值、不自动订阅。密码只以安全哈希保存在后端数据库。",
-                "No payments, top-ups, or automatic subscriptions. Passwords are stored only as secure hashes.",
+                "订阅采用人工收款与人工开通；密码只以安全哈希保存在后端数据库。",
+                "Subscriptions use manual payment and activation. Passwords are stored only as secure hashes.",
               )}</small>
             </>
           )}
@@ -1871,13 +1906,16 @@ export default function App() {
             {billingAccount?.username}
             {billingAccount?.role === "superadmin" ? ` · ${tr("管理员", "Admin")}` : ""}
           </span>
-          <button className="credits-button" onClick={() => setToast(
-            billingAccount?.unlimited_credits
-              ? tr("管理员账户不受内测点数限制", "Administrator accounts have unlimited beta credits.")
-              : tr("当前为免费内测点数，不提供在线充值", "Free beta credits; online payments are not enabled."),
-          )}>
+          <button className="credits-button" onClick={() => {
+            setSelectedPlan(null);
+            setSubscriptionOpen(true);
+          }}>
             <span>◆</span>{billingAccount?.unlimited_credits ? "∞" : (billingAccount?.credits ?? 50)} {tr("点", "credits")}
           </button>
+          <button className="subscription-button" onClick={() => {
+            setSelectedPlan(null);
+            setSubscriptionOpen(true);
+          }}>{tr("订阅", "Subscribe")}</button>
           <button className="language-button" onClick={() => setLanguage(isZh ? "en" : "zh")} aria-label={tr("切换为英文", "Switch to Chinese")}>
             {isZh ? "English" : "中文"}
           </button>
@@ -2279,6 +2317,99 @@ export default function App() {
           )}
         </section>
       </main>
+
+      {subscriptionOpen && <div className="modal-backdrop"><div className="modal subscription-modal">
+        <button
+          className="modal-close"
+          aria-label={tr("关闭", "Close")}
+          onClick={() => {
+            setSubscriptionOpen(false);
+            setSelectedPlan(null);
+          }}
+        >×</button>
+        {!selectedPlan
+          ? <>
+              <h2>{tr("选择订阅套餐", "Choose a subscription")}</h2>
+              <p>{tr(
+                "每次成功生成消耗 10 点。选择套餐后，扫码进群联系群主人工开通。",
+                "Each successful generation costs 10 credits. Choose a plan, then join the group and contact the owner for manual activation.",
+              )}</p>
+              <div className="plan-grid">
+                {subscriptionPlans.map((plan) => (
+                  <article className={`plan-card ${plan.featured ? "featured" : ""}`} key={plan.id}>
+                    {plan.featured && <span className="popular-badge">{tr("推荐", "Popular")}</span>}
+                    <h3>{plan.name}</h3>
+                    <div className="plan-price"><strong>¥{plan.price}</strong><span>{tr("/ 月", "/ month")}</span></div>
+                    <div className="plan-credits">{plan.credits} {tr("点", "credits")} · {plan.generations} {tr("次生成", "generations")}</div>
+                    <ul>{(isZh ? plan.benefitsZh : plan.benefitsEn).map((benefit) => <li key={benefit}>✓ {benefit}</li>)}</ul>
+                    <button className={plan.featured ? "main-button" : "secondary-button"} onClick={() => setSelectedPlan(plan)}>
+                      {tr(`选择 ${plan.name}`, `Choose ${plan.name}`)}
+                    </button>
+                  </article>
+                ))}
+              </div>
+              <small>{tr(
+                "当前采用人工收款和人工开通。用户付款后不会自动到账，必须由群主确认。",
+                "Payments and activation are handled manually. Credits are added only after the group owner confirms payment.",
+              )}</small>
+            </>
+          : <div className="manual-checkout">
+              <div className="checkout-heading">
+                <button className="secondary-button" onClick={() => setSelectedPlan(null)}>← {tr("返回套餐", "Back to plans")}</button>
+                <div><span>{tr("当前选择", "Selected plan")}</span><strong>{selectedPlan.name} · ¥{selectedPlan.price}{tr("/月", "/month")}</strong></div>
+              </div>
+              <div className="checkout-layout">
+                <div className="group-qr">
+                  <img src="/subscription/blockless-ai-group.webp" alt={tr("Blockless AI 硬件交流群二维码", "Blockless AI hardware group QR code")} />
+                  <strong>{tr("微信扫码加入 Blockless AI 硬件交流群", "Scan with WeChat to join the Blockless AI hardware group")}</strong>
+                  <small>{tr("群二维码会定期更新；如已失效，请联系工作人员获取新二维码。", "The group QR code is updated periodically. Contact the team if it has expired.")}</small>
+                </div>
+                <div className="checkout-instructions">
+                  <h3>{tr("人工开通步骤", "Manual activation steps")}</h3>
+                  <ol>
+                    <li>{tr("使用微信扫描左侧二维码并加入群聊。", "Scan the QR code with WeChat and join the group.")}</li>
+                    <li>{tr(`向群主说明购买 ${selectedPlan.name} 套餐，并支付 ¥${selectedPlan.price}。`, `Tell the group owner you want the ${selectedPlan.name} plan and pay ¥${selectedPlan.price}.`)}</li>
+                    <li>{tr("把你的用户名和账户标识连同付款信息发送给群主。", "Send your username and account ID together with the payment information.")}</li>
+                    <li>{tr("群主确认收款后人工开通服务并增加点数。", "The group owner confirms payment, activates the plan, and adds credits.")}</li>
+                  </ol>
+                  <label>{tr("你的用户名", "Your username")}</label>
+                  <div className="account-id-row single"><code>{billingAccount?.username || "—"}</code></div>
+                  <label>{tr("你的账户标识", "Your account ID")}</label>
+                  <div className="account-id-row">
+                    <code>{billingAccount?.user_id || "—"}</code>
+                    <button
+                      className="secondary-button"
+                      onClick={() => {
+                        const username = billingAccount?.username || "";
+                        const accountId = billingAccount?.user_id || "";
+                        const paymentMessage = tr(
+                          `订阅套餐：${selectedPlan.name}\n支付金额：¥${selectedPlan.price}\n用户名：${username}\n账户标识：${accountId}`,
+                          `Plan: ${selectedPlan.name}\nAmount: ¥${selectedPlan.price}\nUsername: ${username}\nAccount ID: ${accountId}`,
+                        );
+                        void navigator.clipboard.writeText(paymentMessage).then(
+                          () => setToast(tr("付款信息已复制，请发送给群主", "Payment information copied. Send it to the group owner.")),
+                          () => setToast(tr("复制失败，请手动发送用户名和账户标识", "Copy failed. Send the username and account ID manually.")),
+                        );
+                      }}
+                    >{tr("复制付款信息", "Copy payment info")}</button>
+                  </div>
+                  <div className="payment-warning">
+                    <strong>{tr("请注意", "Important")}</strong>
+                    <span>{tr(
+                      "付款不会自动增加点数。必须由群主确认收款后人工开通；退款、付款异常或二维码失效请在群内联系群主处理。",
+                      "Payment does not add credits automatically. Activation happens only after owner confirmation. Contact the owner for refunds, payment issues, or an expired QR code.",
+                    )}</span>
+                  </div>
+                </div>
+              </div>
+              <div className="checkout-actions">
+                <button className="main-button" onClick={() => {
+                  setSubscriptionOpen(false);
+                  setSelectedPlan(null);
+                }}>{tr("我已了解", "Got it")}</button>
+              </div>
+            </div>}
+      </div></div>}
 
       {requirementOpen && <div className="modal-backdrop"><div className="modal requirement-modal">
         <section className="requirement-modal-title">

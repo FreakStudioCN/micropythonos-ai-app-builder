@@ -221,20 +221,17 @@ class SessionService:
         state = self._read(session_id)
         revision_id = str(state.get("revision_id", "r1"))
         previous = state.get("billing") or {}
-        is_initial_revision = revision_id == "r1"
         state["billing"] = {
-            "charge_on_success": is_initial_revision,
-            "settled": bool(previous.get("settled")) if is_initial_revision else False,
-            "settled_at": previous.get("settled_at") if is_initial_revision else None,
+            "charge_on_success": True,
+            "settled": bool(previous.get("settled")),
+            "settled_at": previous.get("settled_at"),
             "idempotency_key": (
                 previous.get("idempotency_key")
-                or f"generation:{session_id}:r1"
-                if is_initial_revision
-                else None
+                or f"generation:{session_id}:{revision_id}"
             ),
             "action_idempotency_key": action_idempotency_key,
             "unlimited": unlimited,
-            "exempt_reason": None if is_initial_revision else "continued_revision",
+            "exempt_reason": None,
         }
         self._write_state(state)
         return self.get(session_id)
@@ -1803,13 +1800,15 @@ class GeneratedApp(Activity):
         state["revision_id"] = f"r{current_revision + 1}"
         state["revision_idempotency_key"] = request.idempotency_key
         state["billing"] = {
-            "charge_on_success": False,
+            "charge_on_success": True,
             "settled": False,
             "settled_at": None,
-            "idempotency_key": None,
+            "idempotency_key": (
+                f"generation:{session_id}:{state['revision_id']}"
+            ),
             "action_idempotency_key": None,
             "unlimited": False,
-            "exempt_reason": "continued_revision",
+            "exempt_reason": None,
         }
         state["input"]["prompt_original"] = request.prompt
         state["input"]["prompt_language"] = request.prompt_language

@@ -1,4 +1,4 @@
-"""Database-backed free beta credits and generation ledger."""
+"""Database-backed account credits and generation ledger."""
 
 from __future__ import annotations
 
@@ -56,7 +56,7 @@ def _now() -> datetime:
 
 class InsufficientCredits(RuntimeError):
     def __init__(self, balance: int, required: int) -> None:
-        super().__init__("点数不足，免费内测额度已用完")
+        super().__init__("点数不足，请选择订阅套餐或联系管理员充值")
         self.balance = balance
         self.required = required
 

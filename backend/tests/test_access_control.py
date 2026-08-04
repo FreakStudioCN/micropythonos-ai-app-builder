@@ -158,7 +158,7 @@ class AccessControlTests(unittest.TestCase):
         self.assertEqual(selected["generations_remaining"], 5)
         self.assertFalse(selected["unlimited_credits"])
 
-    def test_credits_settle_only_for_successful_initial_revision(self) -> None:
+    def test_credits_settle_once_for_each_successful_revision(self) -> None:
         self._register(self.client_a, "billing_maker")
         created = self.client_a.post(
             "/api/sessions",
@@ -212,11 +212,48 @@ class AccessControlTests(unittest.TestCase):
                 json={"idempotency_key": second_action_key},
             )
         self.assertEqual(started_revision.status_code, 202, started_revision.text)
+        revision_failed = main_module.session_service._read(session_id)
+        revision_failed["last_action_idempotency_key"] = second_action_key
+        revision_failed["status"] = "failed"
+        main_module.session_service._write_state(revision_failed)
+        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 40)
+
         revision_completed = main_module.session_service._read(session_id)
-        revision_completed["last_action_idempotency_key"] = second_action_key
         revision_completed["status"] = "completed"
         main_module.session_service._write_state(revision_completed)
-        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 40)
+        main_module.session_service._write_state(
+            main_module.session_service._read(session_id)
+        )
+        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 30)
+
+    def test_continued_revision_requires_ten_available_credits(self) -> None:
+        account = self._register(self.client_a, "empty_revision_maker")
+        for index in range(5):
+            main_module.billing_service.consume_generation(
+                account["user_id"],
+                f"deplete-for-revision-{index}",
+            )
+        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 0)
+
+        created = self.client_a.post(
+            "/api/sessions",
+            json=self._session_payload(),
+        ).json()
+        revised = self.client_a.post(
+            f"/api/sessions/{created['session_id']}/revisions",
+            json={
+                "idempotency_key": "empty-billing-revision-r2-0001",
+                "prompt": "继续修改这个 App，增加提醒开关",
+            },
+        )
+        self.assertEqual(revised.status_code, 201, revised.text)
+
+        started = self.client_a.post(
+            f"/api/sessions/{created['session_id']}/actions/run",
+            json={"idempotency_key": "empty-billing-run-r2-0001"},
+        )
+        self.assertEqual(started.status_code, 402, started.text)
+        self.assertEqual(started.json()["detail"]["code"], "INSUFFICIENT_CREDITS")
 
     def test_provider_inventory_is_not_public(self) -> None:
         self.assertEqual(self.client_a.get("/api/ai/providers").status_code, 401)
