@@ -1,0 +1,39 @@
+name: promote-lzs-production-superadmin
+
+on:
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  promote:
+    name: promote verified production account
+    runs-on: upypi
+    timeout-minutes: 5
+    environment: production
+    concurrency:
+      group: promote-lzs-production-superadmin
+      cancel-in-progress: false
+    env:
+      STACK_DIR: ${{ vars.MPOS_STACK_DIR || '/srv/upypi' }}
+      TARGET_USERNAME: lzs
+      TARGET_USER_ID: f91d6485-c57e-44bb-9d71-92b842157d29
+    steps:
+      - name: Verify identity and promote without resetting password
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          cd "${STACK_DIR}"
+          container=$(docker compose ps -q mpos-app | head -n 1)
+          if [ -z "${container}" ]; then
+            echo "mpos-app is not running" >&2
+            exit 1
+          fi
+
+          docker exec \
+            -e PYTHONPATH=/app/backend \
+            -e TARGET_USERNAME="${TARGET_USERNAME}" \
+            -e TARGET_USER_ID="${TARGET_USER_ID}" \
+            "${container}" \
+            python -c 'import os; from sqlalchemy import select; from app.auth import ROLE_SUPERADMIN, auth_service, users; username = os.environ["TARGET_USERNAME"]; user_id = os.environ["TARGET_USER_ID"]; connection = auth_service.engine.connect(); row = connection.execute(select(users).where(users.c.username_normalized == username.casefold())).mappings().first(); connection.close(); assert row is not None, "target username does not exist"; assert row["id"] == user_id, "username and account identifier do not match"; user = auth_service.provision_superadmin(username, None, promote_existing=True); assert user["id"] == user_id and user["role"] == ROLE_SUPERADMIN; print("promoted={} id={} role={}".format(user["username"], user["id"], user["role"]))'
