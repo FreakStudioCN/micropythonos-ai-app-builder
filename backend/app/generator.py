@@ -61,6 +61,8 @@ SYSTEM_PROMPT = """
 - 动画和游戏更新必须使用 `self.update_timer = lv.timer_create(self.update_frame, 33, None)`；回调接收 timer 参数，不能自己写主循环
 - `lv.timer_create(...)` 返回的定时器必须保存为 Python 引用；停止周期定时器时先判断引用不为 None，再调用 `self.update_timer.delete()` 并把引用设回 None
 - 严禁 `lv.timer_del(timer)`、`timer._del()` 和 `set_repeat_count(0)`；一次性定时器使用 `set_repeat_count(1)`，且不要再手工删除
+- MicroPythonOS 的精简 `random` 模块没有 `shuffle()`；需要洗牌时自己使用 `random.getrandbits()` 实现 Fisher-Yates，严禁调用 `random.shuffle()`
+- LVGL 控件清除状态使用 `widget.remove_state(state)`，严禁旧式 `widget.clear_state(state)`
 - 每个 App 都必须实现 `self_test(self)`，程序化调用真实功能方法并比较操作前后的状态，返回至少两个布尔结果组成的 dict
 - `self_test()` 不能直接返回写死的 True；必须包含方法调用和前后值比较，并在结束前恢复被修改的状态，保证用户看到的是初始界面
 - 所有代码必须放在一个入口 Python 文件中
@@ -1490,6 +1492,9 @@ def _normalize_lvgl_code(code: str) -> tuple[str, list[str]]:
         # MicroPythonOS binding.  This is a mechanical compatibility fix, not
         # a reason to discard an otherwise valid generated application.
         ".clear_flag(": ".remove_flag(",
+        # LVGL 9 uses remove_state(); clear_state() is an LVGL 8 spelling and
+        # raises AttributeError in the WebAssembly binding.
+        ".clear_state(": ".remove_state(",
         # Some providers copy the C enum name (lv_obj_flag_t) into a Pythonic
         # looking ``lv.obj_flag`` namespace.  The MicroPythonOS LVGL binding
         # exposes these values through ``lv.obj.FLAG`` instead.  Static API
@@ -1503,6 +1508,27 @@ def _normalize_lvgl_code(code: str) -> tuple[str, list[str]]:
         if old in normalized:
             normalized = normalized.replace(old, new)
             applied.append(f"已自动兼容 {old} → {new}")
+
+    # MicroPython intentionally ships a compact ``random`` module without
+    # CPython's random.shuffle().  Replace the common call mechanically with a
+    # tiny in-place Fisher-Yates helper so a valid game does not need another
+    # slow and stochastic model round trip just for this runtime difference.
+    if "random.shuffle(" in normalized:
+        normalized = normalized.replace("random.shuffle(", "_mpos_shuffle(")
+        if "def _mpos_shuffle(" not in normalized:
+            helper = (
+                "\n\ndef _mpos_shuffle(items):\n"
+                "    for _mpos_i in range(len(items) - 1, 0, -1):\n"
+                "        _mpos_j = random.getrandbits(16) % (_mpos_i + 1)\n"
+                "        items[_mpos_i], items[_mpos_j] = items[_mpos_j], items[_mpos_i]\n"
+                "\n"
+            )
+            class_marker = re.search(r"(?m)^class\s+GeneratedApp\b", normalized)
+            insertion = class_marker.start() if class_marker else len(normalized)
+            normalized = normalized[:insertion].rstrip() + helper + normalized[insertion:]
+        applied.append(
+            "已将 MicroPython 不支持的 random.shuffle 转换为兼容的 Fisher-Yates 洗牌"
+        )
     normalized, flex_flow_count = re.subn(
         r"(\.set_flex_flow\(\s*[^,\n]+?)\s*,\s*0\s*\)",
         r"\1)",
@@ -1691,6 +1717,15 @@ def _build_correction(
         )
     if "set_text_align" in message:
         suggestions.append("删除 set_text_align，使用 label.align(...) 摆放标签。")
+    if "random.shuffle" in message or "has no attribute 'shuffle'" in message:
+        suggestions.append(
+            "当前 MicroPython random 模块没有 shuffle。使用 random.getrandbits 实现 "
+            "Fisher-Yates 原地洗牌，不得再次调用 random.shuffle。"
+        )
+    if "clear_state" in message or "has no attribute 'clear_state'" in message:
+        suggestions.append(
+            "当前 LVGL 绑定使用 widget.remove_state(state)，不得调用 clear_state。"
+        )
     if "align(base, align, x, y)" in message:
         suggestions.append(
             "当前绑定中 widget.align 只能传 align、x、y 三个参数。"

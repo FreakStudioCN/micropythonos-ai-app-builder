@@ -575,13 +575,14 @@
 
       async function runGeneratedApp(payload) {
         if (!bridgeReady) throw new Error("MicroPythonOS WASM 尚未就绪");
+        var runId = String(payload.runId || "");
         var packageName = String(payload.packageName || "com.example.generated");
         var appCode = String(payload.appCode || "");
         var manifest = String(payload.manifest || "{}");
         if (!appCode) throw new Error("没有收到 assets/main.py");
         if (!/^[a-z0-9_.]+$/.test(packageName)) throw new Error("包名不安全");
 
-        notify("MPOS_INSTALLING");
+        notify("MPOS_INSTALLING", { runId: runId });
         await enterRawRepl();
         var dir = "/apps/" + packageName;
         var script = [
@@ -612,17 +613,18 @@
           throw new Error("App 代码执行结束，但没有出现启动标记");
         }
         try { FS.syncfs(false, function () {}); } catch (e) {}
-        notify("MPOS_APP_RUNNING");
+        notify("MPOS_APP_RUNNING", { runId: runId });
       }
 
       async function runPackagedApp(payload) {
         if (!bridgeReady) throw new Error("MicroPythonOS WASM 尚未就绪");
+        var runId = String(payload.runId || "");
         var packageName = String(payload.packageName || "");
         var mpkBase64 = String(payload.mpkBase64 || "");
         if (!/^[a-z0-9_.]+$/.test(packageName)) throw new Error("包名不安全");
         if (!mpkBase64) throw new Error("没有收到 MPK 数据");
 
-        notify("MPOS_INSTALLING");
+        notify("MPOS_INSTALLING", { runId: runId });
         await enterRawRepl();
         var dir = "/apps/" + packageName;
         var script = [
@@ -650,7 +652,7 @@
           throw new Error("MPK 安装结束，但没有出现启动标记");
         }
         try { FS.syncfs(false, function () {}); } catch (e) {}
-        notify("MPOS_APP_RUNNING");
+        notify("MPOS_APP_RUNNING", { runId: runId });
       }
 
       function attachBridge() {
@@ -676,11 +678,11 @@
           if (bridgeReady) notify("MPOS_READY");
         } else if (message.type === "RUN_APP") {
           runGeneratedApp(message).catch(function (error) {
-            notify("MPOS_ERROR", { message: String(error && error.message || error) });
+            notify("MPOS_ERROR", { runId: String(message.runId || ""), message: String(error && error.message || error) });
           });
         } else if (message.type === "RUN_MPK") {
           runPackagedApp(message).catch(function (error) {
-            notify("MPOS_ERROR", { message: String(error && error.message || error) });
+            notify("MPOS_ERROR", { runId: String(message.runId || ""), message: String(error && error.message || error) });
           });
         }
       });

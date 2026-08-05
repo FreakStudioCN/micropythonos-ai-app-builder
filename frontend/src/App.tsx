@@ -381,6 +381,7 @@ export default function App() {
   const [systemStatusConfirmed, setSystemStatusConfirmed] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
   const lastRun = useRef("");
+  const activeWasmRunId = useRef("");
   const requestAbort = useRef<AbortController | null>(null);
   const eventStream = useRef<EventSource | null>(null);
   const eventCursors = useRef<Record<string, number>>({});
@@ -773,8 +774,13 @@ export default function App() {
         event.source !== iframeRef.current?.contentWindow
         || event.origin !== wasmRuntimeOrigin
       ) return;
-      const message = event.data as { source?: string; type?: string; text?: string; message?: string };
+      const message = event.data as { source?: string; type?: string; text?: string; message?: string; runId?: string };
       if (message?.source !== "mpos-web") return;
+      if (
+        message.runId
+        && activeWasmRunId.current
+        && message.runId !== activeWasmRunId.current
+      ) return;
       if (message.type === "MPOS_READY") {
         if (wasmTimer.current !== null) window.clearTimeout(wasmTimer.current);
         wasmTimer.current = null;
@@ -866,6 +872,8 @@ export default function App() {
     if (!appCode || lastRun.current === result.mpk_base64) return;
     showcasePreviewRef.current = "";
     lastRun.current = result.mpk_base64;
+    const runId = crypto.randomUUID();
+    activeWasmRunId.current = runId;
     setCurrentStage(3);
     setRuntimeStatus(tr("正在发送生成代码到 MicroPythonOS WASM…", "Sending generated code to MicroPythonOS WASM…"));
     if (executionTimer.current !== null) window.clearTimeout(executionTimer.current);
@@ -901,6 +909,7 @@ export default function App() {
     iframeRef.current.contentWindow?.postMessage({
       source: "mpos-builder",
       type: "RUN_APP",
+      runId,
       packageName: result.package_name,
       appCode,
       manifest: JSON.stringify(result.manifest),

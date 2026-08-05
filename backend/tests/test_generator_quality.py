@@ -468,6 +468,36 @@ class GeneratorQualityTests(unittest.TestCase):
         self.assertTrue(any("lv.obj_flag" in item for item in warnings))
         self.assertTrue(_validate_api_summaries(normalized))
 
+    def test_legacy_clear_state_is_normalized_for_runtime(self) -> None:
+        legacy = STYLED_APP.replace(
+            "        self.label = lv.label(card)",
+            "        card.clear_state(lv.STATE.CHECKED)\n"
+            "        self.label = lv.label(card)",
+        )
+        normalized, warnings = _normalize_lvgl_code(legacy)
+        self.assertNotIn("clear_state", normalized)
+        self.assertIn("card.remove_state(lv.STATE.CHECKED)", normalized)
+        self.assertTrue(any("clear_state" in item for item in warnings))
+        self.assertTrue(_validate_api_summaries(normalized))
+
+    def test_random_shuffle_is_normalized_for_micropython(self) -> None:
+        legacy = STYLED_APP.replace(
+            "import lvgl as lv",
+            "import lvgl as lv\nimport random",
+        ).replace(
+            "        self.label = lv.label(card)",
+            "        values = [1, 2, 3]\n"
+            "        random.shuffle(values)\n"
+            "        self.label = lv.label(card)",
+        )
+        normalized, warnings = _normalize_lvgl_code(legacy)
+        self.assertNotIn("random.shuffle", normalized)
+        self.assertIn("def _mpos_shuffle(items):", normalized)
+        self.assertIn("_mpos_shuffle(values)", normalized)
+        self.assertIn("random.getrandbits(16)", normalized)
+        self.assertTrue(any("Fisher-Yates" in item for item in warnings))
+        self.assertTrue(_validate_code(normalized))
+
     def test_literal_widget_overflow_is_clamped_before_visual_validation(self) -> None:
         overflow = STYLED_APP.replace(
             "card.set_pos(20, 40)",
