@@ -10,12 +10,12 @@ name: publish-image
 #   - `workflow_dispatch` is restricted to main and verifies that CI succeeded for
 #     the resolved sha before building.
 #   - push to deploy/domestic and v* tags: image build + smoke only, NO deploy.
-#   - the deploy job pulls by immutable digest, retags it to :latest, restarts
-#     only mpos-app, and verifies by image ID that the running container is this
-#     build. Same mechanism the plugin backend already uses on this host, so no
-#     .env and no second versioning scheme in a shared compose file. The stack
-#     directory is the one that already holds the plugin backend's compose.yml —
-#     set the repository variable MPOS_STACK_DIR if it ever moves.
+#   - the deploy job receives the smoke-tested image through an integrity-checked
+#     Actions artifact, retags it to :latest, restarts only mpos-app, and verifies
+#     by image ID that the running container is this build. GHCR still stores the
+#     immutable image; the artifact avoids the production host's unreliable GHCR
+#     layer downloads. The stack directory is the one that already holds the
+#     plugin backend's compose.yml — set MPOS_STACK_DIR if it ever moves.
 #
 # SHARED STACK: mpos-app lives in the SAME compose file as the plugin backend
 # (mpyhw-api), so every docker compose call here is scoped to `mpos-app`. An
@@ -164,6 +164,31 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      # The production host has repeatedly downloaded every GHCR layer and then
+      # hung before Docker committed the image. Retrying `docker pull` therefore
+      # cannot make deployment reliable. Export the exact image that passed the
+      # smoke test and transfer it through the Actions artifact service instead.
+      # GHCR remains the immutable registry/archive; the artifact is only the
+      # transport used by the self-hosted production runner.
+      - name: Export production image bundle
+        run: |
+          set -euo pipefail
+          docker save "${IMAGE_NAME}:sha-${{ steps.src.outputs.sha }}" \
+            | gzip -1 > mpos-production-image.tar.gz
+          sha256sum mpos-production-image.tar.gz > mpos-production-image.tar.gz.sha256
+          ls -lh mpos-production-image.tar.gz mpos-production-image.tar.gz.sha256
+
+      - name: Upload production image bundle
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: mpos-production-image-${{ steps.src.outputs.sha }}
+          path: |
+            mpos-production-image.tar.gz
+            mpos-production-image.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
   deploy:
     name: deploy on production host
     needs: image
@@ -175,9 +200,8 @@ jobs:
     # errors. Labels are routing, not a security boundary — scoping the runner
     # to this repository is what limits it, so the extra labels buy nothing.
     runs-on: upypi
-    # Must exceed the sum of the inner bounds, or the job limit becomes the
-    # thing that fires and the specific `timeout` messages never get printed:
-    # pull 6x180s + 5x10s backoff = 1130s, deploy 420s, rollback 420s = 1970s.
+    # Must exceed the bounded image load and compose deployment operations, plus
+    # enough time for the artifact download on the production connection.
     timeout-minutes: 35
     environment: production
     concurrency:
@@ -185,15 +209,22 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: none
+      actions: read
       packages: read
     steps:
-      - name: Pull, pin, deploy (transactional)
+      - name: Download production image bundle
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: mpos-production-image-${{ needs.image.outputs.source_sha }}
+          path: ${{ runner.temp }}/mpos-production-image
+
+      - name: Load, pin, deploy (transactional)
         env:
           DIGEST: ${{ needs.image.outputs.digest }}
           SOURCE_SHA: ${{ needs.image.outputs.source_sha }}
-          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PRODUCTION_KIMI_API_KEY: ${{ secrets.KIMI_API_KEY }}
           PRODUCTION_ZHIPU_API_KEY: ${{ secrets.ZHIPU_API_KEY }}
+          IMAGE_BUNDLE_DIR: ${{ runner.temp }}/mpos-production-image
           # /srv/upypi is where the stack actually lives: the plugin backend's
           # merged deploy job cd's there today. Overridable if the ops owner
           # moves it; a wrong value fails loudly at the cd below, so the default
@@ -201,81 +232,26 @@ jobs:
           STACK_DIR: ${{ vars.MPOS_STACK_DIR || '/srv/upypi' }}
         run: |
           set -euo pipefail
-          IMAGE="${IMAGE_NAME}@${DIGEST}"
-          export DOCKER_CONFIG="$(mktemp -d)"
-          # ONE exit handler. A second `trap ... EXIT` anywhere below would
-          # silently replace this one and leave the GHCR credentials sitting on
-          # someone else's production host.
-          cleanup() {
-            rm -rf "${DOCKER_CONFIG}"
-            # Logged because the first cancelled run left no way to tell whether
-            # this ran at all — the shell is killed and the log just shows an
-            # orphaned docker process. The GHCR credential here dies with the
-            # job either way, but "probably cleaned up" is not a thing to leave
-            # in a log about someone else's production host.
-            echo "removed temporary docker config ${DOCKER_CONFIG}" >&2
-          }
-          trap cleanup EXIT INT TERM
-          echo "${GHCR_TOKEN}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
-          # GitHub reachability from this host is intermittent — it is why a
-          # webhook-driven CD was rejected in favour of this runner. Retry a
-          # transient blip rather than failing a deployment over it. Still fails
-          # loudly once the attempts are spent; this is a retry, not a fallback.
-          #
-          # `timeout` is load-bearing, and it is here because of a real incident
-          # rather than caution. On the first run of this job the pull fetched 8
-          # of 9 layers in 11 seconds and then sat on the last one until the job
-          # limit killed it 15 minutes later. The retry below was powerless: it
-          # only ever sees a non-zero exit, and a hung `docker pull` does not
-          # exit at all. Wrapping converts "hangs forever" — which no retry can
-          # catch — into "exits 124", which is the failure this loop was written
-          # for.
-          #
-          # ATTEMPTS, not duration, is the lever. A hung connection is a black
-          # hole: it never returns and never errors, so a longer single attempt
-          # just waits longer on the same dead socket. The evidence is that a
-          # DIFFERENT layer stalls each time, which means a fresh attempt draws
-          # fresh connections — that is the thing that can actually succeed. A
-          # healthy pull is ~11s and 8 of 9 layers land inside 120s, so 180s is
-          # slack for a slow-but-alive connection, not patience for a dead one.
-          #
-          # Attempts DO accumulate: layers that finished in an earlier attempt
-          # stay on the host, so each retry has less to fetch. Measured — after
-          # three failed attempts had banked 8 of 9 layers, the next run's pull
-          # completed in 2 seconds. An earlier note here claimed the opposite;
-          # it was wrong.
-          pulled=""
-          for attempt in $(seq 1 6); do
-            rc=0
-            timeout 180 docker pull "${IMAGE}" || rc=$?
-            if [ "${rc}" = 0 ]; then pulled=1; break; fi
-            if [ "${rc}" = 124 ]; then
-              echo "pull attempt ${attempt}/6 hung past 180s and was killed; retrying in 10s" >&2
-            else
-              echo "pull attempt ${attempt}/6 failed (exit ${rc}); retrying in 10s" >&2
-            fi
-            sleep 10
-          done
-          if [ -z "${pulled}" ]; then
-            echo "docker pull failed after 6 attempts — registry unreachable, hung, or digest missing" >&2
-            exit 1
-          fi
-          # Retag the digest we just pulled to the tag compose refers to. Same
-          # mechanism the plugin backend's deploy job uses on this host, and the
-          # reason mpos-app needs no .env: the file on disk never changes, only
-          # what :latest points at locally. What runs is still selected by
-          # digest — the tag is just the handle compose holds it by.
-          #
-          # `docker tag` is local and instant, so there is no window here worth
-          # guarding: either it succeeds and the `up` below uses the new image,
-          # or set -e stops before anything is restarted.
-          docker tag "${IMAGE}" "${IMAGE_NAME}:latest"
+          bundle="${IMAGE_BUNDLE_DIR}/mpos-production-image.tar.gz"
+          checksum="${bundle}.sha256"
+          test -s "${bundle}"
+          test -s "${checksum}"
+          cd "${IMAGE_BUNDLE_DIR}"
+          sha256sum -c "$(basename "${checksum}")"
+          timeout 420 sh -c 'gzip -dc "$1" | docker load' sh "${bundle}"
+
+          # docker save/load preserves the immutable source-SHA tag. Retag that
+          # locally to the handle used by compose; no registry access occurs on
+          # the production host.
+          SOURCE_IMAGE="${IMAGE_NAME}:sha-${SOURCE_SHA}"
+          docker image inspect "${SOURCE_IMAGE}" >/dev/null
+          docker tag "${SOURCE_IMAGE}" "${IMAGE_NAME}:latest"
 
           # Resolve the image ID now, for verification after the restart. The
           # container reports the ID it was created from, not the tag, so this
           # is what proves the running container is THIS build and not whatever
           # :latest happened to point at before.
-          WANT_ID=$(docker inspect --format '{{.Id}}' "${IMAGE}")
+          WANT_ID=$(docker inspect --format '{{.Id}}' "${SOURCE_IMAGE}")
 
           cd "${STACK_DIR}"
 
@@ -337,12 +313,11 @@ jobs:
           # Scoped to mpos-app (compose still starts its depends_on) so a mpos
           # deployment never restarts the plugin backend in the same file.
           #
-          # Wrapped for the same reason as the pull, and it is not a theoretical
-          # worry here: on a first deployment this `up` is what pulls postgres,
-          # minio and mc from the mirror, so it can hang on a layer exactly the
-          # way the GHCR pull did. `--wait` then blocks on health with no bound
-          # of its own. 420s covers the real startup cost — mpos-db needs up to
-          # 100s of pg_isready retries and mpos-app has a 60s start_period.
+          # This is bounded because on a first deployment `up` may pull postgres,
+          # minio and mc from a mirror and can hang on a registry layer. `--wait`
+          # then blocks on health with no bound of its own. 420s covers the real
+          # startup cost — mpos-db needs up to 100s of pg_isready retries and
+          # mpos-app has a 60s start_period.
           if timeout 420 docker compose up -d --wait mpos-app; then
             # Assignment inside the condition so an inspect failure counts as a
             # failed verification instead of killing the shell under set -e.
