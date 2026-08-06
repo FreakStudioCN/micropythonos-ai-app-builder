@@ -143,6 +143,7 @@ summary { cursor: pointer; font-weight: 700; font-size: 14px; }
 .timeline li.error i { color: white; background: #ef4444; }
 .success-box, .error-box { display: flex; flex-direction: column; gap: 4px; margin-top: 8px; padding: 13px; border-radius: 9px; font-size: 12px; }
 .success-box { color: #126538; background: #ecf9f0; border: 1px solid #bfe8cc; }
+.success-box > div { display: flex; flex-wrap: wrap; gap: 7px; }
 .success-box button { align-self: flex-start; margin-top: 6px; border: 1px solid #86d7a2; color: #126538; background: white; border-radius: 7px; padding: 7px 10px; font-weight: 800; }
 .error-box { color: #9f1e1e; background: #fff0f0; border: 1px solid #fecaca; }
 .error-box button { align-self: flex-start; margin-top: 6px; border: 0; color: white; background: #dc2626; border-radius: 7px; padding: 7px 10px; }
