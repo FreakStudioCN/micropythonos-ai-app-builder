@@ -851,7 +851,12 @@ async def _call_deepseek_legacy(
     if request_timeout is None:
         request_timeout = _bounded_float_env(
             "AI_READ_TIMEOUT_SECONDS",
-            default=60.0,
+            # Complex MicroPythonOS apps can spend several minutes in the
+            # provider before the first streamed token arrives.  This is an
+            # idle-read timeout (not a whole-generation deadline), so a
+            # generous default avoids killing healthy GLM/Kimi requests while
+            # still detecting a genuinely stalled connection.
+            default=600.0,
             minimum=2.0,
             maximum=600.0,
             fallbacks=("DEEPSEEK_REQUEST_TIMEOUT_SECONDS",),
@@ -2529,11 +2534,11 @@ async def _call_provider_with_retries(
         "deepseek": "DEEPSEEK_READ_TIMEOUT_SECONDS",
     }.get(config.id, "AI_READ_TIMEOUT_SECONDS")
     provider_default_timeout = {
-        "zhipu_glm52": 120.0,
-        "kimi": 120.0,
-        "kimi_k27": 120.0,
-        "deepseek": 90.0,
-    }.get(config.id, 120.0)
+        "zhipu_glm52": 600.0,
+        "kimi": 600.0,
+        "kimi_k27": 600.0,
+        "deepseek": 300.0,
+    }.get(config.id, 600.0)
     read_timeout = _bounded_float_env(
         provider_timeout_env,
         default=provider_default_timeout,
@@ -2761,7 +2766,7 @@ async def _call_deepseek(
     )
     provider_timeout = _bounded_float_env(
         "AI_READ_TIMEOUT_SECONDS",
-        default=120.0,
+        default=600.0,
         minimum=3.0,
         maximum=600.0,
         fallbacks=("DEEPSEEK_REQUEST_TIMEOUT_SECONDS",),
@@ -2914,7 +2919,7 @@ async def generate_app(
     )
     request_timeout_seconds = _bounded_float_env(
         "AI_READ_TIMEOUT_SECONDS",
-        default=120.0,
+        default=600.0,
         minimum=3.0,
         maximum=600.0,
         fallbacks=("DEEPSEEK_REQUEST_TIMEOUT_SECONDS",),

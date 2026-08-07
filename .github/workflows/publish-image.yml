@@ -279,6 +279,18 @@ jobs:
             mpos-app:
               env_file:
                 - ./.mpos-ai-providers.env
+              # Keep long, healthy GLM/Kimi generations alive.  These values
+              # live in `environment` (rather than only the env file) so they
+              # override any legacy 120-second settings in the base stack.
+              environment:
+                AI_STREAM_RESPONSES: "true"
+                AI_OVERALL_TIMEOUT_SECONDS: "0"
+                AI_READ_TIMEOUT_SECONDS: "600"
+                ZHIPU_READ_TIMEOUT_SECONDS: "600"
+                KIMI_READ_TIMEOUT_SECONDS: "600"
+                DEEPSEEK_READ_TIMEOUT_SECONDS: "300"
+                DEEPSEEK_GENERATION_BUDGET_SECONDS: "0"
+                DEEPSEEK_REQUEST_TIMEOUT_SECONDS: "600"
           YAML
           chmod 600 "${override_tmp}"
           mv "${override_tmp}" "${provider_override}"
@@ -332,7 +344,12 @@ jobs:
             if RUNNING_ID=$(docker inspect "${RUNNING_CONTAINER}" --format '{{.Image}}') \
                && [ "${RUNNING_ID}" = "${WANT_ID}" ] \
                && docker exec "${RUNNING_CONTAINER}" sh -c \
-                    'test -n "$KIMI_API_KEY" && test -n "$ZHIPU_API_KEY"'; then
+                    'test -n "$KIMI_API_KEY" && test -n "$ZHIPU_API_KEY" && \
+                     test "$AI_STREAM_RESPONSES" = "true" && \
+                     test "$AI_OVERALL_TIMEOUT_SECONDS" = "0" && \
+                     test "$AI_READ_TIMEOUT_SECONDS" = "600" && \
+                     test "$ZHIPU_READ_TIMEOUT_SECONDS" = "600" && \
+                     test "$KIMI_READ_TIMEOUT_SECONDS" = "600"'; then
               deploy_ok=1
             fi
           fi
@@ -350,3 +367,4 @@ jobs:
           fi
           echo "deployed source_sha=${SOURCE_SHA} digest=${DIGEST}" >> "${GITHUB_STEP_SUMMARY}"
           echo "GLM/Kimi provider credentials: present in running container" >> "${GITHUB_STEP_SUMMARY}"
+          echo "AI streaming and 600-second idle-read windows: verified" >> "${GITHUB_STEP_SUMMARY}"
