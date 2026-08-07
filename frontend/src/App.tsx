@@ -2078,8 +2078,8 @@ export default function App() {
               <span>{errorMessage}</span>
               <div>
                 {status === "blocked" && sessionState?.permissions.some((item) => item.required && item.decision === "pending") && <button onClick={() => setPermissionOpen(true)}>{tr("处理权限", "Review permissions")}</button>}
-                {status === "timeout" && sessionState?.status !== "timeout" && <button onClick={() => void continueWaiting()}>{tr("继续等待后台结果", "Keep waiting for backend")}</button>}
-                {(status !== "timeout" || sessionState?.status === "timeout") && <button onClick={retry}>{tr("从失败检查点重试", "Retry from checkpoint")}</button>}
+                {status === "timeout" && ["created", "running"].includes(sessionState?.status || "") && <button onClick={() => void continueWaiting()}>{tr("继续等待后台结果", "Keep waiting for backend")}</button>}
+                {(status !== "timeout" || !["created", "running"].includes(sessionState?.status || "")) && <button onClick={retry}>{tr("从失败检查点重试", "Retry from checkpoint")}</button>}
               </div>
             </div>}
             {sessionState?.warnings.length ? <div className="warning-box"><strong>{tr("警告（不等于失败）", "Warnings (not failures)")}</strong>{sessionState.warnings.map((warning) => <span key={warning}>⚠ {warning}</span>)}</div> : null}

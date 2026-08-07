@@ -680,6 +680,102 @@ def _settings() -> tuple[str, str, str]:
     return key, base_url, model
 
 
+async def _collect_streaming_completion(
+    response: httpx.Response,
+    *,
+    default_model: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Collect an OpenAI-compatible SSE response without losing whitespace.
+
+    Provider read timeouts are idle timeouts while streaming. This lets a
+    large App take longer than the configured window in total, as long as the
+    provider is still returning data, while a genuinely stalled connection is
+    still interrupted and failed over.
+    """
+
+    content_parts: list[str] = []
+    reasoning_parts: list[str] = []
+    finish_reason: Any = None
+    selected_model = default_model
+    request_id: str | None = None
+    usage: dict[str, Any] | None = None
+    saw_event = False
+
+    def append_fragment(value: Any, target: list[str]) -> None:
+        # String fragments are individual tokens and must not be stripped:
+        # doing so corrupts indentation and JSON string contents.
+        if isinstance(value, str):
+            target.append(value)
+            return
+        text = _message_text(value)
+        if text:
+            target.append(text)
+
+    async for raw_line in response.aiter_lines():
+        line = raw_line.strip()
+        if not line or line.startswith(":") or not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            chunk = json.loads(data)
+        except json.JSONDecodeError:
+            # Compatible gateways can inject non-JSON keepalive lines.
+            continue
+        if not isinstance(chunk, dict):
+            continue
+        saw_event = True
+        model_value = chunk.get("model")
+        if isinstance(model_value, str) and model_value:
+            selected_model = model_value
+        id_value = chunk.get("id")
+        if isinstance(id_value, str) and id_value:
+            request_id = id_value
+        usage_value = chunk.get("usage")
+        if isinstance(usage_value, dict):
+            usage = usage_value
+
+        choices = chunk.get("choices")
+        if not isinstance(choices, list) or not choices:
+            continue
+        choice = choices[0]
+        if not isinstance(choice, dict):
+            continue
+        delta = choice.get("delta")
+        if not isinstance(delta, dict):
+            delta = choice.get("message")
+        if isinstance(delta, dict):
+            append_fragment(delta.get("content"), content_parts)
+            append_fragment(delta.get("reasoning_content"), reasoning_parts)
+        if choice.get("finish_reason") is not None:
+            finish_reason = choice.get("finish_reason")
+
+    message: dict[str, Any] = {"content": "".join(content_parts)}
+    if reasoning_parts:
+        message["reasoning_content"] = "".join(reasoning_parts)
+    if not message["content"] and not message.get("reasoning_content"):
+        raise GenerationError(
+            "AI generation service did not return a parseable result",
+            details={
+                "model": selected_model,
+                "streamed": True,
+                "saw_event": saw_event,
+            },
+        )
+
+    choice = {"message": message, "finish_reason": finish_reason}
+    body: dict[str, Any] = {
+        "model": selected_model,
+        "choices": [choice],
+    }
+    if request_id:
+        body["id"] = request_id
+    if usage is not None:
+        body["usage"] = usage
+    return body, choice, message
+
+
 async def _call_deepseek_legacy(
     request: GenerateRequest,
     correction: str = "",
@@ -695,16 +791,31 @@ async def _call_deepseek_legacy(
         "kimi_k27": "KIMI_MAX_OUTPUT_TOKENS",
         "deepseek": "DEEPSEEK_MAX_OUTPUT_TOKENS",
     }.get(provider_id, "AI_MAX_OUTPUT_TOKENS")
+    # A complete response contains both the generated MicroPython source and
+    # the surrounding JSON contract.  The previous 4.6k/5.2k limits routinely
+    # cut game and multi-screen apps in the middle of the JSON document.  Keep
+    # provider-specific safety floors so an old deployment environment cannot
+    # silently reintroduce those truncated, unparseable responses.
+    token_policy = {
+        "zhipu_glm52": (10_000, 8_000, 20_000),
+        "kimi": (12_000, 10_000, 24_000),
+        "kimi_k27": (12_000, 10_000, 24_000),
+        "deepseek": (8_000, 6_000, 16_000),
+    }
+    default_tokens, minimum_tokens, maximum_tokens = token_policy.get(
+        provider_id,
+        (8_000, 6_000, 16_000),
+    )
     max_tokens = max(
-        2200,
+        minimum_tokens,
         min(
-            8000,
+            maximum_tokens,
             int(
                 _first_env(
                     provider_token_env,
                     "AI_MAX_OUTPUT_TOKENS",
                     "DEEPSEEK_MAX_TOKENS",
-                    default="6000",
+                    default=str(default_tokens),
                 )
             ),
         ),
@@ -756,40 +867,68 @@ async def _call_deepseek_legacy(
         request_timeout,
         connect=min(connect_timeout, request_timeout),
     )
+    streaming = _enabled_env("AI_STREAM_RESPONSES", default=True)
     async with httpx.AsyncClient(timeout=timeout) as client:
-        response = await client.post(
-            f"{base_url}/chat/completions", headers=headers, json=payload
-        )
-    if response.is_error:
-        raise _ProviderHTTPStatusError(
-            response.status_code,
-            _safe_upstream_request_id(response),
-        )
+        if streaming:
+            stream_payload = {**payload, "stream": True}
+            async with client.stream(
+                "POST",
+                f"{base_url}/chat/completions",
+                headers=headers,
+                json=stream_payload,
+            ) as response:
+                if response.is_error:
+                    raise _ProviderHTTPStatusError(
+                        response.status_code,
+                        _safe_upstream_request_id(response),
+                    )
+                body, choice, message = await _collect_streaming_completion(
+                    response,
+                    default_model=model,
+                )
+        else:
+            response = await client.post(
+                f"{base_url}/chat/completions", headers=headers, json=payload
+            )
+            if response.is_error:
+                raise _ProviderHTTPStatusError(
+                    response.status_code,
+                    _safe_upstream_request_id(response),
+                )
+            try:
+                body = response.json()
+                choice = body["choices"][0]
+                message = choice["message"]
+                if not isinstance(message, dict):
+                    raise TypeError("message is not an object")
+            except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
+                raise GenerationError("AI 生成服务没有返回可解析的生成结果") from exc
 
     try:
-        body = response.json()
-        choice = body["choices"][0]
-        message = choice["message"]
-        if not isinstance(message, dict):
-            raise TypeError("message is not an object")
-        try:
-            generated = _parse_model_json(message)
-        except GenerationError as exc:
-            finish_reason = choice.get("finish_reason")
-            exc.details = {
-                **exc.details,
-                "model": str(body.get("model") or model),
-                "finish_reason": (
-                    str(finish_reason)[:80]
-                    if finish_reason is not None
-                    else None
-                ),
-                "content_type": type(message.get("content")).__name__,
-                "has_reasoning_content": bool(message.get("reasoning_content")),
-            }
-            raise
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-        raise GenerationError("AI 生成服务没有返回可解析的生成结果") from exc
+        generated = _parse_model_json(message)
+    except GenerationError as exc:
+        finish_reason = choice.get("finish_reason")
+        if str(finish_reason or "").lower() in {
+            "length",
+            "max_tokens",
+            "token_limit",
+        }:
+            exc = GenerationError(
+                "AI 返回内容达到输出上限，完整 App 尚未生成完毕",
+                details=exc.details,
+            )
+        exc.details = {
+            **exc.details,
+            "model": str(body.get("model") or model),
+            "finish_reason": (
+                str(finish_reason)[:80]
+                if finish_reason is not None
+                else None
+            ),
+            "content_type": type(message.get("content")).__name__,
+            "has_reasoning_content": bool(message.get("reasoning_content")),
+        }
+        raise
     selected_model = str(body.get("model") or model)
     model_meta: dict[str, Any] = {"model": selected_model}
     finish_reason = choice.get("finish_reason")
@@ -2045,6 +2184,13 @@ def _optional_timeout_env(
     return min(maximum, max(1.0, value))
 
 
+def _enabled_env(name: str, *, default: bool = False) -> bool:
+    raw = os.getenv(name)
+    if raw is None or not raw.strip():
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
 def _bounded_int_env(
     name: str,
     *,
@@ -2426,14 +2572,21 @@ async def _call_provider_with_retries(
         upstream_request_id: str | None = None
         token = _ACTIVE_PROVIDER_CONFIG.set(config)
         try:
-            generated, model, model_meta = await asyncio.wait_for(
-                _call_deepseek_legacy(
-                    request,
-                    correction=correction,
-                    timeout_seconds=attempt_timeout,
-                ),
-                timeout=attempt_timeout,
+            provider_call = _call_deepseek_legacy(
+                request,
+                correction=correction,
+                timeout_seconds=attempt_timeout,
             )
+            if _enabled_env("AI_STREAM_RESPONSES", default=True):
+                # httpx applies attempt_timeout between streamed bytes. Do not
+                # wrap the complete response in asyncio.wait_for: that used to
+                # kill healthy long generations at exactly 90/120 seconds.
+                generated, model, model_meta = await provider_call
+            else:
+                generated, model, model_meta = await asyncio.wait_for(
+                    provider_call,
+                    timeout=attempt_timeout,
+                )
         except (asyncio.TimeoutError, httpx.TimeoutException):
             outcome = "timeout"
             status_code = None

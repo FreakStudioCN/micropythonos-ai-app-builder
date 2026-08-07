@@ -46,6 +46,9 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
             "AI_RETRY_BACKOFF_SECONDS": "0",
             "AI_CONNECT_TIMEOUT_SECONDS": "1",
             "AI_READ_TIMEOUT_SECONDS": "2",
+            # Most routing tests mock the legacy one-shot response. Streaming
+            # behavior has a dedicated test below.
+            "AI_STREAM_RESPONSES": "0",
             "AI_OVERALL_TIMEOUT_SECONDS": "5",
             "AI_PROVIDER_CIRCUIT_FAILURE_THRESHOLD": "2",
             "AI_PROVIDER_CIRCUIT_COOLDOWN_SECONDS": "30",
@@ -145,7 +148,11 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_kimi_omits_unsupported_temperature(self) -> None:
         client = self._client(self._response(200, model="kimi-served"))
-        with patch.dict(os.environ, self._env(), clear=True), patch(
+        with patch.dict(
+            os.environ,
+            self._env(KIMI_MAX_OUTPUT_TOKENS="5200"),
+            clear=True,
+        ), patch(
             "app.generator.httpx.AsyncClient", return_value=client
         ):
             _, _, meta = await _call_deepseek(
@@ -157,6 +164,76 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("temperature", payload)
         self.assertNotIn("thinking", payload)
         self.assertEqual(payload["response_format"], {"type": "json_object"})
+        self.assertEqual(payload["max_tokens"], 10_000)
+
+    async def test_streaming_response_preserves_complete_app_json(self) -> None:
+        generated = {
+            "summary": "streamed test app",
+            "app_code": "import lvgl as lv\n\nclass App:\n    pass\n",
+            "acceptance_tests": ["starts", "responds"],
+        }
+        encoded = json.dumps(generated, ensure_ascii=False)
+        fragments = [encoded[:31], encoded[31:77], encoded[77:]]
+
+        class FakeStreamingResponse:
+            is_error = False
+
+            async def aiter_lines(self):
+                for index, fragment in enumerate(fragments):
+                    yield "data: " + json.dumps(
+                        {
+                            "id": "stream-request",
+                            "model": "glm-streamed",
+                            "choices": [
+                                {
+                                    "delta": {"content": fragment},
+                                    "finish_reason": (
+                                        "stop" if index == len(fragments) - 1 else None
+                                    ),
+                                }
+                            ],
+                        }
+                    )
+                yield "data: [DONE]"
+
+        class FakeStreamContext:
+            async def __aenter__(self):
+                return FakeStreamingResponse()
+
+            async def __aexit__(self, *_: object):
+                return False
+
+        class FakeClient:
+            def __init__(self) -> None:
+                self.payload: dict[str, object] | None = None
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *_: object):
+                return False
+
+            def stream(self, _method: str, _url: str, **kwargs: object):
+                payload = kwargs.get("json")
+                if isinstance(payload, dict):
+                    self.payload = payload
+                return FakeStreamContext()
+
+        client = FakeClient()
+        env = self._env(AI_STREAM_RESPONSES="1")
+        with patch.dict(os.environ, env, clear=True), patch(
+            "app.generator.httpx.AsyncClient", return_value=client
+        ):
+            result, model, meta = await _call_deepseek(
+                GenerateRequest(prompt="build a test app", ai_provider="zhipu_glm52")
+            )
+
+        self.assertEqual(model, "glm-streamed")
+        self.assertEqual(result["app_code"], generated["app_code"])
+        self.assertEqual(meta["request_id"], "stream-request")
+        self.assertIsNotNone(client.payload)
+        assert client.payload is not None
+        self.assertTrue(client.payload["stream"])
 
     async def test_auto_retries_then_fails_over(self) -> None:
         client = self._client(

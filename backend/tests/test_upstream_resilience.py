@@ -56,6 +56,14 @@ def _mock_client(*outcomes):
 class DeepSeekResilienceTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self) -> None:
         _reset_provider_circuits()
+        # These cases exercise the legacy POST retry/failover behavior. Streaming
+        # response parsing has its own focused coverage in test_provider_routing.
+        self.streaming_patch = patch.dict(
+            "app.generator.os.environ",
+            {"AI_STREAM_RESPONSES": "0"},
+        )
+        self.streaming_patch.start()
+        self.addCleanup(self.streaming_patch.stop)
 
     async def test_timeout_fails_over_without_repeating_the_same_provider(self) -> None:
         client = _mock_client(
