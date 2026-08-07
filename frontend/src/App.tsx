@@ -20,6 +20,7 @@ import {
   type GenerationActivitySnapshot,
   type PublicSystemStatus,
 } from "./platformUpgradeLibrary";
+import { classifyWasmFailure } from "./wasmFailurePolicy";
 
 type Status = "idle" | "created" | "running" | "waiting_preview" | "waiting_device" | "completed" | "failed" | "blocked" | "cancelled" | "timeout";
 type Language = "zh" | "en";
@@ -177,7 +178,8 @@ const subscriptionPlans = [
 ] as const;
 type SubscriptionPlan = (typeof subscriptionPlans)[number];
 export type GenerationWaitTimeoutKind = "idle" | "overall";
-const MAX_AUTOMATIC_REPAIR_ATTEMPTS = 3;
+const MAX_AUTOMATIC_REPAIR_ATTEMPTS = 1;
+const MAX_WASM_BRIDGE_RECOVERY_ATTEMPTS = 1;
 export const getGenerationWaitTimeoutKind = (
   now: number,
   startedAt: number,
@@ -397,6 +399,8 @@ export default function App() {
   const confirmedMaintenanceStatus = useRef<PublicSystemStatus | null>(null);
   const repairAttempts = useRef(0);
   const repairing = useRef(false);
+  const wasmBridgeRecoveryAttempts = useRef(0);
+  const wasmRunReachedRepl = useRef(false);
   const repairHandler = useRef<(detail: string) => boolean>(() => false);
   const languageRef = useRef<Language>(language);
   languageRef.current = language;
@@ -774,7 +778,15 @@ export default function App() {
         event.source !== iframeRef.current?.contentWindow
         || event.origin !== wasmRuntimeOrigin
       ) return;
-      const message = event.data as { source?: string; type?: string; text?: string; message?: string; runId?: string };
+      const message = event.data as {
+        source?: string;
+        type?: string;
+        text?: string;
+        message?: string;
+        runId?: string;
+        code?: string;
+        repairable?: boolean;
+      };
       if (message?.source !== "mpos-web") return;
       if (
         message.runId
@@ -793,12 +805,17 @@ export default function App() {
           : liveText("正在把生成代码安装进 MicroPythonOS…", "Installing generated code into MicroPythonOS…"));
         setLogs((items) => [...items, showcaseName
           ? liveText(`[showcase] 正在安装 ${showcaseName} MPK…`, `[showcase] Installing the ${showcaseName} MPK…`)
-          : liveText("[preview] 正在通过 raw REPL 安装 app.py…", "[preview] Installing app.py through raw REPL…")]);
+          : liveText("[preview] 正在通过异步 REPL 安装 app.py…", "[preview] Installing app.py through the async REPL…")]);
+      } else if (message.type === "MPOS_REPL_READY") {
+        wasmRunReachedRepl.current = true;
+        setLogs((items) => [...items, liveText("[preview] MicroPythonOS 执行通道已就绪", "[preview] MicroPythonOS execution channel is ready")]);
       } else if (message.type === "MPOS_LOG" && message.text?.trim()) {
         setLogs((items) => [...items, `[wasm] ${message.text!.trim()}`]);
       } else if (message.type === "MPOS_APP_RUNNING") {
         if (executionTimer.current !== null) window.clearTimeout(executionTimer.current);
         executionTimer.current = null;
+        wasmBridgeRecoveryAttempts.current = 0;
+        wasmRunReachedRepl.current = true;
         if (showcasePreviewRef.current) {
           const showcaseName = showcasePreviewRef.current;
           showcasePreviewRef.current = "";
@@ -842,23 +859,40 @@ export default function App() {
           setLogs((items) => [...items, `[showcase] ${detail}`]);
           return;
         }
-        if (repairHandler.current(detail)) {
+        const failureKind = classifyWasmFailure(message);
+        if (failureKind === "infrastructure" && wasmBridgeRecoveryAttempts.current < MAX_WASM_BRIDGE_RECOVERY_ATTEMPTS) {
+          wasmBridgeRecoveryAttempts.current += 1;
+          wasmRunReachedRepl.current = false;
+          setWasmReady(false);
+          lastRun.current = "";
+          activeWasmRunId.current = "";
+          if (iframeRef.current) {
+            iframeRef.current.src = `${wasmRuntimeUrl}&recovery=${Date.now()}`;
+          }
+          setRuntimeStatus(liveText("WASM 执行环境异常，正在重启一次…", "WASM runtime issue detected; restarting it once…"));
+          setLogs((items) => [...items, liveText(
+            `[preview] ${message.code || "WASM_BRIDGE_ERROR"}：${detail}；正在重启 WASM，不会调用 AI 重生成。`,
+            `[preview] ${message.code || "WASM_BRIDGE_ERROR"}: ${detail}; restarting WASM without AI regeneration.`,
+          )]);
+          return;
+        }
+        if (failureKind === "application" && repairHandler.current(detail)) {
           setRuntimeStatus(liveText(`发现兼容问题，AI 正在自动修复（${repairAttempts.current}/${MAX_AUTOMATIC_REPAIR_ATTEMPTS}）…`, `Compatibility issue found. AI is repairing it (${repairAttempts.current}/${MAX_AUTOMATIC_REPAIR_ATTEMPTS})…`));
-          setLogs((items) => [...items, liveText(`[repair] WASM 发现兼容错误，正在自动修复：${detail}`, `[repair] WASM compatibility error found; repairing: ${detail}`)]);
+          setLogs((items) => [...items, liveText(`[repair] App 代码运行错误，正在自动修复：${detail}`, `[repair] App runtime error found; repairing: ${detail}`)]);
           return;
         }
         setRuntimeStatus(detail);
         setErrorMessage(detail);
         setCurrentStage(3);
         setStatus("failed");
-        setLogs((items) => [...items, `[preview] ${detail}`]);
+        setLogs((items) => [...items, `[preview] ${message.code || "WASM_ERROR"}: ${detail}`]);
         const savedSession = localStorage.getItem("mpos-session-id");
         if (savedSession) {
           void apiFetch(`${apiUrl}/api/sessions/${savedSession}/actions/preview-result`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              idempotency_key: `preview-failed-${crypto.randomUUID()}`,
+              idempotency_key: `preview-failed-${savedSession}-${message.code || "unknown"}`,
               result: "failed",
               message: detail,
             }),
@@ -878,16 +912,31 @@ export default function App() {
     lastRun.current = result.mpk_base64;
     const runId = crypto.randomUUID();
     activeWasmRunId.current = runId;
+    wasmRunReachedRepl.current = false;
     setCurrentStage(3);
     setRuntimeStatus(tr("正在发送生成代码到 MicroPythonOS WASM…", "Sending generated code to MicroPythonOS WASM…"));
     if (executionTimer.current !== null) window.clearTimeout(executionTimer.current);
     executionTimer.current = window.setTimeout(() => {
-      const detail = liveText("App 在 WASM 中执行超时，可能包含阻塞循环或等待。", "App execution timed out in WASM, possibly due to blocking code.");
+      const executionStarted = wasmRunReachedRepl.current;
+      const detail = executionStarted
+        ? liveText("App 在 WASM 中执行超时，可能包含阻塞循环或等待。", "App execution timed out in WASM, possibly due to blocking code.")
+        : liveText("MicroPythonOS WASM 执行通道启动超时。", "The MicroPythonOS WASM execution channel timed out during startup.");
       setWasmReady(false);
       if (iframeRef.current) {
         iframeRef.current.src = `${wasmRuntimeUrl}&recovery=${Date.now()}`;
       }
-      if (repairHandler.current(detail)) {
+      if (!executionStarted && wasmBridgeRecoveryAttempts.current < MAX_WASM_BRIDGE_RECOVERY_ATTEMPTS) {
+        wasmBridgeRecoveryAttempts.current += 1;
+        lastRun.current = "";
+        activeWasmRunId.current = "";
+        setRuntimeStatus(liveText("WASM 执行环境启动超时，正在重启一次…", "WASM startup timed out; restarting it once…"));
+        setLogs((items) => [...items, liveText(
+          `[preview] ${detail} 正在重启 WASM，不会调用 AI 重生成。`,
+          `[preview] ${detail} Restarting WASM without AI regeneration.`,
+        )]);
+        return;
+      }
+      if (executionStarted && repairHandler.current(detail)) {
         setRuntimeStatus(liveText(`发现阻塞代码，AI 正在自动修复（${repairAttempts.current}/${MAX_AUTOMATIC_REPAIR_ATTEMPTS}）…`, `Blocking code found. AI is repairing it (${repairAttempts.current}/${MAX_AUTOMATIC_REPAIR_ATTEMPTS})…`));
         setLogs((items) => [...items, liveText(`[repair] ${detail} 已重载 WASM，正在自动修复。`, `[repair] ${detail} WASM reloaded; automatic repair started.`)]);
         return;
@@ -903,7 +952,7 @@ export default function App() {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            idempotency_key: `preview-timeout-${crypto.randomUUID()}`,
+            idempotency_key: `preview-timeout-${savedSession}-${executionStarted ? "app" : "wasm"}`,
             result: "timeout",
             message: detail,
           }),
@@ -952,6 +1001,8 @@ export default function App() {
     lastRun.current = "";
     if (!repair) {
       repairAttempts.current = 0;
+      wasmBridgeRecoveryAttempts.current = 0;
+      wasmRunReachedRepl.current = false;
       setLogs([
         tr("[analysis] 已把你的需求发送到后端", "[analysis] Request sent to the backend"),
         tr("[generation] 正在生成 MicroPythonOS 代码…", "[generation] Generating MicroPythonOS code…"),

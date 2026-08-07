@@ -218,6 +218,45 @@ class ProtocolTests(unittest.TestCase):
         self.assertIn("plan_state", roles)
         self.assertIn("artifact_manifest", roles)
 
+    def test_checkpoint_reports_partial_result_and_structured_errors_truthfully(self) -> None:
+        state = self.service.create(
+            SessionCreateRequest(
+                idempotency_key="checkpoint-result-test-0001",
+                prompt="Build a browser preview",
+                package_name="com.example.preview",
+                targets=["web-preview"],
+            )
+        )
+        errors = [
+            {
+                "code": "DEVICE_NOT_CONNECTED",
+                "message": "Waiting for a device",
+                "stage": "deploy",
+                "owner": "device",
+                "retryable": True,
+            }
+        ]
+        self.service._checkpoint(
+            state,
+            "mpos-deploy-app-web",
+            "device_deploy_pending",
+            "mpos-publish-app-web",
+            result="blocked",
+            structured_errors=errors,
+        )
+        artifact = next(
+            item
+            for item in state["artifacts"]
+            if item["role"] == "phase_complete.mpos_deploy_app_web"
+        )
+        payload = json.loads(
+            Path(self.temp.name, state["session_id"], artifact["path"]).read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(payload["result"], "blocked")
+        self.assertEqual(payload["structured_errors"], errors)
+
     def test_revision_keeps_previous_code_as_generation_input(self) -> None:
         state = self.service.create(
             SessionCreateRequest(

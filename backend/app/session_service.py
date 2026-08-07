@@ -1567,7 +1567,12 @@ class GeneratedApp(Activity):
                     }
                     self._write_artifact_json(state, "app_test_result", phase, payload)
                     self._checkpoint(
-                        state, phase, "desktop_test_done", "mpos-package-app-web"
+                        state,
+                        phase,
+                        "desktop_test_done",
+                        "mpos-package-app-web",
+                        result=payload["result"],
+                        structured_errors=payload["structured_errors"],
                     )
                 elif action == "package":
                     generation = self._require_generation(state, action)
@@ -1613,7 +1618,12 @@ class GeneratedApp(Activity):
                     }
                     self._write_artifact_json(state, "deploy_result", phase, payload)
                     self._checkpoint(
-                        state, phase, "device_deploy_pending", "mpos-publish-app-web"
+                        state,
+                        phase,
+                        "device_deploy_pending",
+                        "mpos-publish-app-web",
+                        result=payload["result"],
+                        structured_errors=payload["structured_errors"],
                     )
                 else:
                     generation = self._require_generation(state, action)
@@ -1661,7 +1671,14 @@ class GeneratedApp(Activity):
                     }
                     self._write_artifact_json(state, "publish_result", phase, payload)
                     self._write_publish_bundle(state)
-                    self._checkpoint(state, phase, "publish_check_done", None)
+                    self._checkpoint(
+                        state,
+                        phase,
+                        "publish_check_done",
+                        None,
+                        result=payload["result"],
+                        structured_errors=payload["structured_errors"],
+                    )
                 state = self._read(session_id)
                 state["status"] = "completed"
                 state["current_phase"] = phase
@@ -2148,6 +2165,8 @@ class GeneratedApp(Activity):
                     "mpos-test-app-web",
                     "desktop_test_done",
                     "browser_web_preview" if web_requested else "mpos-package-app-web",
+                    result=test_result["result"],
+                    structured_errors=test_result["structured_errors"],
                 )
 
                 state["current_phase"] = "mpos-package-app-web"
@@ -2271,6 +2290,8 @@ class GeneratedApp(Activity):
                     "mpos-deploy-app-web",
                     "device_deploy_done",
                     "mpos-publish-app-web",
+                    result=deploy_result["result"],
+                    structured_errors=deploy_result["structured_errors"],
                 )
                 publish_result = {
                     "schema_version": "mpos-publish-app-web-v1",
@@ -2322,6 +2343,8 @@ class GeneratedApp(Activity):
                     "mpos-publish-app-web",
                     "publish_check_done",
                     "browser_web_preview" if web_requested else None,
+                    result=publish_result["result"],
+                    structured_errors=publish_result["structured_errors"],
                 )
                 state["status"] = (
                     "waiting_preview"
@@ -2466,7 +2489,14 @@ class GeneratedApp(Activity):
         }
 
     def _checkpoint(
-        self, state: dict[str, Any], phase: str, checkpoint: str, next_phase: str | None
+        self,
+        state: dict[str, Any],
+        phase: str,
+        checkpoint: str,
+        next_phase: str | None,
+        *,
+        result: str = "success",
+        structured_errors: list[dict[str, Any]] | None = None,
     ) -> None:
         state["checkpoint_id"] = checkpoint
         state["next_phase"] = next_phase
@@ -2480,7 +2510,7 @@ class GeneratedApp(Activity):
             "session_id": state["session_id"],
             "stage": phase.removeprefix("mpos-").removesuffix("-app-web"),
             "phase": phase,
-            "result": "success",
+            "result": result,
             "checkpoint_id": checkpoint,
             "next_phase": next_phase,
             "result_path": next(
@@ -2493,7 +2523,7 @@ class GeneratedApp(Activity):
             ),
             "artifact_manifest_path": "artifact_manifest.json",
             "warnings": state.get("warnings", []),
-            "structured_errors": [],
+            "structured_errors": structured_errors or [],
         }
         phase_name = phase.replace("-", "_")
         self._write_artifact_json(

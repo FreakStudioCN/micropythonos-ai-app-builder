@@ -502,7 +502,7 @@
   <script async type="text/javascript" src="micropython.js"></script>
   <script>
     // Product bridge: receives generated source from the parent builder,
-    // installs it through MicroPython's raw REPL, and executes it inside the
+    // installs it through MicroPython's asynchronous paste REPL, and executes it inside the
     // real MicroPythonOS WebAssembly runtime.
     (function () {
       var bridgeReady = false;
@@ -519,6 +519,22 @@
       function notify(type, extra) {
         if (window.parent === window || !parentOrigin) return;
         window.parent.postMessage(Object.assign({ source: "mpos-web", type: type }, extra || {}), parentOrigin);
+      }
+
+      function bridgeError(code, message, repairable) {
+        var error = new Error(message);
+        error.code = code;
+        error.repairable = repairable === true;
+        return error;
+      }
+
+      function errorPayload(error, runId) {
+        return {
+          runId: String(runId || ""),
+          code: String(error && error.code || "WASM_BRIDGE_ERROR"),
+          message: String(error && error.message || error),
+          repairable: Boolean(error && error.repairable)
+        };
       }
 
       function flushWaiters() {
@@ -557,33 +573,63 @@
         return btoa(binary);
       }
 
-      async function enterRawRepl() {
+      async function enterPasteRepl(runId) {
         terminalText = "";
-        Module.__webterm.push([0x03, 0x03, 0x0d, 0x01]);
-        await waitFor("raw REPL; CTRL-B to exit\r\n", 30000);
+        // Ctrl-B safely exits raw mode after an interrupted run and is ignored
+        // in the friendly REPL. Ctrl-C then forces a fresh prompt.
+        Module.__webterm.push([0x02, 0x03]);
+        try {
+          await waitFor(">>> ", 30000);
+          terminalText = "";
+          Module.__webterm.push([0x05]);
+          await waitFor("paste mode; Ctrl-C to cancel, Ctrl-D to finish", 10000);
+        } catch (error) {
+          throw bridgeError(
+            "WASM_REPL_STARTUP_TIMEOUT",
+            "MicroPythonOS Web REPL 启动超时：" + String(error && error.message || error),
+            false
+          );
+        }
+        notify("MPOS_REPL_READY", { runId: runId });
       }
 
-      async function rawExec(code) {
+      async function pasteExec(code) {
         terminalText = "";
-        Module.__webterm.push(Array.from(utf8.encode(code)));
+        // aiorepl echoes paste-mode source. The CRLF-suffixed token cannot
+        // match the echoed print(...) statement, so it proves execution
+        // actually reached the final line instead of merely receiving bytes.
+        var completionToken = "MPOS_EXEC_DONE_" + Date.now() + "_" + Math.random().toString(16).slice(2);
+        var payload = code + "\nprint(" + JSON.stringify(completionToken) + ")";
+        Module.__webterm.push(Array.from(utf8.encode(payload)));
         Module.__webterm.push([0x04]);
-        await waitFor("\x04>", 45000);
+        try {
+          await waitFor(completionToken + "\r\n", 45000);
+        } catch (error) {
+          if (terminalText.indexOf("Traceback (most recent call last)") !== -1) {
+            throw bridgeError("APP_RUNTIME_ERROR", terminalText.slice(-2500), true);
+          }
+          throw bridgeError(
+            "APP_EXECUTION_TIMEOUT",
+            "App 在 MicroPythonOS WASM 中执行超时：" + String(error && error.message || error),
+            true
+          );
+        }
         if (terminalText.indexOf("Traceback (most recent call last)") !== -1) {
-          throw new Error(terminalText.slice(-2500));
+          throw bridgeError("APP_RUNTIME_ERROR", terminalText.slice(-2500), true);
         }
       }
 
       async function runGeneratedApp(payload) {
-        if (!bridgeReady) throw new Error("MicroPythonOS WASM 尚未就绪");
+        if (!bridgeReady) throw bridgeError("WASM_NOT_READY", "MicroPythonOS WASM 尚未就绪", false);
         var runId = String(payload.runId || "");
         var packageName = String(payload.packageName || "com.example.generated");
         var appCode = String(payload.appCode || "");
         var manifest = String(payload.manifest || "{}");
-        if (!appCode) throw new Error("没有收到 assets/main.py");
-        if (!/^[a-z0-9_.]+$/.test(packageName)) throw new Error("包名不安全");
+        if (!appCode) throw bridgeError("INVALID_RUN_REQUEST", "没有收到 assets/main.py", false);
+        if (!/^[a-z0-9_.]+$/.test(packageName)) throw bridgeError("INVALID_RUN_REQUEST", "包名不安全", false);
 
         notify("MPOS_INSTALLING", { runId: runId });
-        await enterRawRepl();
+        await enterPasteRepl(runId);
         var dir = "/apps/" + packageName;
         var script = [
           "import os, binascii",
@@ -608,24 +654,24 @@
           "assert __started, 'generated app failed to start'",
           "print('MPOS_GENERATED_APP_RUNNING')"
         ].join("\n");
-        await rawExec(script);
+        await pasteExec(script);
         if (terminalText.indexOf("MPOS_GENERATED_APP_RUNNING") === -1) {
-          throw new Error("App 代码执行结束，但没有出现启动标记");
+          throw bridgeError("APP_START_MARKER_MISSING", "App 代码执行结束，但没有出现启动标记", true);
         }
         try { FS.syncfs(false, function () {}); } catch (e) {}
         notify("MPOS_APP_RUNNING", { runId: runId });
       }
 
       async function runPackagedApp(payload) {
-        if (!bridgeReady) throw new Error("MicroPythonOS WASM 尚未就绪");
+        if (!bridgeReady) throw bridgeError("WASM_NOT_READY", "MicroPythonOS WASM 尚未就绪", false);
         var runId = String(payload.runId || "");
         var packageName = String(payload.packageName || "");
         var mpkBase64 = String(payload.mpkBase64 || "");
-        if (!/^[a-z0-9_.]+$/.test(packageName)) throw new Error("包名不安全");
-        if (!mpkBase64) throw new Error("没有收到 MPK 数据");
+        if (!/^[a-z0-9_.]+$/.test(packageName)) throw bridgeError("INVALID_RUN_REQUEST", "包名不安全", false);
+        if (!mpkBase64) throw bridgeError("INVALID_RUN_REQUEST", "没有收到 MPK 数据", false);
 
         notify("MPOS_INSTALLING", { runId: runId });
-        await enterRawRepl();
+        await enterPasteRepl(runId);
         var dir = "/apps/" + packageName;
         var script = [
           "import binascii, gc, shutil",
@@ -647,9 +693,9 @@
           "assert __started, 'packaged app failed to start'",
           "print('MPOS_GENERATED_APP_RUNNING')"
         ].join("\n");
-        await rawExec(script);
+        await pasteExec(script);
         if (terminalText.indexOf("MPOS_GENERATED_APP_RUNNING") === -1) {
-          throw new Error("MPK 安装结束，但没有出现启动标记");
+          throw bridgeError("APP_START_MARKER_MISSING", "MPK 安装结束，但没有出现启动标记", true);
         }
         try { FS.syncfs(false, function () {}); } catch (e) {}
         notify("MPOS_APP_RUNNING", { runId: runId });
@@ -678,11 +724,11 @@
           if (bridgeReady) notify("MPOS_READY");
         } else if (message.type === "RUN_APP") {
           runGeneratedApp(message).catch(function (error) {
-            notify("MPOS_ERROR", { runId: String(message.runId || ""), message: String(error && error.message || error) });
+            notify("MPOS_ERROR", errorPayload(error, message.runId));
           });
         } else if (message.type === "RUN_MPK") {
           runPackagedApp(message).catch(function (error) {
-            notify("MPOS_ERROR", { runId: String(message.runId || ""), message: String(error && error.message || error) });
+            notify("MPOS_ERROR", errorPayload(error, message.runId));
           });
         }
       });
@@ -691,7 +737,11 @@
         if (attachBridge()) clearInterval(poll);
       }, 250);
       setTimeout(function () {
-        if (!bridgeReady) notify("MPOS_ERROR", { message: "MicroPythonOS WASM 启动超时" });
+        if (!bridgeReady) notify("MPOS_ERROR", {
+          code: "WASM_STARTUP_TIMEOUT",
+          message: "MicroPythonOS WASM 启动超时",
+          repairable: false
+        });
       }, 120000);
     })();
   </script>
