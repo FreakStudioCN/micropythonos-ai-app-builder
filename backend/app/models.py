@@ -170,6 +170,7 @@ class SessionActionRequest(BaseModel):
 class AuthCredentials(BaseModel):
     username: str = Field(min_length=3, max_length=32)
     password: str = Field(min_length=8, max_length=128)
+    invite_code: str | None = Field(default=None, max_length=16)
 
 
 class DemoSessionRequest(BaseModel):

@@ -106,6 +106,14 @@ interface BillingAccount {
   generation_cost: number;
   initial_credits: number;
 }
+interface GrowthSummary {
+  invite_code: string;
+  referral_count: number;
+  referral_reward: number;
+  task_reward: number;
+  completed_task_keys: string[];
+  credits: number;
+}
 interface RequirementMessage {
   role: "user" | "assistant";
   content: string;
@@ -116,6 +124,14 @@ interface RequirementChatResult {
   refined_prompt: string;
   missing_fields: string[];
   brief: Record<string, unknown>;
+}
+type SharePlatform = "moments" | "xiaohongshu" | "douyin" | "bilibili" | "twitter";
+type GrowthTaskKey = "generate" | "device" | "preview" | `share_${SharePlatform}`;
+interface ShareDraft {
+  title: string;
+  body: string;
+  hashtags: string[];
+  tip: string;
 }
 interface SaveFileHandle {
   createWritable(): Promise<{
@@ -355,12 +371,17 @@ export default function App() {
   const [screenshotBusy, setScreenshotBusy] = useState(false);
   const [continuing, setContinuing] = useState(false);
   const [billingAccount, setBillingAccount] = useState<BillingAccount | null>(null);
+  const [growthSummary, setGrowthSummary] = useState<GrowthSummary | null>(null);
+  const [growthBusy, setGrowthBusy] = useState("");
   const [subscriptionOpen, setSubscriptionOpen] = useState(false);
   const [selectedPlan, setSelectedPlan] = useState<SubscriptionPlan | null>(null);
   const [authStatus, setAuthStatus] = useState<AuthStatus>("loading");
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [authUsername, setAuthUsername] = useState("");
   const [authPassword, setAuthPassword] = useState("");
+  const [authInviteCode, setAuthInviteCode] = useState(
+    () => new URLSearchParams(window.location.search).get("invite")?.trim().toUpperCase() || "",
+  );
   const [authBusy, setAuthBusy] = useState(false);
   const [authError, setAuthError] = useState("");
   const [requirementOpen, setRequirementOpen] = useState(false);
@@ -369,6 +390,16 @@ export default function App() {
   const [requirementBusy, setRequirementBusy] = useState(false);
   const [requirementError, setRequirementError] = useState("");
   const [requirementResult, setRequirementResult] = useState<RequirementChatResult | null>(null);
+  const [sharePlatform, setSharePlatform] = useState<SharePlatform>("moments");
+  const [shareDraft, setShareDraft] = useState<ShareDraft | null>(null);
+  const [shareCompletedPlatforms, setShareCompletedPlatforms] = useState<SharePlatform[]>(() => {
+    try {
+      return JSON.parse(localStorage.getItem("blockless-share-platforms") || "[]") as SharePlatform[];
+    } catch {
+      return [];
+    }
+  });
+  const [mpkDownloaded, setMpkDownloaded] = useState(() => localStorage.getItem("blockless-mpk-downloaded") === "1");
   const [showcaseApps, setShowcaseApps] = useState<ShowcaseApp[]>([]);
   const [showcaseStatus, setShowcaseStatus] = useState<"loading" | "ready" | "error">("loading");
   const [showcaseQuery, setShowcaseQuery] = useState("");
@@ -553,13 +584,20 @@ export default function App() {
     setBillingAccount(account);
     return account;
   };
+  const refreshGrowth = async () => {
+    const response = await apiFetch(`${apiUrl}/api/growth/summary`);
+    if (!response.ok) throw new Error("growth unavailable");
+    const summary = await response.json() as GrowthSummary;
+    setGrowthSummary(summary);
+    return summary;
+  };
   const refreshCapabilities = async () => {
     const response = await apiFetch(`${apiUrl}/api/capabilities`);
     const payload = response.ok ? await response.json() : null;
     setDesktopAvailable(Boolean(payload?.capabilities?.desktop_preview));
   };
   const loadWorkspace = async () => {
-    await Promise.all([refreshHistory(), refreshCapabilities()]);
+    await Promise.all([refreshHistory(), refreshCapabilities(), refreshGrowth()]);
   };
   useEffect(() => {
     const initialize = async () => {
@@ -593,7 +631,11 @@ export default function App() {
       const response = await apiFetch(`${apiUrl}/api/auth/${authMode}`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ username: authUsername, password: authPassword }),
+        body: JSON.stringify({
+          username: authUsername,
+          password: authPassword,
+          ...(authMode === "register" && authInviteCode ? { invite_code: authInviteCode } : {}),
+        }),
       });
       const payload = await response.json().catch(() => ({}));
       if (!response.ok) {
@@ -620,6 +662,7 @@ export default function App() {
     eventStream.current?.close();
     localStorage.removeItem("mpos-session-id");
     setBillingAccount(null);
+    setGrowthSummary(null);
     setSessionState(null);
     setHistory([]);
     setResult(null);
@@ -1781,6 +1824,8 @@ export default function App() {
       anchor.click();
       URL.revokeObjectURL(url);
     }
+    localStorage.setItem("blockless-mpk-downloaded", "1");
+    setMpkDownloaded(true);
     setToast(tr(`已下载真实 ${result.mpk_filename}`, `Downloaded ${result.mpk_filename}`));
   };
 
@@ -1869,6 +1914,161 @@ export default function App() {
     setToast(tr("已把 AI 整理的完整需求填入输入框", "The refined requirement was added to the prompt"));
   };
 
+  const platformName = (platform: SharePlatform) => ({
+    moments: tr("朋友圈", "WeChat Moments"),
+    xiaohongshu: tr("小红书", "Xiaohongshu"),
+    douyin: tr("抖音", "Douyin"),
+    bilibili: tr("B站", "Bilibili"),
+    twitter: "Twitter / X",
+  })[platform];
+
+  const generateShareDraft = (platform: SharePlatform = sharePlatform) => {
+    const siteUrl = "https://mpos.upypi.net/";
+    const idea = (result?.prompt_normalized_zh || prompt).trim().replace(/\s+/g, " ");
+    const projectName = result?.manifest?.name && typeof result.manifest.name === "string"
+      ? result.manifest.name
+      : displayName || tr("我的 MicroPythonOS App", "My MicroPythonOS App");
+    const shortIdea = idea.length > 92 ? `${idea.slice(0, 92)}…` : idea;
+    const drafts: Record<SharePlatform, ShareDraft> = {
+      moments: {
+        title: tr(`我用一句话做出了「${projectName}」`, `I built “${projectName}” from one sentence`),
+        body: tr(
+          `刚刚把一个创意变成了可以在浏览器里运行的 MicroPythonOS App：${shortIdea}\n\n不需要先搭环境，从描述想法、预览、打包到真机部署都在一个页面完成。欢迎打开 Blockless-Make-APP 试试，也欢迎告诉我你会拿它做什么：${siteUrl}`,
+          `I turned an idea into a runnable MicroPythonOS app: ${shortIdea}\n\nDescribe, preview, package, and deploy from one browser page. Try Blockless-Make-APP: ${siteUrl}`,
+        ),
+        hashtags: ["Blockless", "MicroPythonOS", tr("创客", "Maker")],
+        tip: tr("朋友圈适合配一张预览截图；正文保持真实、简短，并邀请朋友反馈。", "Add one preview screenshot and invite honest feedback."),
+      },
+      xiaohongshu: {
+        title: tr(`不会写代码，也能做出硬件 App？我试了下`, `Can you build a hardware app without coding?`),
+        body: tr(
+          `✨ 今天把「${projectName}」做出来了！\n\n我的需求：${shortIdea}\n\n整个过程：\n1️⃣ 用自然语言说出想法\n2️⃣ 在浏览器里直接预览\n3️⃣ 自动生成 MPK\n4️⃣ 需要时部署到 ESP32\n\n最想听听大家的建议：这个创意还缺什么功能？\n🔗 ${siteUrl}`,
+          `✨ Built “${projectName}” today.\n\nIdea: ${shortIdea}\n\nDescribe → Preview → Package → Deploy.\nWhat should I improve next?\n${siteUrl}`,
+        ),
+        hashtags: ["Blockless", "MicroPython", "ESP32", tr("科技教育", "STEM"), tr("创客作品", "MakerProject")],
+        tip: tr("小红书建议使用 3—6 张图：封面、生成过程、浏览器预览、真机效果。", "Use 3–6 images: cover, process, browser preview, and device result."),
+      },
+      douyin: {
+        title: tr(`一句话，真的能生成一个硬件 App 吗？`, `Can one sentence really create a hardware app?`),
+        body: tr(
+          `【3秒开场】我只说了一句话，AI 就开始做 App。\n【过程】输入：${shortIdea}\n浏览器里直接看到效果，再自动打包成 MPK，需要时还能装进 ESP32。\n【结尾】你想让我下一次生成什么？评论区告诉我。\n\n体验入口：${siteUrl}`,
+          `[3-second hook] I gave AI one sentence and it started building an app.\nIdea: ${shortIdea}\nPreview, package, and deploy from the browser. What should I build next?\n${siteUrl}`,
+        ),
+        hashtags: ["Blockless", "AI生成", "ESP32", "MicroPython", tr("科技改变生活", "Tech")],
+        tip: tr("抖音建议 9:16 竖屏，前 3 秒先展示最终效果，全程加字幕。", "Use 9:16 video, show the result in the first 3 seconds, and add subtitles."),
+      },
+      bilibili: {
+        title: tr(`从一句话到真机：用 Blockless 制作「${projectName}」`, `From one sentence to device: building “${projectName}”`),
+        body: tr(
+          `本期演示如何把一个自然语言需求变成可运行的 MicroPythonOS App。\n\n需求：${shortIdea}\n\n章节建议：\n00:00 最终效果\n00:15 需求输入与 AI 分析\n00:45 浏览器 WebAssembly 预览\n01:30 MPK 打包与文件结构\n02:10 ESP32 真机部署\n03:00 复盘与下一版计划\n\n项目入口：${siteUrl}\n欢迎在评论区留下改进建议或新的 App 题目。`,
+          `A complete walkthrough from a natural-language idea to a runnable MicroPythonOS app.\n\nIdea: ${shortIdea}\n\n00:00 Result\n00:15 Requirement\n00:45 WebAssembly preview\n01:30 MPK package\n02:10 ESP32 deployment\n03:00 Next steps\n\n${siteUrl}`,
+        ),
+        hashtags: ["Blockless", "MicroPythonOS", "ESP32", "WebAssembly", tr("开源硬件", "OpenHardware")],
+        tip: tr("B站适合 3—8 分钟完整流程；简介里写清章节、设备型号和可复现入口。", "Use a 3–8 minute walkthrough with chapters, board model, and a reproducible link."),
+      },
+      twitter: {
+        title: tr(`我用一句话做出了 ${projectName}`, `Built ${projectName} from one sentence`),
+        body: tr(
+          `刚刚用 Blockless-Make-APP 把这个想法变成了可运行的 MicroPythonOS App：${shortIdea}\n\n浏览器预览、MPK 打包和 ESP32 部署可以在同一条流程里完成。你会拿它做什么？\n${siteUrl}`,
+          `Just turned this idea into a runnable MicroPythonOS app with Blockless-Make-APP: ${shortIdea}\n\nBrowser preview, MPK packaging, and ESP32 deployment in one flow. What would you build?\n${siteUrl}`,
+        ),
+        hashtags: ["Blockless", "MicroPythonOS", "ESP32", "BuildInPublic"],
+        tip: tr("Twitter / X 建议配一张最终效果图，正文控制简短，并邀请开发者交流。", "Attach one result image, keep the post concise, and invite developer feedback."),
+      },
+    };
+    setSharePlatform(platform);
+    setShareDraft(drafts[platform]);
+    return drafts[platform];
+  };
+
+  const shareText = shareDraft
+    ? `${shareDraft.title}\n\n${shareDraft.body}\n\n${shareDraft.hashtags.map((tag) => `#${tag}`).join(" ")}`
+    : "";
+
+  const markSharePlatformComplete = (platform: SharePlatform) => {
+    setShareCompletedPlatforms((current) => {
+      const next = current.includes(platform) ? current : [...current, platform];
+      localStorage.setItem("blockless-share-platforms", JSON.stringify(next));
+      return next;
+    });
+  };
+
+  const copyShareDraft = async () => {
+    if (!shareDraft) return;
+    await navigator.clipboard.writeText(shareText);
+    markSharePlatformComplete(sharePlatform);
+    setToast(tr(`${platformName(sharePlatform)}文案已复制`, `${platformName(sharePlatform)} copy copied`));
+  };
+
+  const shareWebsite = async () => {
+    const draft = shareDraft || generateShareDraft();
+    const text = `${draft.title}\n\n${draft.body}\n\n${draft.hashtags.map((tag) => `#${tag}`).join(" ")}`;
+    if (navigator.share) {
+      await navigator.share({ title: draft.title, text, url: "https://mpos.upypi.net/" });
+      markSharePlatformComplete(sharePlatform);
+    } else {
+      await navigator.clipboard.writeText(`${text}\nhttps://mpos.upypi.net/`);
+      markSharePlatformComplete(sharePlatform);
+      setToast(tr("浏览器不支持系统分享，内容已复制", "System sharing is unavailable; content copied"));
+    }
+  };
+
+  const completedSession = Boolean(result) && ["completed", "waiting_preview", "waiting_device"].includes(status);
+  const completedGrowthTasks = new Set(growthSummary?.completed_task_keys || []);
+  const taskItems: Array<{
+    key: GrowthTaskKey;
+    done: boolean;
+    eligible: boolean;
+    title: string;
+    detail: string;
+    target: string;
+    platform?: SharePlatform;
+  }> = [
+    { key: "generate", done: completedGrowthTasks.has("generate"), eligible: completedSession, title: tr("生成首个可运行版本", "Generate the first runnable version"), detail: tr("成功生成并通过运行检查后可领取", "Claim after successful generation and runtime checks"), target: "builder" },
+    { key: "device", done: completedGrowthTasks.has("device"), eligible: serialConnected, title: tr("连接真实设备", "Connect a real device"), detail: tr("连接 ESP32 串口设备并确认成功", "Connect and confirm an ESP32 serial device"), target: "builder" },
+    { key: "preview", done: completedGrowthTasks.has("preview"), eligible: wasmReady && Boolean(result), title: tr("完成浏览器预览", "Complete browser preview"), detail: tr("确认 App 在浏览器模拟器中正常运行", "Confirm the app runs in the browser simulator"), target: "preview" },
+    { key: "share_xiaohongshu", done: completedGrowthTasks.has("share_xiaohongshu"), eligible: shareCompletedPlatforms.includes("xiaohongshu"), title: tr("发布小红书宣传", "Post on Xiaohongshu"), detail: tr("生成并发布小红书图文后领取", "Create and publish a Xiaohongshu post"), target: "share-studio", platform: "xiaohongshu" },
+    { key: "share_moments", done: completedGrowthTasks.has("share_moments"), eligible: shareCompletedPlatforms.includes("moments"), title: tr("发布朋友圈宣传", "Post to Moments"), detail: tr("生成并发布朋友圈文案后领取", "Create and publish a Moments post"), target: "share-studio", platform: "moments" },
+    { key: "share_douyin", done: completedGrowthTasks.has("share_douyin"), eligible: shareCompletedPlatforms.includes("douyin"), title: tr("发布抖音宣传", "Post on Douyin"), detail: tr("生成并发布抖音内容后领取", "Create and publish a Douyin post"), target: "share-studio", platform: "douyin" },
+    { key: "share_bilibili", done: completedGrowthTasks.has("share_bilibili"), eligible: shareCompletedPlatforms.includes("bilibili"), title: tr("发布 B 站宣传", "Post on Bilibili"), detail: tr("生成并发布 B 站内容后领取", "Create and publish a Bilibili post"), target: "share-studio", platform: "bilibili" },
+    { key: "share_twitter", done: completedGrowthTasks.has("share_twitter"), eligible: shareCompletedPlatforms.includes("twitter"), title: tr("发布推特宣传", "Post on Twitter / X"), detail: tr("生成并发布 Twitter / X 内容后领取", "Create and publish a Twitter / X post"), target: "share-studio", platform: "twitter" },
+  ];
+  const taskProgress = Math.round(taskItems.filter((item) => item.done).length / taskItems.length * 100);
+
+  const claimGrowthTask = async (taskKey: GrowthTaskKey) => {
+    if (growthBusy) return;
+    setGrowthBusy(taskKey);
+    try {
+      const response = await apiFetch(`${apiUrl}/api/growth/tasks/${taskKey}/claim`, { method: "POST" });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(typeof payload.detail === "string" ? payload.detail : tr("领取失败", "Claim failed"));
+      setGrowthSummary(payload as GrowthSummary);
+      if (payload.account) setBillingAccount(payload.account as BillingAccount);
+      setToast(tr("任务完成，已获得 5 点", "Task complete. You earned 5 credits."));
+    } catch (error) {
+      setToast(error instanceof Error ? error.message : tr("领取失败", "Claim failed"));
+    } finally {
+      setGrowthBusy("");
+    }
+  };
+
+  const openGrowthTask = (item: typeof taskItems[number]) => {
+    if (item.platform) {
+      setSharePlatform(item.platform);
+      setShareDraft(null);
+    }
+    document.getElementById(item.target)?.scrollIntoView({ behavior: "smooth", block: "start" });
+  };
+
+  const inviteLink = growthSummary
+    ? `${window.location.origin}${window.location.pathname}?invite=${growthSummary.invite_code}`
+    : "";
+  const copyInviteLink = async () => {
+    if (!inviteLink) return;
+    await navigator.clipboard.writeText(inviteLink);
+    setToast(tr("邀请链接已复制", "Invite link copied"));
+  };
+
   if (publicSystemStatus.maintenance) {
     return (
       <div className="auth-page">
@@ -1909,7 +2109,7 @@ export default function App() {
                 <h1>{authMode === "login" ? tr("欢迎回来", "Welcome back") : tr("创建账户", "Create your account")}</h1>
                 <p>{authMode === "login"
                   ? tr("登录后继续查看自己的项目和剩余点数。", "Sign in to restore your projects and credits.")
-                  : tr("每个新账号获得 50 个体验点；首次生成或继续修改成功均扣 10 点，生成失败不扣点。", "Each new account receives 50 trial credits. A successful new App or continued revision costs 10 credits; failed runs are free.")}</p>
+                  : tr("每个新账号获得 20 点，可成功生成 2 次；邀请好友和完成任务还能继续赚点数。", "Each new account receives 20 credits for 2 successful generations. Invite friends and complete tasks to earn more.")}</p>
               </div>
               <form className="auth-form" onSubmit={submitAuth}>
                 <label htmlFor="auth-username">{tr("用户名", "Username")}</label>
@@ -1934,6 +2134,17 @@ export default function App() {
                   autoComplete={authMode === "login" ? "current-password" : "new-password"}
                   required
                 />
+                {authMode === "register" && <>
+                  <label htmlFor="auth-invite-code">{tr("邀请码（选填）", "Invite code (optional)")}</label>
+                  <input
+                    id="auth-invite-code"
+                    value={authInviteCode}
+                    onChange={(event) => setAuthInviteCode(event.target.value.trim().toUpperCase())}
+                    maxLength={16}
+                    autoComplete="off"
+                    placeholder={tr("填写朋友的邀请码", "Enter a friend's invite code")}
+                  />
+                </>}
                 {authError && <div className="auth-error">{authError}</div>}
                 <button className="main-button auth-submit" type="submit" disabled={authBusy}>
                   {authBusy
@@ -1970,11 +2181,12 @@ export default function App() {
             {billingAccount?.username}
             {billingAccount?.role === "superadmin" ? ` · ${tr("管理员", "Admin")}` : ""}
           </span>
+          <a className="task-shortcut" href="#tasks">{tr("任务", "Tasks")}</a>
           <button className="credits-button" onClick={() => {
             setSelectedPlan(null);
             setSubscriptionOpen(true);
           }}>
-            <span>◆</span>{billingAccount?.unlimited_credits ? "∞" : (billingAccount?.credits ?? 50)} {tr("点", "credits")}
+            <span>◆</span>{billingAccount?.unlimited_credits ? "∞" : (billingAccount?.credits ?? 20)} {tr("点", "credits")}
           </button>
           <button className="subscription-button" onClick={() => {
             setSelectedPlan(null);
@@ -2141,6 +2353,108 @@ export default function App() {
           <div><h2>{tr("历史会话", "Session history")}</h2><span>{tr("刷新页面或关闭浏览器后仍可恢复", "Restore work after refresh or closing the browser")}</span></div>
           <div className="history-list">{history.slice(0, 5).map((item) => <button key={item.session_id} onClick={() => void restoreSession(item.session_id)}><strong>{item.input.display_name}</strong><span>{item.revision_id} · {item.status} · {item.checkpoint_id}</span><small>{item.input.prompt_original}</small></button>)}</div>
         </section>}
+
+        <section className="card growth-hub" id="tasks">
+          <div className="invite-panel">
+            <div className="invite-copy">
+              <span>{tr("邀请好友 · 获得生成点数", "Invite friends · earn generation credits")}</span>
+              <h2>{tr("每邀请 1 位新用户，获得 5 点", "Earn 5 credits for every new user")}</h2>
+              <p>{tr("好友必须通过你的邀请码完成新账号注册。成功邀请 2 人可获得 10 点，也就是 1 次 App 生成机会。", "A friend must create a new account with your invite code. Two successful referrals earn 10 credits, equal to one app generation.")}</p>
+            </div>
+            <div className="invite-stats" aria-label={tr("邀请数据", "Referral stats")}>
+              <div><strong>{growthSummary?.referral_count || 0}</strong><span>{tr("成功邀请", "referrals")}</span></div>
+              <div><strong>+{(growthSummary?.referral_count || 0) * 5}</strong><span>{tr("已获点数", "credits earned")}</span></div>
+            </div>
+            <div className="invite-code">
+              <label>{tr("我的邀请码", "My invite code")}</label>
+              <div className="invite-code-row">
+                <code>{growthSummary?.invite_code || "--------"}</code>
+                <button disabled={!inviteLink} onClick={() => void copyInviteLink()}>{tr("复制邀请链接", "Copy invite link")}</button>
+              </div>
+              <small>{tr("新用户打开邀请链接注册后，奖励会自动到账。每个新账号只能绑定一次邀请关系。", "Rewards arrive automatically after a new user registers through the link. Each new account can be referred only once.")}</small>
+            </div>
+          </div>
+
+          <div className="reality-progress">
+            <div>
+              <strong>{taskProgress}%</strong>
+              <span>{tr("任务完成进度", "Task progress")}</span>
+            </div>
+            <progress max="100" value={taskProgress} aria-label={tr("任务完成进度", "Task progress")} />
+            <small>{tr(`已领取 ${taskItems.filter((item) => item.done).length} / ${taskItems.length} 项奖励；每项任务可获得 5 点。`, `${taskItems.filter((item) => item.done).length} / ${taskItems.length} rewards claimed; each task earns 5 credits.`)}</small>
+          </div>
+
+          <div className="task-grid">
+            {taskItems.map((item, index) => <article className={`task-item ${item.done ? "done" : ""}`} key={item.key}>
+              <span className="task-state" aria-hidden="true">{item.done ? "✓" : index + 1}</span>
+              <div>
+                <strong>{item.title}<span className="task-reward">+5</span></strong>
+                <p>{item.detail}</p>
+              </div>
+              <button
+                disabled={item.done || growthBusy === item.key}
+                onClick={() => item.eligible ? void claimGrowthTask(item.key) : openGrowthTask(item)}
+              >
+                {item.done
+                  ? tr("已领取", "Claimed")
+                  : growthBusy === item.key
+                    ? tr("领取中…", "Claiming…")
+                    : item.eligible
+                      ? tr("领取 5 点", "Claim 5")
+                      : tr("去完成", "Do task")}
+              </button>
+            </article>)}
+          </div>
+
+          <div className="share-studio" id="share-studio">
+            <div className="share-heading">
+              <div>
+                <span>{tr("传播工作台", "Sharing studio")}</span>
+                <h3>{tr("一键生成平台文案", "Generate platform-ready copy")}</h3>
+              </div>
+              <p>{tr("根据当前 App 自动改写成适合不同社区的内容。", "Turn the current app into copy tailored for each community.")}</p>
+            </div>
+
+            <div className="share-platforms" role="tablist" aria-label={tr("选择分享平台", "Choose a sharing platform")}>
+              {(["moments", "xiaohongshu", "douyin", "bilibili", "twitter"] as SharePlatform[]).map((platform) => <button
+                className={sharePlatform === platform ? "active" : ""}
+                key={platform}
+                role="tab"
+                aria-selected={sharePlatform === platform}
+                onClick={() => {
+                  setSharePlatform(platform);
+                  setShareDraft(null);
+                }}
+              >
+                {platform === "moments" ? tr("朋友圈", "Moments") : platformName(platform)}
+              </button>)}
+            </div>
+
+            {!shareDraft ? <div className="share-empty">
+              <strong>{tr("选择平台，生成一份可以直接使用的文案", "Choose a platform and create ready-to-use copy")}</strong>
+              <span>{tr("会结合你的需求、App 名称和当前成果，不会虚构销量或用户数据。", "It uses your prompt, app name, and real progress without inventing sales or user metrics.")}</span>
+              <button onClick={() => generateShareDraft()}>{tr("生成分享文案", "Generate copy")}</button>
+            </div> : <div className="share-draft">
+              <label>
+                <span>{tr("标题", "Title")}</span>
+                <input readOnly value={shareDraft.title} />
+              </label>
+              <label>
+                <span>{tr("正文", "Post")}</span>
+                <textarea readOnly rows={8} value={shareDraft.body} />
+              </label>
+              <div className="share-tags">{shareDraft.hashtags.map((tag) => <span key={tag}>#{tag}</span>)}</div>
+              <p className="share-tip">{shareDraft.tip}</p>
+              <div className="share-actions">
+                <button onClick={() => generateShareDraft()}>{tr("重新生成", "Regenerate")}</button>
+                <button className="primary" onClick={() => void copyShareDraft()}>{tr("复制全部文案", "Copy all")}</button>
+                <button onClick={() => void shareWebsite()}>{tr("系统分享", "Share")}</button>
+              </div>
+            </div>}
+
+            <div className="share-note">{tr("说明：朋友圈、小红书、抖音、B 站和 Twitter / X 暂不提供通用的网页自动发布接口。请实际发布后回到上方任务卡领取奖励；这里只生成文案、复制内容和调用系统分享。", "Note: these platforms do not offer a universal browser auto-publishing API. Publish for real, then return to the task card above to claim the reward; this studio only generates copy, copies content, and invokes system sharing.")}</div>
+          </div>
+        </section>
 
         <details className="card showcase-library" id="showcase">
           <summary className="section-heading">

@@ -25,7 +25,7 @@ from sqlalchemy.engine import Connection, Engine
 from .database import create_database_engine, database_engine
 
 
-INITIAL_CREDITS = 50
+INITIAL_CREDITS = 20
 GENERATION_COST = 10
 GENERATION_LIMIT = INITIAL_CREDITS // GENERATION_COST
 metadata = MetaData()
@@ -140,6 +140,46 @@ class BillingService:
             if not unlimited and account["credits"] < GENERATION_COST:
                 raise InsufficientCredits(account["credits"], GENERATION_COST)
             return self._public(account, unlimited=unlimited)
+
+    def award_credits(
+        self,
+        user_id: str,
+        idempotency_key: str,
+        *,
+        amount: int = 5,
+        entry_type: str = "reward",
+        unlimited: bool = False,
+    ) -> dict[str, Any]:
+        """Award credits exactly once for a referral or completed growth task."""
+        if amount <= 0:
+            raise ValueError("奖励点数必须大于 0")
+        with self._lock, self.engine.begin() as connection:
+            account = self._load_or_create(connection, user_id, for_update=True)
+            if self._has_transaction(connection, user_id, idempotency_key):
+                return self._public(account, unlimited=unlimited)
+            updated_at = _now()
+            next_credits = account["credits"] + amount
+            connection.execute(
+                update(billing_accounts)
+                .where(billing_accounts.c.user_id == user_id)
+                .values(credits=next_credits, updated_at=updated_at)
+            )
+            self._append_ledger(
+                connection,
+                user_id=user_id,
+                idempotency_key=idempotency_key,
+                entry_type=entry_type,
+                amount=amount,
+                created_at=updated_at,
+            )
+            return self._public(
+                {
+                    **dict(account),
+                    "credits": next_credits,
+                    "updated_at": updated_at,
+                },
+                unlimited=unlimited,
+            )
 
     def _load_or_create(
         self,

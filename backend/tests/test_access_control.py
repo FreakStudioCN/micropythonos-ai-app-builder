@@ -54,10 +54,15 @@ class AccessControlTests(unittest.TestCase):
         client: TestClient,
         username: str,
         password: str = "correct-horse-123",
+        invite_code: str | None = None,
     ) -> dict:
         response = client.post(
             "/api/auth/register",
-            json={"username": username, "password": password},
+            json={
+                "username": username,
+                "password": password,
+                **({"invite_code": invite_code} if invite_code else {}),
+            },
         )
         self.assertEqual(response.status_code, 201, response.text)
         self.assertIn("HttpOnly", response.headers["set-cookie"])
@@ -74,7 +79,7 @@ class AccessControlTests(unittest.TestCase):
 
     def test_registration_hashes_password_and_restores_login(self) -> None:
         account = self._register(self.client_a, "maker_a")
-        self.assertEqual(account["credits"], 50)
+        self.assertEqual(account["credits"], 20)
         self.assertEqual(account["username"], "maker_a")
         self.assertEqual(account["role"], ROLE_USER)
         self.assertFalse(account["unlimited_credits"])
@@ -113,6 +118,50 @@ class AccessControlTests(unittest.TestCase):
         logout = self.client_b.post("/api/auth/logout")
         self.assertEqual(logout.status_code, 200)
         self.assertEqual(self.client_b.get("/api/user").status_code, 401)
+
+    def test_referral_and_task_rewards_are_idempotent(self) -> None:
+        inviter = self._register(self.client_a, "referral_owner")
+        growth = self.client_a.get("/api/growth/summary")
+        self.assertEqual(growth.status_code, 200, growth.text)
+        invite_code = growth.json()["invite_code"]
+        self.assertEqual(len(invite_code), 8)
+
+        self._register(self.client_b, "referred_maker", invite_code=invite_code)
+        inviter_account = self.client_a.get("/api/billing/account").json()
+        self.assertEqual(inviter_account["credits"], 25)
+        self.assertEqual(
+            self.client_a.get("/api/growth/summary").json()["referral_count"],
+            1,
+        )
+
+        first = self.client_a.post("/api/growth/tasks/generate/claim")
+        second = self.client_a.post("/api/growth/tasks/generate/claim")
+        self.assertEqual(first.status_code, 200, first.text)
+        self.assertEqual(second.status_code, 200, second.text)
+        self.assertEqual(second.json()["account"]["credits"], 30)
+        self.assertEqual(second.json()["completed_task_keys"], ["generate"])
+
+        invalid_client = TestClient(main_module.app)
+        try:
+            invalid = invalid_client.post(
+                "/api/auth/register",
+                json={
+                    "username": "invalid_invite_user",
+                    "password": "correct-horse-123",
+                    "invite_code": "NOTREAL1",
+                },
+            )
+            self.assertEqual(invalid.status_code, 400, invalid.text)
+            login = invalid_client.post(
+                "/api/auth/login",
+                json={
+                    "username": "invalid_invite_user",
+                    "password": "correct-horse-123",
+                },
+            )
+            self.assertEqual(login.status_code, 401)
+        finally:
+            invalid_client.close()
 
     def test_sessions_artifacts_and_permissions_are_isolated(self) -> None:
         self._register(self.client_a, "maker_a")
@@ -153,9 +202,9 @@ class AccessControlTests(unittest.TestCase):
         ).json()
         self.assertEqual(selected["user_id"], account_a["user_id"])
         self.assertNotEqual(selected["user_id"], account_b["user_id"])
-        self.assertEqual(selected["credits"], 50)
+        self.assertEqual(selected["credits"], 20)
         self.assertEqual(selected["generation_cost"], 10)
-        self.assertEqual(selected["generations_remaining"], 5)
+        self.assertEqual(selected["generations_remaining"], 2)
         self.assertFalse(selected["unlimited_credits"])
 
     def test_credits_settle_once_for_each_successful_revision(self) -> None:
@@ -177,13 +226,13 @@ class AccessControlTests(unittest.TestCase):
                 json={"idempotency_key": first_action_key},
             )
         self.assertEqual(started.status_code, 202, started.text)
-        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 50)
+        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 20)
 
         failed = main_module.session_service._read(session_id)
         failed["last_action_idempotency_key"] = first_action_key
         failed["status"] = "failed"
         main_module.session_service._write_state(failed)
-        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 50)
+        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 20)
 
         completed = main_module.session_service._read(session_id)
         completed["status"] = "completed"
@@ -191,7 +240,7 @@ class AccessControlTests(unittest.TestCase):
         main_module.session_service._write_state(
             main_module.session_service._read(session_id)
         )
-        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 40)
+        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 10)
 
         revised = self.client_a.post(
             f"/api/sessions/{session_id}/revisions",
@@ -216,7 +265,7 @@ class AccessControlTests(unittest.TestCase):
         revision_failed["last_action_idempotency_key"] = second_action_key
         revision_failed["status"] = "failed"
         main_module.session_service._write_state(revision_failed)
-        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 40)
+        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 10)
 
         revision_completed = main_module.session_service._read(session_id)
         revision_completed["status"] = "completed"
@@ -224,11 +273,11 @@ class AccessControlTests(unittest.TestCase):
         main_module.session_service._write_state(
             main_module.session_service._read(session_id)
         )
-        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 30)
+        self.assertEqual(self.client_a.get("/api/billing/account").json()["credits"], 0)
 
     def test_continued_revision_requires_ten_available_credits(self) -> None:
         account = self._register(self.client_a, "empty_revision_maker")
-        for index in range(5):
+        for index in range(2):
             main_module.billing_service.consume_generation(
                 account["user_id"],
                 f"deplete-for-revision-{index}",
