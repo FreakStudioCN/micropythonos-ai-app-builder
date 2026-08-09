@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import httpx
 
+from app import generator
 from app.generator import (
     UpstreamGenerationError,
     _call_deepseek,
@@ -37,11 +38,11 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
             "ZHIPU_API_KEY": self.zhipu_key,
             "ZHIPU_BASE_URL": "https://zhipu.invalid/v4",
             "ZHIPU_GLM52_MODEL": "glm52-test",
-            "AI_PROVIDER_ORDER_SIMPLE": "zhipu_glm52,kimi_k27,deepseek",
-            "AI_PROVIDER_ORDER_STANDARD": "zhipu_glm52,kimi_k27,deepseek",
-            "AI_PROVIDER_ORDER_COMPLEX": "zhipu_glm52,kimi_k27,deepseek",
-            "AI_PROVIDER_ORDER_REVISION": "zhipu_glm52,kimi_k27,deepseek",
-            "AI_PROVIDER_ORDER_REPAIR": "zhipu_glm52,kimi_k27,deepseek",
+            "AI_PROVIDER_ORDER_SIMPLE": "kimi,zhipu_glm52,deepseek",
+            "AI_PROVIDER_ORDER_STANDARD": "kimi,zhipu_glm52,deepseek",
+            "AI_PROVIDER_ORDER_COMPLEX": "kimi,zhipu_glm52,deepseek",
+            "AI_PROVIDER_ORDER_REVISION": "kimi,zhipu_glm52,deepseek",
+            "AI_PROVIDER_ORDER_REPAIR": "kimi,zhipu_glm52,deepseek",
             "AI_UPSTREAM_MAX_RETRIES": "0",
             "AI_RETRY_BACKOFF_SECONDS": "0",
             "AI_CONNECT_TIMEOUT_SECONDS": "1",
@@ -139,14 +140,14 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
                 excluded_providers={"zhipu_glm52"},
             )
 
-        self.assertEqual(meta["provider"], "kimi_k27")
-        self.assertEqual(meta["attempted_providers"], ["kimi_k27"])
+        self.assertEqual(meta["provider"], "kimi")
+        self.assertEqual(meta["attempted_providers"], ["kimi"])
         self.assertEqual(
             client.post.await_args.args[0],
             "https://kimi.invalid/v1/chat/completions",
         )
 
-    async def test_kimi_omits_unsupported_temperature(self) -> None:
+    async def test_kimi_uses_instant_mode_and_omits_temperature(self) -> None:
         client = self._client(self._response(200, model="kimi-served"))
         with patch.dict(
             os.environ,
@@ -162,9 +163,9 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meta["provider"], "kimi")
         payload = client.post.await_args.kwargs["json"]
         self.assertNotIn("temperature", payload)
-        self.assertNotIn("thinking", payload)
+        self.assertEqual(payload["thinking"], {"type": "disabled"})
         self.assertEqual(payload["response_format"], {"type": "json_object"})
-        self.assertEqual(payload["max_tokens"], 10_000)
+        self.assertEqual(payload["max_tokens"], 5_200)
 
     async def test_streaming_response_preserves_complete_app_json(self) -> None:
         generated = {
@@ -235,6 +236,89 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
         assert client.payload is not None
         self.assertTrue(client.payload["stream"])
 
+    async def test_reasoning_json_snippets_do_not_hide_final_app_payload(self) -> None:
+        generated = {
+            "summary": "gomoku",
+            "app_code": (
+                "import lvgl as lv\n"
+                "from mpos import Activity\n\n"
+                "class GeneratedApp(Activity):\n"
+                "    pass\n"
+            ),
+            "acceptance_tests": ["starts"],
+        }
+        message = {
+            "content": "",
+            "reasoning_content": (
+                "I should produce an object like {}. The completed result is:\n"
+                + json.dumps(generated, ensure_ascii=False)
+            ),
+        }
+
+        parsed = generator._parse_model_json(message)
+
+        self.assertEqual(parsed["app_code"], generated["app_code"])
+
+    async def test_incomplete_content_json_does_not_hide_reasoning_app_payload(self) -> None:
+        generated = {
+            "summary": "calendar",
+            "app_code": (
+                "import lvgl as lv\n"
+                "from mpos import Activity\n\n"
+                "class GeneratedApp(Activity):\n"
+                "    pass\n"
+            ),
+            "acceptance_tests": ["starts"],
+        }
+        parsed = generator._parse_model_json(
+            {
+                "content": "{}",
+                "reasoning_content": json.dumps(generated, ensure_ascii=False),
+            }
+        )
+
+        self.assertEqual(parsed["app_code"], generated["app_code"])
+
+    async def test_streaming_multipart_content_is_parsed(self) -> None:
+        generated = {
+            "summary": "multipart",
+            "app_code": (
+                "import lvgl as lv\n"
+                "from mpos import Activity\n\n"
+                "class GeneratedApp(Activity):\n"
+                "    pass\n"
+            ),
+            "acceptance_tests": ["starts"],
+        }
+        body = json.dumps(generated, ensure_ascii=False)
+
+        class FakeResponse:
+            async def aiter_lines(self):
+                yield "data: " + json.dumps(
+                    {
+                        "model": "kimi-streamed",
+                        "choices": [
+                            {
+                                "delta": {
+                                    "content": [
+                                        {"type": "text", "text": body},
+                                    ]
+                                },
+                                "finish_reason": "stop",
+                            }
+                        ],
+                    }
+                )
+                yield "data: [DONE]"
+
+        _body, _choice, message = await generator._collect_streaming_completion(
+            FakeResponse(),
+            default_model="kimi-default",
+        )
+        parsed = generator._parse_model_json(message)
+
+        self.assertEqual(parsed["app_code"], generated["app_code"])
+
     async def test_auto_retries_then_fails_over(self) -> None:
         client = self._client(
             self._response(503),
@@ -250,11 +334,11 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(client.post.await_count, 3)
-        self.assertEqual(meta["provider"], "kimi_k27")
+        self.assertEqual(meta["provider"], "zhipu_glm52")
         self.assertTrue(meta["failover_used"])
         self.assertEqual(
             meta["attempted_providers"],
-            ["zhipu_glm52", "kimi_k27"],
+            ["kimi", "zhipu_glm52"],
         )
         self.assertEqual(
             [item["outcome"] for item in meta["provider_attempts"]],
@@ -278,7 +362,7 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meta["provider"], "deepseek")
         self.assertEqual(
             meta["attempted_providers"],
-            ["zhipu_glm52", "kimi_k27", "deepseek"],
+            ["kimi", "zhipu_glm52", "deepseek"],
         )
         self.assertTrue(meta["failover_used"])
 
@@ -309,7 +393,7 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(error.failover_allowed)
                 self.assertEqual(
                     error.details["attempted_providers"],
-                    ["zhipu_glm52"],
+                    ["kimi"],
                 )
                 self.assertEqual(client.post.await_count, 1)
                 self.assertEqual(
@@ -412,10 +496,10 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
                 GenerateRequest(prompt="build a test app", ai_provider="auto")
             )
 
-        self.assertEqual(meta["attempted_providers"], ["kimi_k27"])
+        self.assertEqual(meta["attempted_providers"], ["zhipu_glm52"])
         self.assertEqual(
             second_client.post.await_args.args[0],
-            "https://kimi.invalid/v1/chat/completions",
+            "https://zhipu.invalid/v4/chat/completions",
         )
 
     async def test_half_open_circuit_allows_only_one_probe(self) -> None:
@@ -510,8 +594,45 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(hasattr(default_request, "ai_provider"))
         self.assertFalse(hasattr(explicit_request, "ai_provider"))
 
-    async def test_complex_request_prefers_glm52(self) -> None:
-        client = self._client(self._response(200, model="glm52-served"))
+    async def test_streaming_wall_timeout_fails_over_despite_provider_activity(self) -> None:
+        calls: list[str] = []
+
+        async def legacy_call(*_: object, **__: object):
+            # Read the selected provider through the public URL-equivalent
+            # result: the first call stalls, the fallback succeeds.
+            calls.append("call")
+            if len(calls) == 1:
+                await asyncio.sleep(0.2)
+            return (
+                {
+                    "summary": "ok",
+                    "app_code": "print('ok')",
+                    "acceptance_tests": ["starts", "responds"],
+                },
+                "served-model",
+                {},
+            )
+
+        env = self._env(
+            AI_STREAM_RESPONSES="1",
+            AI_PROVIDER_ORDER_SIMPLE="zhipu_glm52,kimi_k27",
+            ZHIPU_WALL_TIMEOUT_SECONDS="0.05",
+            KIMI_WALL_TIMEOUT_SECONDS="1",
+            AI_OVERALL_TIMEOUT_SECONDS="2",
+        )
+        with patch.dict(os.environ, env, clear=True), patch(
+            "app.generator._call_deepseek_legacy", side_effect=legacy_call
+        ):
+            _, _, meta = await _call_deepseek(
+                GenerateRequest(prompt="build a test app", ai_provider="auto")
+            )
+
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(meta["provider"], "kimi_k27")
+        self.assertEqual(meta["provider_attempts"][0]["outcome"], "timeout")
+
+    async def test_complex_request_prefers_kimi(self) -> None:
+        client = self._client(self._response(200, model="kimi-code-served"))
         with patch.dict(os.environ, self._env(), clear=True), patch(
             "app.generator.httpx.AsyncClient", return_value=client
         ):
@@ -523,13 +644,13 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(meta["routing_tier"], "complex")
-        self.assertEqual(meta["provider"], "zhipu_glm52")
+        self.assertEqual(meta["provider"], "kimi")
         self.assertEqual(
             client.post.await_args.args[0],
-            "https://zhipu.invalid/v4/chat/completions",
+            "https://kimi.invalid/v1/chat/completions",
         )
 
-    async def test_revision_prefers_glm52(self) -> None:
+    async def test_revision_prefers_kimi(self) -> None:
         client = self._client(self._response(200, model="glm52-served"))
         with patch.dict(os.environ, self._env(), clear=True), patch(
             "app.generator.httpx.AsyncClient", return_value=client
@@ -543,10 +664,10 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(meta["routing_tier"], "revision")
-        self.assertEqual(meta["provider"], "zhipu_glm52")
+        self.assertEqual(meta["provider"], "kimi")
         self.assertEqual(
             client.post.await_args.args[0],
-            "https://zhipu.invalid/v4/chat/completions",
+            "https://kimi.invalid/v1/chat/completions",
         )
 
     def test_previous_code_routes_to_high_quality_revision_tier(self) -> None:

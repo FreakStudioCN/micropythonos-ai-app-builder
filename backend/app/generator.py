@@ -488,6 +488,33 @@ def _parse_model_json(message: dict[str, Any]) -> dict[str, Any]:
             current = parsed.strip()
         return None
 
+    def payload_score(payload: dict[str, Any]) -> int:
+        """Prefer the actual App contract over JSON snippets in reasoning.
+
+        Reasoning models frequently mention small JSON examples (including an
+        empty ``{}``) before emitting the final answer.  Returning the first
+        decodable object therefore turns a valid provider response into a
+        misleading "missing app_code" failure.  Only an object that normalizes
+        to real Python App source is eligible for selection.
+        """
+
+        normalized = _normalize_generation_payload(payload)
+        code = normalized.get("app_code")
+        if not isinstance(code, str) or not code.strip():
+            return 0
+        score = 100
+        if "import lvgl" in code:
+            score += 10
+        if "from mpos import Activity" in code:
+            score += 10
+        if isinstance(normalized.get("acceptance_tests"), list):
+            score += 2
+        if normalized.get("summary"):
+            score += 1
+        return score
+
+    parsed_candidates: list[dict[str, Any]] = []
+
     for raw in candidates:
         if not raw:
             continue
@@ -501,14 +528,23 @@ def _parse_model_json(message: dict[str, Any]) -> dict[str, Any]:
             cleaned = fenced.group(1).strip()
         parsed_object = load_object(cleaned)
         if parsed_object is not None:
-            return parsed_object
+            parsed_candidates.append(parsed_object)
         for match in re.finditer(r"\{", cleaned):
             try:
                 parsed, _end = decoder.raw_decode(cleaned[match.start() :])
             except json.JSONDecodeError:
                 continue
             if isinstance(parsed, dict):
-                return parsed
+                parsed_candidates.append(parsed)
+
+    if parsed_candidates:
+        best_payload = max(parsed_candidates, key=payload_score)
+        # Parsing and App-contract validation are separate stages.  Prefer the
+        # candidate that contains real source across content *and* reasoning,
+        # but still return a syntactically valid JSON object when every
+        # candidate is incomplete; the generation loop then emits the precise
+        # missing app_code / acceptance_tests error and can repair or fall back.
+        return best_payload
 
     # Last-resort compatibility for models that ignored JSON mode but still
     # returned one complete Python source fence.  The normal code/API/product
@@ -791,20 +827,22 @@ async def _call_deepseek_legacy(
         "kimi_k27": "KIMI_MAX_OUTPUT_TOKENS",
         "deepseek": "DEEPSEEK_MAX_OUTPUT_TOKENS",
     }.get(provider_id, "AI_MAX_OUTPUT_TOKENS")
-    # A complete response contains both the generated MicroPython source and
-    # the surrounding JSON contract.  The previous 4.6k/5.2k limits routinely
-    # cut game and multi-screen apps in the middle of the JSON document.  Keep
-    # provider-specific safety floors so an old deployment environment cannot
-    # silently reintroduce those truncated, unparseable responses.
-    token_policy = {
-        "zhipu_glm52": (10_000, 8_000, 20_000),
-        "kimi": (12_000, 10_000, 24_000),
-        "kimi_k27": (12_000, 10_000, 24_000),
-        "deepseek": (8_000, 6_000, 16_000),
+    # Large unconditional output budgets make reasoning-oriented providers
+    # spend minutes filling a response even for a one-screen utility. Scale the
+    # budget with the actual request instead. The upper bounds also prevent an
+    # old 12k/24k deployment setting from turning a small request into a
+    # ten-minute generation.
+    routing_tier, _ = _classify_request_complexity(request, correction)
+    tier_token_policy = {
+        "simple": (5_000, 3_500, 6_000),
+        "standard": (6_500, 4_500, 8_000),
+        "complex": (8_500, 6_000, 10_000),
+        "revision": (8_500, 6_000, 10_000),
+        "repair": (7_500, 5_000, 9_000),
     }
-    default_tokens, minimum_tokens, maximum_tokens = token_policy.get(
-        provider_id,
-        (8_000, 6_000, 16_000),
+    default_tokens, minimum_tokens, maximum_tokens = tier_token_policy.get(
+        routing_tier,
+        tier_token_policy["standard"],
     )
     max_tokens = max(
         minimum_tokens,
@@ -828,13 +866,14 @@ async def _call_deepseek_legacy(
         ],
         "response_format": {"type": "json_object"},
         "max_tokens": max_tokens,
-        # GLM-5.2 enables deep thinking by default. App generation already has
-        # deterministic validators and repair passes, so disabling model-side
-        # thinking removes a long, invisible reasoning phase and makes JSON
-        # output far more predictable. Kimi rejects this parameter with 400.
+        # GLM and current Kimi K2 models enable deep thinking by default. App
+        # generation already has deterministic validators and repair passes,
+        # so instant mode is both faster and more predictable. Moonshot's
+        # current API documents the same ``thinking: disabled`` contract for
+        # K2.5/K2.6. K2.7 Code currently rejects that option, so it is excluded.
         **(
             {"thinking": {"type": "disabled"}}
-            if provider_id in {"deepseek", "zhipu_glm52"}
+            if provider_id in {"deepseek", "zhipu_glm52", "kimi"}
             else {}
         ),
         # Kimi K2.6 and K2.7 reject custom temperature values with HTTP 400.
@@ -1738,6 +1777,71 @@ def _normalize_lvgl_code(code: str) -> tuple[str, list[str]]:
             "已将旧式 align(base, align, x, y) 转换为 align_to(base, align, x, y)"
         )
 
+    # Providers occasionally ignore the explicit 34px touch-target rule by a
+    # few pixels.  That is deterministic geometry, so correct literal button
+    # heights locally instead of spending another slow model round trip on an
+    # otherwise valid application.  Dynamic sizes remain untouched and still
+    # have to satisfy the visual validator.
+    try:
+        button_tree = ast.parse(normalized)
+    except SyntaxError:
+        button_tree = None
+    button_height_replacements: list[tuple[int, int, bytes]] = []
+    if button_tree is not None:
+        button_names: set[str] = set()
+        for node in ast.walk(button_tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            value = node.value
+            if not (
+                isinstance(value, ast.Call)
+                and _dotted_name(value.func) == "lv.button"
+            ):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                target_name = _dotted_name(target)
+                if target_name:
+                    button_names.add(target_name)
+
+        encoded = normalized.encode("utf-8")
+        line_offsets: list[int] = []
+        offset = 0
+        for line in normalized.splitlines(keepends=True):
+            line_offsets.append(offset)
+            offset += len(line.encode("utf-8"))
+
+        def replace_button_height(node: ast.AST) -> None:
+            if node.end_lineno is None or node.end_col_offset is None:
+                return
+            start = line_offsets[node.lineno - 1] + node.col_offset
+            end = line_offsets[node.end_lineno - 1] + node.end_col_offset
+            button_height_replacements.append((start, end, b"34"))
+
+        for node in ast.walk(button_tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            receiver = _dotted_name(node.func.value)
+            if receiver not in button_names:
+                continue
+            if node.func.attr == "set_size" and len(node.args) >= 2:
+                height_node = node.args[1]
+            elif node.func.attr == "set_height" and node.args:
+                height_node = node.args[0]
+            else:
+                continue
+            height = _numeric_literal(height_node)
+            if height is not None and height < 34:
+                replace_button_height(height_node)
+
+        for start, end, replacement in sorted(
+            button_height_replacements, reverse=True
+        ):
+            encoded = encoded[:start] + replacement + encoded[end:]
+        normalized = encoded.decode("utf-8")
+    if button_height_replacements:
+        applied.append("已自动将过小的固定触控按钮高度提升到 34px")
+
     # Clamp only literal set_pos(x, y) calls for widgets whose literal size is
     # known.  A model can produce a polished, functional app with one object a
     # few pixels outside the 320x240 preview.  Sending the entire app through
@@ -2080,14 +2184,16 @@ LEGACY_PROVIDER_ALIASES = {
 }
 
 DEFAULT_PROVIDER_ORDERS = {
-    # App generation is a coding task even when the requested product is
-    # simple. K2.7 Code reliably returns final content, while K2.6 may spend a
-    # truncated response entirely on reasoning and leave content empty.
-    "simple": ("zhipu_glm52", "kimi_k27", "deepseek"),
-    "standard": ("zhipu_glm52", "kimi_k27", "deepseek"),
-    "complex": ("zhipu_glm52", "kimi_k27", "deepseek"),
-    "revision": ("zhipu_glm52", "kimi_k27", "deepseek"),
-    "repair": ("zhipu_glm52", "kimi_k27", "deepseek"),
+    # Keep the automatic policy deliberately small and predictable: Kimi is
+    # the primary generator, GLM-5.2 is the high-quality fallback, and
+    # DeepSeek is used only if both fail.  K2.7 remains available for explicit
+    # diagnostics but is excluded from automatic routing because it does not
+    # accept instant mode and has repeatedly consumed the whole time budget.
+    "simple": ("kimi", "zhipu_glm52", "deepseek"),
+    "standard": ("kimi", "zhipu_glm52", "deepseek"),
+    "complex": ("kimi", "zhipu_glm52", "deepseek"),
+    "revision": ("kimi", "zhipu_glm52", "deepseek"),
+    "repair": ("kimi", "zhipu_glm52", "deepseek"),
 }
 
 
@@ -2332,6 +2438,7 @@ def _classify_request_complexity(
         "多页面", "多步骤", "multi-step", "workflow", "dashboard", "仪表盘", "network", "联网",
         "sensor", "传感器", "camera", "摄像头", "audio", "音频", "chart", "图表",
         "bluetooth", "蓝牙", "wifi", "拖拽", "drag", "碰撞", "collision",
+        "五子棋", "棋盘", "双人", "关卡", "排行榜",
     )
     simple_hints = (
         "calculator", "计算器", "timer", "计时器", "倒计时", "clock", "时钟",
@@ -2340,6 +2447,7 @@ def _classify_request_complexity(
     interaction_hints = (
         "点击", "点一下", "按钮", "输入", "选择", "切换", "开始", "暂停", "重置",
         "记录", "提醒", "每隔", "定时", "下一步", "返回", "提交", "滑动", "跳跃",
+        "下棋", "轮流", "获胜", "闹铃", "设置",
         "click", "button", "input", "select", "switch", "start", "pause", "reset",
         "record", "remind", "every hour", "next", "back", "submit", "swipe",
     )
@@ -2546,6 +2654,25 @@ async def _call_provider_with_retries(
         maximum=600.0,
         fallbacks=("AI_READ_TIMEOUT_SECONDS", "DEEPSEEK_REQUEST_TIMEOUT_SECONDS"),
     )
+    provider_wall_timeout_env = {
+        "zhipu_glm52": "ZHIPU_WALL_TIMEOUT_SECONDS",
+        "kimi": "KIMI_WALL_TIMEOUT_SECONDS",
+        "kimi_k27": "KIMI_WALL_TIMEOUT_SECONDS",
+        "deepseek": "DEEPSEEK_WALL_TIMEOUT_SECONDS",
+    }.get(config.id, "AI_PROVIDER_WALL_TIMEOUT_SECONDS")
+    provider_default_wall_timeout = {
+        "zhipu_glm52": 120.0,
+        "kimi": 180.0,
+        "kimi_k27": 180.0,
+        "deepseek": 90.0,
+    }.get(config.id, 180.0)
+    wall_timeout = _bounded_float_env(
+        provider_wall_timeout_env,
+        default=provider_default_wall_timeout,
+        minimum=0.05,
+        maximum=600.0,
+        fallbacks=("AI_PROVIDER_WALL_TIMEOUT_SECONDS",),
+    )
     backoff = _bounded_float_env(
         "AI_RETRY_BACKOFF_SECONDS",
         default=0.5,
@@ -2574,6 +2701,7 @@ async def _call_provider_with_retries(
         # responses can still be retried, while an actual timeout fails over
         # immediately below and therefore does not need a pre-reserved retry slot.
         attempt_timeout = min(read_timeout, remaining)
+        attempt_wall_timeout = min(wall_timeout, remaining)
         upstream_request_id: str | None = None
         token = _ACTIVE_PROVIDER_CONFIG.set(config)
         try:
@@ -2582,16 +2710,14 @@ async def _call_provider_with_retries(
                 correction=correction,
                 timeout_seconds=attempt_timeout,
             )
-            if _enabled_env("AI_STREAM_RESPONSES", default=True):
-                # httpx applies attempt_timeout between streamed bytes. Do not
-                # wrap the complete response in asyncio.wait_for: that used to
-                # kill healthy long generations at exactly 90/120 seconds.
-                generated, model, model_meta = await provider_call
-            else:
-                generated, model, model_meta = await asyncio.wait_for(
-                    provider_call,
-                    timeout=attempt_timeout,
-                )
+            # ``httpx`` read timeouts only measure silence between two chunks.
+            # Reasoning models can keep a broken request alive forever by
+            # streaming heartbeats or internal reasoning.  The wall timeout is
+            # therefore deliberately separate and applies to streaming too.
+            generated, model, model_meta = await asyncio.wait_for(
+                provider_call,
+                timeout=attempt_wall_timeout,
+            )
         except (asyncio.TimeoutError, httpx.TimeoutException):
             outcome = "timeout"
             status_code = None
@@ -2760,7 +2886,7 @@ async def _call_deepseek(
         candidates = candidates[:max_candidates]
     overall_timeout = _optional_timeout_env(
         "AI_OVERALL_TIMEOUT_SECONDS",
-        default=0.0,
+        default=360.0,
         maximum=3600.0,
         fallbacks=("DEEPSEEK_GENERATION_BUDGET_SECONDS",),
     )
@@ -2913,7 +3039,7 @@ async def generate_app(
 ) -> GenerateResponse:
     budget_seconds = _optional_timeout_env(
         "AI_OVERALL_TIMEOUT_SECONDS",
-        default=0.0,
+        default=360.0,
         maximum=3600.0,
         fallbacks=("DEEPSEEK_GENERATION_BUDGET_SECONDS",),
     )
@@ -2926,17 +3052,18 @@ async def generate_app(
     )
     max_attempts = _bounded_int_env(
         "DEEPSEEK_MAX_ATTEMPTS",
-        # Give every configured provider one original attempt plus one
-        # provider-local repair attempt.  The previous default of three meant
-        # that GLM, Kimi and DeepSeek each received only one quality-check
-        # attempt, so a harmless JSON/LVGL slip permanently discarded the
-        # provider before it could apply the validator's concrete correction.
-        default=6,
+        # One quality attempt per configured provider.  Provider failover is
+        # more useful than asking the same model to repeat a malformed answer,
+        # and prevents a single generation from growing into a 20-minute job.
+        default=3,
         minimum=1,
         maximum=12,
     )
     quality_attempts_per_provider = _bounded_int_env(
         "AI_QUALITY_ATTEMPTS_PER_PROVIDER",
+        # Allow one correction with the validator's exact error before moving
+        # to the next provider.  The whole-job deadline still prevents this
+        # quality retry from extending a task indefinitely.
         default=2,
         minimum=1,
         maximum=4,
@@ -2985,12 +3112,10 @@ async def generate_app(
             )
             break
         attempts_used = attempt
-        attempts_after_this = max_attempts - attempts_used
-        attempts_including_this = attempts_after_this + 1
         call_timeout = (
             min(
                 request_timeout_seconds,
-                max(2.0, remaining / attempts_including_this),
+                max(2.0, remaining),
             )
             if remaining is not None
             else request_timeout_seconds

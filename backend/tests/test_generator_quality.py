@@ -361,6 +361,26 @@ class GeneratorQualityTests(unittest.TestCase):
         with self.assertRaisesRegex(GenerationError, "34px"):
             _validate_visual_contract(undersized)
 
+    def test_literal_undersized_touch_button_is_normalized(self) -> None:
+        undersized = STYLED_APP.replace(
+            "button.set_size(100, 36)",
+            "button.set_size(100, 28)",
+        )
+        normalized, warnings = _normalize_lvgl_code(undersized)
+        self.assertIn("button.set_size(100, 34)", normalized)
+        self.assertTrue(any("34px" in item for item in warnings))
+        self.assertTrue(_validate_visual_contract(normalized))
+
+    def test_literal_undersized_button_set_height_is_normalized(self) -> None:
+        undersized = STYLED_APP.replace(
+            "button.set_size(100, 36)",
+            "button.set_size(100, 36)\n        button.set_height(30)",
+        )
+        normalized, warnings = _normalize_lvgl_code(undersized)
+        self.assertIn("button.set_height(34)", normalized)
+        self.assertTrue(any("34px" in item for item in warnings))
+        self.assertTrue(_validate_visual_contract(normalized))
+
     def test_explicit_widget_overflow_is_rejected(self) -> None:
         overflow = STYLED_APP.replace(
             "card.set_pos(20, 40)",
