@@ -25,7 +25,6 @@ from .auth import (
     auth_service,
 )
 from .billing import InsufficientCredits, billing_service
-from .growth import InvalidGrowthTask, InvalidInviteCode, growth_service_for
 from .database import database_engine
 from .generator import GenerationError, generate_app
 from .cors import compute_frontend_origins
@@ -135,12 +134,6 @@ def _account_payload(user: dict) -> dict:
         "role": user["role"],
         "user_created_at": user["created_at"],
     }
-
-
-def _growth_service():
-    # Tests and local tools replace auth/billing services at runtime. Building this
-    # lightweight facade here keeps growth data on the same active database.
-    return growth_service_for(auth_service.engine, billing_service)
 
 
 def _settle_successful_generation(state: dict[str, Any]) -> None:
@@ -474,19 +467,10 @@ def register(
     response: Response,
 ) -> dict:
     try:
-        growth = _growth_service()
-        inviter_id = growth.resolve_inviter(payload.invite_code)
         user, token = auth_service.register(payload.username, payload.password)
-        growth.ensure_profile(user["id"])
-        if inviter_id:
-            growth.record_referral(
-                inviter_user_id=inviter_id,
-                invitee_user_id=user["id"],
-                invite_code=payload.invite_code or "",
-            )
     except UsernameTaken as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except (InvalidInviteCode, ValueError) as exc:
+    except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     _set_login_cookie(response, request, token)
     return _account_payload(user)
@@ -529,27 +513,6 @@ def current_user(request: Request) -> dict:
 @app.get("/api/billing/account")
 def billing_account(request: Request) -> dict:
     return _account_payload(_current_user(request))
-
-
-@app.get("/api/growth/summary")
-def growth_summary(request: Request) -> dict:
-    user = _current_user(request)
-    return _growth_service().summary(user["id"], unlimited=_is_superadmin(user))
-
-
-@app.post("/api/growth/tasks/{task_key}/claim")
-def claim_growth_task(task_key: str, request: Request) -> dict:
-    user = _current_user(request)
-    try:
-        summary = _growth_service().claim_task(
-            user["id"], task_key, unlimited=_is_superadmin(user)
-        )
-    except InvalidGrowthTask as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    return {
-        **summary,
-        "account": _account_payload(user),
-    }
 
 
 @app.get("/api/admin/users")
