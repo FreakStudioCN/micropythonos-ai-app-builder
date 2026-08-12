@@ -200,9 +200,10 @@ jobs:
     # errors. Labels are routing, not a security boundary — scoping the runner
     # to this repository is what limits it, so the extra labels buy nothing.
     runs-on: upypi
-    # Must exceed the bounded image load and compose deployment operations, plus
-    # enough time for the artifact download on the production connection.
-    timeout-minutes: 35
+    # The production runner's connection to the Actions artifact service can
+    # take roughly 35 minutes for a 100+ MB image bundle. Leave enough time for
+    # the completed download, image load, transactional switch and health check.
+    timeout-minutes: 75
     environment: production
     concurrency:
       group: production-deploy
