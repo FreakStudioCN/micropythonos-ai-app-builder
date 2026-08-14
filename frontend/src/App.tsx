@@ -288,6 +288,13 @@ const verifiedBoards = [
   ["unPhone", "unPhone 9", "ESP32-S3", "触摸屏", "移动创作"],
   ["Waveshare", "ESP32-S3-Touch-LCD-2", "ESP32-S3", "2\" 触摸屏", "新手与展示"],
 ] as const;
+const hardwareSponsors = [
+  ["wiznet", "WIZnet", "/sponsors/wiznet.png"],
+  ["senstech", "敏源传感", "/sponsors/senstech.png"],
+  ["waveshare", "微雪电子", "/sponsors/waveshare.png"],
+  ["lilygo", "LILYGO", "/sponsors/lilygo.png"],
+  ["freenove", "Freenove", "/sponsors/freenove.png"],
+] as const;
 export default function App() {
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem("mpos-language") === "en" ? "en" : "zh");
   const isZh = language === "zh";
@@ -1965,6 +1972,14 @@ export default function App() {
     <div className="page">
       <header>
         <div className="brand"><span>BM</span><div><strong>Blockless-Make-APP</strong><small>{tr("MicroPythonOS AI App 生成与分发平台", "MicroPythonOS AI app creation and distribution")}</small></div></div>
+        <div className="hardware-sponsors" aria-label={tr("硬件赞助商", "Hardware sponsors")}>
+          <span>{tr("硬件赞助商", "Hardware sponsors")}</span>
+          <div className="sponsor-list">
+            {hardwareSponsors.map(([id, name, src]) => (
+              <img className={`sponsor-logo sponsor-logo-${id}`} key={id} src={src} alt={name} title={name} />
+            ))}
+          </div>
+        </div>
         <div className="header-actions">
           <span className="user-chip">
             {billingAccount?.username}
@@ -2303,11 +2318,6 @@ export default function App() {
               ))}
             </div>
           </details>
-          <div className="planned-note">
-            <strong>Tuya / 涂鸦智能</strong>
-            <span>{tr("3 款带屏板卡为重点适配方向；当前仅作概念演示，并非真实适配。", "Three display boards are a priority direction. Concept demo only; not currently verified.")}</span>
-            <b>{tr("规划适配", "Planned")}</b>
-          </div>
         </section>
 
         <section className="card result-card" id="preview">

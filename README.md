@@ -30,7 +30,6 @@ SHA-256 哈希保存在后端数据库。会话、权限、生成产物和点数
 - WebSerial 连接 ESP32/ESP32-S3，安装并运行生成的 App。
 - uPyStore 发布校验、截图、材料 ZIP 和手工上传引导。
 - 硬件生态页：15 款真实适配板卡、Desktop 和 Web 目标。
-- Tuya / 涂鸦智能相关板卡只标为规划适配/概念演示。
 
 ## Repository layout
 
