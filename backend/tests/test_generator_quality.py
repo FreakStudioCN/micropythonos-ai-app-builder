@@ -19,6 +19,7 @@ from app.generator import (
     _validate_api_summaries,
     _validate_code,
     _validate_product_contract,
+    _validate_requirement_coverage,
     _validate_visual_contract,
     _ui_blueprint_for_prompt,
     _visual_direction_for_prompt,
@@ -646,6 +647,70 @@ class GeneratorQualityTests(unittest.TestCase):
         self.assertIn("必须明显区别于固定深蓝模板", prompt)
         self.assertIn("本次产品界面类型：日历", prompt)
         self.assertIn("6x7 日期触控网格", prompt)
+        self.assertIn("requirement_coverage", prompt)
+        self.assertIn("需求—实现—验证", prompt)
+
+    def test_requirement_coverage_rejects_missing_complex_features(self) -> None:
+        request = GenerateRequest(
+            prompt="做一个喝水提醒，点击记录一杯，同时每小时提醒并支持重置"
+        )
+        incomplete = {
+            "requirement_coverage": [
+                {
+                    "requirement": "记录喝水",
+                    "implementation": "按钮回调更新 cups 状态",
+                    "verification": "点击按钮后杯数增加",
+                },
+                {
+                    "requirement": "重置记录",
+                    "implementation": "RESET 按钮调用 reset_count",
+                    "verification": "点击 RESET 后杯数归零",
+                },
+            ]
+        }
+        with self.assertRaisesRegex(GenerationError, "至少包含 3 项"):
+            _validate_requirement_coverage(incomplete, request)
+
+    def test_requirement_coverage_is_normalized_for_auditing(self) -> None:
+        request = GenerateRequest(prompt="做一个状态面板")
+        coverage = _validate_requirement_coverage(
+            {
+                "requirement_coverage": [
+                    {
+                        "requirement": " 显示状态 ",
+                        "implementation": " status_label 显示当前状态 ",
+                        "verification": " 打开页面看到状态文字 ",
+                    },
+                    {
+                        "requirement": " 刷新状态 ",
+                        "implementation": " REFRESH 按钮调用 update_status ",
+                        "verification": " 点击后状态文字发生变化 ",
+                    },
+                ]
+            },
+            request,
+        )
+        self.assertEqual(coverage[0]["requirement"], "显示状态")
+        self.assertEqual(coverage[1]["implementation"], "REFRESH 按钮调用 update_status")
+
+    def test_requirement_coverage_must_reference_real_code_identifiers(self) -> None:
+        request = GenerateRequest(prompt="做一个状态面板")
+        payload = {
+            "requirement_coverage": [
+                {
+                    "requirement": "显示状态",
+                    "implementation": "ghost_status 保存当前状态",
+                    "verification": "打开页面看到状态文字",
+                },
+                {
+                    "requirement": "刷新状态",
+                    "implementation": "ghost_refresh 负责刷新",
+                    "verification": "点击后状态文字变化",
+                },
+            ]
+        }
+        with self.assertRaisesRegex(GenerationError, "真实存在"):
+            _validate_requirement_coverage(payload, request, STYLED_APP)
 
     def test_app_archetypes_select_product_specific_blueprints(self) -> None:
         self.assertEqual(_app_archetype_for_prompt("做一个四则运算计算器"), "calculator")
@@ -702,7 +767,22 @@ class GeneratorRetryDiagnosticTests(unittest.IsolatedAsyncioTestCase):
         return {
             "summary": "Status panel",
             "app_code": code,
-            "acceptance_tests": ["state changes", "state restores"],
+            "requirement_coverage": [
+                {
+                    "requirement": "Show the current status",
+                    "implementation": "self.label stores and displays the value",
+                    "verification": "Open the app and read the visible status label",
+                },
+                {
+                    "requirement": "Update status from the interface",
+                    "implementation": "A button callback changes the stored label text",
+                    "verification": "Tap the button and confirm the label text changes",
+                },
+            ],
+            "acceptance_tests": [
+                "Opening the app shows the current status",
+                "Tapping the control changes and restores the status",
+            ],
         }
 
     async def test_failed_attempt_then_success_emits_private_diagnostics(self) -> None:

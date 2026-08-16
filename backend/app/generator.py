@@ -97,6 +97,13 @@ JSON 格式必须严格为：
   "summary": "一句话说明生成了什么",
   "prompt_normalized_zh": "规范化后的中文技术需求",
   "prompt_normalized_en": "Normalized English technical requirement",
+  "requirement_coverage": [
+    {
+      "requirement": "用户明确提出的一项功能或交互，不得写泛泛描述",
+      "implementation": "实现该需求的状态、方法和可见控件",
+      "verification": "用户如何在界面上验证它确实可用"
+    }
+  ],
   "store_metadata": {
     "display_name_zh": "中文显示名",
     "display_name_en": "English display name",
@@ -113,6 +120,14 @@ JSON 格式必须严格为：
   "app_code": "完整 Python 源码字符串",
   "acceptance_tests": ["用户可以完成的核心功能 1", "用户可以完成的核心功能 2"]
 }
+
+生成前必须先完整拆解需求，再写代码：
+- requirement_coverage 必须覆盖用户明确要求的功能、交互、状态变化、定时行为和硬件能力；
+  简单任务至少 2 项，复杂任务、连续修改和错误修复至少 3 项，禁止用“界面可用”“功能正常”等套话凑数
+- implementation 必须逐项写出 app_code 中真实存在的 ASCII 方法名、Python 状态名或控件变量名，不能只说“已经实现”
+- verification 必须描述用户在 320x240 界面上可以执行并看到结果的步骤
+- app_code 必须逐项实现 requirement_coverage；不允许为了界面好看而漏掉需求，也不允许用静态文字、pass、假按钮冒充功能
+- acceptance_tests 必须与 requirement_coverage 对应，描述具体操作和预期结果
 
 参考最小代码结构：
 import lvgl as lv
@@ -147,6 +162,15 @@ VISUAL_REQUIREMENTS = """
 8. 每个主要控件必须明确设置尺寸或位置，避免重叠、贴边和大小不一致。
 9. 主按钮、次按钮和危险操作使用不同但协调的颜色；同类按钮保持等高、等宽、等间距。
 10. 输出前自行检查：屏幕 320x240 内无溢出、文字可读、触控按钮高度不小于 34px。
+"""
+
+
+REQUIREMENT_COVERAGE_REQUIREMENTS = """
+需求完整性同样是验收条件：
+1. 先把本次用户需求拆成 requirement_coverage，逐项写明 requirement、implementation、verification。
+2. 简单任务至少 2 项；复杂任务、连续修改和错误修复至少 3 项需求—实现—验证记录。
+3. implementation 必须点名 app_code 中实际存在的 ASCII 状态名、方法名或控件变量名；verification 必须是用户可执行且结果可见的步骤。
+4. app_code 和 acceptance_tests 必须逐项对应覆盖表，禁止漏功能、静态占位、pass、假按钮和泛化套话。
 """
 
 
@@ -395,7 +419,8 @@ def _build_user_prompt(request: GenerateRequest, correction: str = "") -> str:
         f"显示名：{request.display_name}\n"
         f"包名：{request.package_name}\n"
         "入口文件固定为 app.py，入口类固定为 GeneratedApp。\n\n"
-        f"{VISUAL_REQUIREMENTS}\n{visual_direction}\n{GENERAL_UI_BLUEPRINT}"
+        f"{VISUAL_REQUIREMENTS}\n{REQUIREMENT_COVERAGE_REQUIREMENTS}\n"
+        f"{visual_direction}\n{GENERAL_UI_BLUEPRINT}"
         f"\n{ui_blueprint}"
     )
     if request.required_capabilities:
@@ -723,6 +748,82 @@ def _normalize_generation_payload(payload: dict[str, Any]) -> dict[str, Any]:
             if key not in normalized and key in container:
                 normalized[key] = container[key]
     return normalized
+
+
+def _validate_requirement_coverage(
+    payload: dict[str, Any],
+    request: GenerateRequest,
+    code: str = "",
+) -> list[dict[str, str]]:
+    """Require an auditable plan before accepting otherwise-valid code.
+
+    Syntax and styling checks cannot tell whether a model silently dropped the
+    second half of a multi-feature request.  The coverage ledger makes every
+    accepted generation name the requested behavior, its concrete
+    implementation, and a user-visible verification step.  It is deliberately
+    validated before code validation so a corrected retry receives the full
+    candidate plus an exact quality failure.
+    """
+
+    raw_coverage = payload.get("requirement_coverage")
+    tier, _ = _classify_request_complexity(request)
+    minimum = 3 if tier in {"complex", "revision", "repair"} else 2
+    if not isinstance(raw_coverage, list) or len(raw_coverage) < minimum:
+        raise GenerationError(
+            "需求覆盖表不完整：requirement_coverage 必须至少包含 "
+            f"{minimum} 项需求—实现—验证记录"
+        )
+
+    coverage: list[dict[str, str]] = []
+    seen_requirements: set[str] = set()
+    generic_phrases = {
+        "功能正常",
+        "界面可用",
+        "正常工作",
+        "works",
+        "working",
+        "usable",
+    }
+    for index, item in enumerate(raw_coverage, start=1):
+        if not isinstance(item, dict):
+            raise GenerationError(f"需求覆盖表第 {index} 项不是对象")
+        normalized: dict[str, str] = {}
+        for field in ("requirement", "implementation", "verification"):
+            value = item.get(field)
+            if not isinstance(value, str) or len(value.strip()) < 4:
+                raise GenerationError(
+                    f"需求覆盖表第 {index} 项缺少具体的 {field}"
+                )
+            normalized[field] = value.strip()
+        requirement_key = normalized["requirement"].casefold()
+        if requirement_key in seen_requirements:
+            raise GenerationError("需求覆盖表包含重复需求，不能用同一项凑数")
+        if any(phrase in requirement_key for phrase in generic_phrases):
+            raise GenerationError("需求覆盖表必须写具体用户需求，不能使用泛化套话")
+        if code:
+            implementation_tokens = {
+                token.casefold()
+                for token in re.findall(
+                    r"[A-Za-z_][A-Za-z0-9_]{2,}", normalized["implementation"]
+                )
+                if token.casefold()
+                not in {
+                    "the", "and", "with", "from", "into", "uses", "using",
+                    "button", "label", "method", "state", "control", "callback",
+                    "visible", "actual", "real", "implementation",
+                }
+            }
+            lowered_code = code.casefold()
+            if not implementation_tokens or not any(
+                token in lowered_code for token in implementation_tokens
+            ):
+                raise GenerationError(
+                    f"需求覆盖表第 {index} 项的 implementation 没有引用 app_code "
+                    "中真实存在的状态、方法或控件标识符"
+                )
+        seen_requirements.add(requirement_key)
+        coverage.append(normalized)
+    return coverage
 
 
 def _settings() -> tuple[str, str, str]:
@@ -2221,16 +2322,17 @@ LEGACY_PROVIDER_ALIASES = {
 }
 
 DEFAULT_PROVIDER_ORDERS = {
-    # Keep the automatic policy deliberately small and predictable: Kimi is
-    # the primary generator, GLM-5.2 is the high-quality fallback, and
-    # DeepSeek is used only if both fail.  K2.7 remains available for explicit
-    # diagnostics but is excluded from automatic routing because it does not
-    # accept instant mode and has repeatedly consumed the whole time budget.
+    # Keep short single-purpose apps fast. General, multi-feature, revision,
+    # and repair work uses GLM-5.2 first because those tasks benefit much more
+    # from requirement retention than from shaving a few seconds off latency.
+    # K2.7 remains available for explicit diagnostics but is excluded from
+    # automatic routing because it does not accept instant mode and has
+    # repeatedly consumed the whole time budget.
     "simple": ("kimi", "zhipu_glm52", "deepseek"),
-    "standard": ("kimi", "zhipu_glm52", "deepseek"),
-    "complex": ("kimi", "zhipu_glm52", "deepseek"),
-    "revision": ("kimi", "zhipu_glm52", "deepseek"),
-    "repair": ("kimi", "zhipu_glm52", "deepseek"),
+    "standard": ("zhipu_glm52", "kimi", "deepseek"),
+    "complex": ("zhipu_glm52", "kimi", "deepseek"),
+    "revision": ("zhipu_glm52", "kimi", "deepseek"),
+    "repair": ("zhipu_glm52", "kimi", "deepseek"),
 }
 
 
@@ -2698,7 +2800,7 @@ async def _call_provider_with_retries(
         "deepseek": "DEEPSEEK_WALL_TIMEOUT_SECONDS",
     }.get(config.id, "AI_PROVIDER_WALL_TIMEOUT_SECONDS")
     provider_default_wall_timeout = {
-        "zhipu_glm52": 120.0,
+        "zhipu_glm52": 210.0,
         "kimi": 180.0,
         "kimi_k27": 180.0,
         "deepseek": 90.0,
@@ -2923,7 +3025,7 @@ async def _call_deepseek(
         candidates = candidates[:max_candidates]
     overall_timeout = _optional_timeout_env(
         "AI_OVERALL_TIMEOUT_SECONDS",
-        default=360.0,
+        default=480.0,
         maximum=3600.0,
         fallbacks=("DEEPSEEK_GENERATION_BUDGET_SECONDS",),
     )
@@ -3088,7 +3190,7 @@ async def generate_app(
         )
     budget_seconds = _optional_timeout_env(
         "AI_OVERALL_TIMEOUT_SECONDS",
-        default=360.0,
+        default=480.0,
         maximum=3600.0,
         fallbacks=("DEEPSEEK_GENERATION_BUDGET_SECONDS",),
     )
@@ -3128,6 +3230,7 @@ async def generate_app(
     code = ""
     warnings: list[str] = []
     acceptance_tests: list[str] = []
+    requirement_coverage: list[dict[str, str]] = []
     api_usage: dict[str, Any] = {"checked": False, "planned": [], "missing": []}
     last_error: GenerationError | None = None
     model_meta: dict[str, Any] = {}
@@ -3224,12 +3327,19 @@ async def generate_app(
             record_provider_quality_failure(model_meta)
             correction = _build_correction(last_error, attempt=attempt)
             continue
+        quality_tier, _ = _classify_request_complexity(request)
+        minimum_quality_items = (
+            3 if quality_tier in {"complex", "revision", "repair"} else 2
+        )
         if (
             not isinstance(candidate_tests, list)
-            or len(candidate_tests) < 2
+            or len(candidate_tests) < minimum_quality_items
             or not all(isinstance(item, str) and item.strip() for item in candidate_tests)
         ):
-            last_error = GenerationError("AI 生成结果中缺少至少两个 acceptance_tests")
+            last_error = GenerationError(
+                "AI 生成结果中缺少与需求对应的具体 acceptance_tests：至少需要 "
+                f"{minimum_quality_items} 项"
+            )
             _emit_generation_attempt(
                 attempt_sink,
                 attempt=attempt,
@@ -3240,6 +3350,23 @@ async def generate_app(
             )
             record_provider_quality_failure(model_meta)
             correction = _build_correction(last_error, candidate, attempt)
+            continue
+        try:
+            requirement_coverage = _validate_requirement_coverage(
+                generated, request, candidate
+            )
+        except GenerationError as exc:
+            last_error = exc
+            _emit_generation_attempt(
+                attempt_sink,
+                attempt=attempt,
+                status="validation_failed",
+                candidate=candidate,
+                error=exc,
+                model_meta=model_meta,
+            )
+            record_provider_quality_failure(model_meta)
+            correction = _build_correction(exc, candidate, attempt)
             continue
         candidate, compatibility_warnings = _normalize_lvgl_code(candidate)
         try:
@@ -3363,6 +3490,7 @@ async def generate_app(
         ),
         "capability_contract": capability_contract,
         "validation": {"gates": warnings},
+        "requirement_coverage": requirement_coverage,
         "acceptance_tests": acceptance_tests,
         "warnings": warnings,
         "structured_errors": [],
@@ -3393,6 +3521,7 @@ async def generate_app(
         routing_reason=str(model_meta.get("routing_reason") or ""),
         warnings=warnings,
         acceptance_tests=acceptance_tests,
+        requirement_coverage=requirement_coverage,
         mpk_filename=mpk_filename,
         revision=request.revision,
         prompt_normalized_zh=prompt_normalized_zh,

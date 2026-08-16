@@ -64,6 +64,7 @@ class GenerateResponse(BaseModel):
     routing_reason: str = ""
     warnings: list[str] = []
     acceptance_tests: list[str] = []
+    requirement_coverage: list[dict[str, str]] = Field(default_factory=list)
     mpk_filename: str
     revision: int = 1
     prompt_normalized_zh: str = ""
@@ -84,6 +85,7 @@ class PublicGenerateResponse(BaseModel):
     mpk_base64: str
     warnings: list[str] = []
     acceptance_tests: list[str] = []
+    requirement_coverage: list[dict[str, str]] = Field(default_factory=list)
     mpk_filename: str
     revision: int = 1
     prompt_normalized_zh: str = ""

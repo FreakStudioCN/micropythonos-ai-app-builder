@@ -284,22 +284,22 @@ jobs:
               # prevent reasoning/heartbeat streams from blocking failover.
               environment:
                 AI_STREAM_RESPONSES: "true"
-                AI_OVERALL_TIMEOUT_SECONDS: "360"
+                AI_OVERALL_TIMEOUT_SECONDS: "480"
                 AI_READ_TIMEOUT_SECONDS: "600"
                 ZHIPU_READ_TIMEOUT_SECONDS: "600"
                 KIMI_READ_TIMEOUT_SECONDS: "600"
                 DEEPSEEK_READ_TIMEOUT_SECONDS: "300"
                 AI_PROVIDER_WALL_TIMEOUT_SECONDS: "180"
-                ZHIPU_WALL_TIMEOUT_SECONDS: "120"
+                ZHIPU_WALL_TIMEOUT_SECONDS: "210"
                 KIMI_WALL_TIMEOUT_SECONDS: "180"
                 DEEPSEEK_WALL_TIMEOUT_SECONDS: "90"
                 DEEPSEEK_MAX_ATTEMPTS: "3"
                 AI_QUALITY_ATTEMPTS_PER_PROVIDER: "2"
                 AI_PROVIDER_ORDER_SIMPLE: "kimi,zhipu_glm52,deepseek"
-                AI_PROVIDER_ORDER_STANDARD: "kimi,zhipu_glm52,deepseek"
-                AI_PROVIDER_ORDER_COMPLEX: "kimi,zhipu_glm52,deepseek"
-                AI_PROVIDER_ORDER_REVISION: "kimi,zhipu_glm52,deepseek"
-                AI_PROVIDER_ORDER_REPAIR: "kimi,zhipu_glm52,deepseek"
+                AI_PROVIDER_ORDER_STANDARD: "zhipu_glm52,kimi,deepseek"
+                AI_PROVIDER_ORDER_COMPLEX: "zhipu_glm52,kimi,deepseek"
+                AI_PROVIDER_ORDER_REVISION: "zhipu_glm52,kimi,deepseek"
+                AI_PROVIDER_ORDER_REPAIR: "zhipu_glm52,kimi,deepseek"
                 DEEPSEEK_GENERATION_BUDGET_SECONDS: "480"
                 DEEPSEEK_REQUEST_TIMEOUT_SECONDS: "600"
           YAML
@@ -357,11 +357,11 @@ jobs:
                && docker exec "${RUNNING_CONTAINER}" sh -c \
                     'test -n "$KIMI_API_KEY" && test -n "$ZHIPU_API_KEY" && \
                      test "$AI_STREAM_RESPONSES" = "true" && \
-                     test "$AI_OVERALL_TIMEOUT_SECONDS" = "360" && \
+                     test "$AI_OVERALL_TIMEOUT_SECONDS" = "480" && \
                      test "$AI_READ_TIMEOUT_SECONDS" = "600" && \
                      test "$ZHIPU_READ_TIMEOUT_SECONDS" = "600" && \
                      test "$KIMI_READ_TIMEOUT_SECONDS" = "600" && \
-                     test "$ZHIPU_WALL_TIMEOUT_SECONDS" = "120" && \
+                     test "$ZHIPU_WALL_TIMEOUT_SECONDS" = "210" && \
                      test "$KIMI_WALL_TIMEOUT_SECONDS" = "180"'; then
               deploy_ok=1
             fi
