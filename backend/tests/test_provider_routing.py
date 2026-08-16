@@ -39,10 +39,10 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
             "ZHIPU_BASE_URL": "https://zhipu.invalid/v4",
             "ZHIPU_GLM52_MODEL": "glm52-test",
             "AI_PROVIDER_ORDER_SIMPLE": "kimi,zhipu_glm52,deepseek",
-            "AI_PROVIDER_ORDER_STANDARD": "kimi,zhipu_glm52,deepseek",
-            "AI_PROVIDER_ORDER_COMPLEX": "kimi,zhipu_glm52,deepseek",
-            "AI_PROVIDER_ORDER_REVISION": "kimi,zhipu_glm52,deepseek",
-            "AI_PROVIDER_ORDER_REPAIR": "kimi,zhipu_glm52,deepseek",
+            "AI_PROVIDER_ORDER_STANDARD": "zhipu_glm52,kimi,deepseek",
+            "AI_PROVIDER_ORDER_COMPLEX": "zhipu_glm52,kimi,deepseek",
+            "AI_PROVIDER_ORDER_REVISION": "zhipu_glm52,kimi,deepseek",
+            "AI_PROVIDER_ORDER_REPAIR": "zhipu_glm52,kimi,deepseek",
             "AI_UPSTREAM_MAX_RETRIES": "0",
             "AI_RETRY_BACKOFF_SECONDS": "0",
             "AI_CONNECT_TIMEOUT_SECONDS": "1",
@@ -631,8 +631,8 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(meta["provider"], "kimi_k27")
         self.assertEqual(meta["provider_attempts"][0]["outcome"], "timeout")
 
-    async def test_complex_request_prefers_kimi(self) -> None:
-        client = self._client(self._response(200, model="kimi-code-served"))
+    async def test_complex_request_prefers_high_quality_glm(self) -> None:
+        client = self._client(self._response(200, model="glm52-served"))
         with patch.dict(os.environ, self._env(), clear=True), patch(
             "app.generator.httpx.AsyncClient", return_value=client
         ):
@@ -644,13 +644,13 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(meta["routing_tier"], "complex")
-        self.assertEqual(meta["provider"], "kimi")
+        self.assertEqual(meta["provider"], "zhipu_glm52")
         self.assertEqual(
             client.post.await_args.args[0],
-            "https://kimi.invalid/v1/chat/completions",
+            "https://zhipu.invalid/v4/chat/completions",
         )
 
-    async def test_revision_prefers_kimi(self) -> None:
+    async def test_revision_prefers_high_quality_glm(self) -> None:
         client = self._client(self._response(200, model="glm52-served"))
         with patch.dict(os.environ, self._env(), clear=True), patch(
             "app.generator.httpx.AsyncClient", return_value=client
@@ -664,10 +664,10 @@ class ProviderRoutingTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(meta["routing_tier"], "revision")
-        self.assertEqual(meta["provider"], "kimi")
+        self.assertEqual(meta["provider"], "zhipu_glm52")
         self.assertEqual(
             client.post.await_args.args[0],
-            "https://kimi.invalid/v1/chat/completions",
+            "https://zhipu.invalid/v4/chat/completions",
         )
 
     def test_previous_code_routes_to_high_quality_revision_tier(self) -> None:
