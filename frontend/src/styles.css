@@ -108,6 +108,15 @@ summary { cursor: pointer; font-weight: 700; font-size: 14px; }
 .targets label { display: grid; grid-template-columns: auto 1fr; gap: 2px 9px; align-items: center; border: 1px solid #e0e4ed; border-radius: 10px; padding: 12px; font-size: 13px; font-weight: 700; }
 .targets small { grid-column: 2; color: #7a8498; font-weight: 400; }
 .targets .disabled-target { opacity: .55; background: #f7f8fa; }
+.capability-picker { margin: 18px 0; padding: 16px; border: 1px solid #dbe4df; border-radius: 12px; background: #f8fbf9; }
+.capability-picker > div:first-child { display: flex; flex-direction: column; gap: 4px; }
+.capability-picker small { color: #68766f; }
+.capability-options { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 12px; }
+.capability-options label { border: 1px solid #d7dfda; border-radius: 999px; padding: 7px 11px; background: #fff; cursor: pointer; font-size: 12px; }
+.capability-options label.selected { color: #234b1e; border-color: #8abf58; background: #eff8e8; }
+.capability-options input { margin-right: 6px; }
+.capability-state { display: flex; flex-wrap: wrap; gap: 6px; margin: 12px 0 0; color: #4f7d28; font-size: 12px; font-weight: 700; }
+.capability-state span { padding: 5px 8px; border-radius: 7px; background: #eaf5df; }
 .device-guide { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin: -4px 0 18px; padding: 13px; color: #344054; background: #f8fafc; border: 1px solid #dbe3ee; border-radius: 10px; }
 .device-guide div { display: flex; flex-direction: column; gap: 4px; }
 .device-guide span { color: #697386; font-size: 11px; line-height: 1.5; }

@@ -43,6 +43,11 @@ interface GenerationResult {
   prompt_normalized_zh?: string;
   prompt_normalized_en?: string;
   store_metadata?: Record<string, string>;
+  required_capabilities?: string[];
+  required_accessories?: string[];
+  runtime_fallbacks?: Record<string, string>;
+  physical_validation_required?: boolean;
+  capability_contract?: Record<string, unknown>;
 }
 interface Artifact {
   id: string;
@@ -83,6 +88,14 @@ interface SessionState {
   warnings: string[];
   last_error: StructuredError | null;
   generation: GenerationResult | null;
+  required_capabilities: string[];
+  required_accessories: string[];
+  runtime_fallbacks: Record<string, string>;
+  physical_validation_required: boolean;
+  capability_contract?: {
+    status?: string;
+    contracts?: Record<string, { web_preview?: string; physical_validation_required?: boolean }>;
+  };
   input: {
     prompt_original: string;
     package_name: string;
@@ -296,6 +309,18 @@ const hardwareSponsors = [
   ["freenove", "Freenove", "/sponsors/freenove.png"],
 ] as const;
 const quickStartGuideUrl = "https://f1829ryac0m.feishu.cn/wiki/Kskcw9lZCiBHSgkswx7ctvGynPh";
+const hardwareCapabilityOptions = [
+  ["camera", "Camera / 摄像头", "camera module"],
+  ["audio.input", "Microphone / 麦克风", "microphone"],
+  ["audio.output", "Speaker / 音频输出", "speaker"],
+  ["sensor.imu", "IMU / 姿态传感器", "IMU sensor"],
+  ["lights.rgb", "RGB light / 彩灯", "RGB light"],
+  ["battery", "Battery / 电池", "battery"],
+  ["storage.sdcard", "SD card / 存储卡", "SD card"],
+  ["network", "Network / 网络", "network access"],
+  ["input.encoder", "Encoder / 旋钮", "rotary encoder"],
+  ["input.keypad", "Keypad / 键盘", "keypad"],
+] as const;
 export default function App() {
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem("mpos-language") === "en" ? "en" : "zh");
   const isZh = language === "zh";
@@ -340,6 +365,7 @@ export default function App() {
   const [webTarget, setWebTarget] = useState(true);
   const [physicalTarget, setPhysicalTarget] = useState(false);
   const [packageTarget, setPackageTarget] = useState(true);
+  const [requiredCapabilities, setRequiredCapabilities] = useState<string[]>([]);
   const [status, setStatus] = useState<Status>("idle");
   const [currentStage, setCurrentStage] = useState(-1);
   const [permissionOpen, setPermissionOpen] = useState(false);
@@ -390,6 +416,8 @@ export default function App() {
   );
   const [systemStatusConfirmed, setSystemStatusConfirmed] = useState(false);
   const iframeRef = useRef<HTMLIFrameElement>(null);
+  const sessionStateRef = useRef<SessionState | null>(sessionState);
+  sessionStateRef.current = sessionState;
   const lastRun = useRef("");
   const activeWasmRunId = useRef("");
   const requestAbort = useRef<AbortController | null>(null);
@@ -648,6 +676,7 @@ export default function App() {
     setWebTarget(session.input.targets.includes("web-preview"));
     setPhysicalTarget(session.input.targets.includes("physical-device"));
     setPackageTarget(session.input.targets.includes("package-only"));
+    setRequiredCapabilities(session.required_capabilities || []);
     if (session.generation) {
       setResult(session.generation);
       resultRef.current = session.generation;
@@ -868,7 +897,12 @@ export default function App() {
           return;
         }
         const failureKind = classifyWasmFailure(message);
-        if (failureKind === "infrastructure" && wasmBridgeRecoveryAttempts.current < MAX_WASM_BRIDGE_RECOVERY_ATTEMPTS) {
+        const capabilityPreviewUnsupported = [
+          "WEB_PREVIEW_UNSUPPORTED",
+          "HARDWARE_CAPABILITY_UNAVAILABLE",
+          "MPOS_CAPABILITY_API_MISSING",
+        ].includes(String(message.code || "").toUpperCase());
+        if (failureKind === "infrastructure" && !capabilityPreviewUnsupported && wasmBridgeRecoveryAttempts.current < MAX_WASM_BRIDGE_RECOVERY_ATTEMPTS) {
           wasmBridgeRecoveryAttempts.current += 1;
           wasmRunReachedRepl.current = false;
           setWasmReady(false);
@@ -892,7 +926,9 @@ export default function App() {
         setRuntimeStatus(detail);
         setErrorMessage(detail);
         setCurrentStage(3);
-        setStatus("failed");
+        setStatus(capabilityPreviewUnsupported
+          ? (sessionStateRef.current?.input.targets.includes("physical-device") ? "waiting_device" : "completed")
+          : "failed");
         setLogs((items) => [...items, `[preview] ${message.code || "WASM_ERROR"}: ${detail}`]);
         const savedSession = localStorage.getItem("mpos-session-id");
         if (savedSession) {
@@ -901,7 +937,7 @@ export default function App() {
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
               idempotency_key: `preview-failed-${savedSession}-${message.code || "unknown"}`,
-              result: "failed",
+              result: capabilityPreviewUnsupported ? "partial" : "failed",
               message: detail,
             }),
           });
@@ -1070,6 +1106,12 @@ export default function App() {
             publisher,
             version,
             targets: selectedTargets,
+            required_capabilities: requiredCapabilities,
+            required_accessories: hardwareCapabilityOptions
+              .filter(([name]) => requiredCapabilities.includes(name))
+              .map(([, , accessory]) => accessory),
+            runtime_fallbacks: Object.fromEntries(requiredCapabilities.map((name) => [name, "show unavailable state"])),
+            physical_validation_required: requiredCapabilities.length > 0,
             capabilities: {
               file_operation: true,
               script_run: true,
@@ -1119,6 +1161,12 @@ export default function App() {
             idempotency_key: `revision-${crypto.randomUUID()}`,
             prompt,
             prompt_language: isZh ? "zh-CN" : "en-US",
+            required_capabilities: requiredCapabilities,
+            required_accessories: hardwareCapabilityOptions
+              .filter(([name]) => requiredCapabilities.includes(name))
+              .map(([, , accessory]) => accessory),
+            runtime_fallbacks: Object.fromEntries(requiredCapabilities.map((name) => [name, "show unavailable state"])),
+            physical_validation_required: requiredCapabilities.length > 0,
           }),
           signal: controller.signal,
         });
@@ -1503,7 +1551,13 @@ export default function App() {
         body: JSON.stringify({
           idempotency_key: `device-result-${deviceResult}-${crypto.randomUUID()}`,
           result: deviceResult,
-          board: "Waveshare ESP32-S3-Touch-LCD-2",
+          board: "",
+          detected_hardware_id: deviceInfoRef.current.usbVendorId !== undefined
+            ? `usb:${deviceInfoRef.current.usbVendorId.toString(16).padStart(4, "0")}:${(deviceInfoRef.current.usbProductId || 0).toString(16).padStart(4, "0")}`
+            : null,
+          runtime_capability_results: Object.fromEntries(
+            (sessionState?.required_capabilities || []).map((name) => [name, "not_probed"]),
+          ),
           usb_vendor_id: deviceInfoRef.current.usbVendorId,
           usb_product_id: deviceInfoRef.current.usbProductId,
           installed_path: installedPath,
@@ -2067,6 +2121,43 @@ export default function App() {
               <label><input type="checkbox" checked={webTarget} onChange={(event) => setWebTarget(event.target.checked)} /> Web/WASM preview<small>{tr("在真实 MicroPythonOS WASM 中运行", "Run in real MicroPythonOS WASM")}</small></label>
               <label><input type="checkbox" checked={physicalTarget} onChange={(event) => setPhysicalTarget(event.target.checked)} /> Physical device deploy<small>{tr("未检测到设备时进入系统安装引导", "Shows OS installation guidance if no device is found")}</small></label>
               <label><input type="checkbox" checked={packageTarget} onChange={(event) => setPackageTarget(event.target.checked)} /> Package only<small>{tr("生成可以下载的 _rN.mpk", "Create a downloadable _rN.mpk")}</small></label>
+            </div>
+            <div className="capability-picker">
+              <div>
+                <strong>{tr("需要哪些硬件能力？", "Required hardware capabilities")}</strong>
+                <small>{tr("无需选择开发板；代码会通过 MicroPythonOS Manager API 在运行时探测。", "No board selection. The app probes portable Manager APIs at runtime.")}</small>
+              </div>
+              <div className="capability-options">
+                {hardwareCapabilityOptions.map(([name, label]) => (
+                  <label key={name} className={requiredCapabilities.includes(name) ? "selected" : ""}>
+                    <input
+                      type="checkbox"
+                      checked={requiredCapabilities.includes(name)}
+                      onChange={(event) => setRequiredCapabilities((current) => event.target.checked
+                        ? [...current, name]
+                        : current.filter((item) => item !== name))}
+                    />
+                    {label}
+                  </label>
+                ))}
+              </div>
+              {requiredCapabilities.length > 0 && (
+                <div className="capability-state">
+                  {requiredCapabilities.map((name) => {
+                    const contract = sessionState?.capability_contract?.contracts?.[name];
+                    const stateLabel = sessionState?.capability_contract?.status === "blocked"
+                      ? tr("等待 OS API", "waiting for OS API")
+                      : contract?.web_preview === "unsupported_without_emulation"
+                        ? tr("Web 不支持 · 等待真机", "Web unsupported · waiting for device")
+                        : contract?.web_preview === "emulated"
+                          ? tr("Web 模拟", "Web emulated")
+                          : contract?.physical_validation_required
+                            ? tr("可移植 · 等待真机", "portable · waiting for device")
+                            : tr("可移植", "portable");
+                    return <span key={name}>{name} · {stateLabel}</span>;
+                  })}
+                </div>
+              )}
             </div>
             <div className="device-guide">
               <div><strong>{tr("要在真实设备上运行？", "Want to run on a real device?")}</strong><span>{tr("请使用 Chrome、Edge 或 Brave，点击连接后选择 ESP32 对应的串口设备。", "Use Chrome, Edge, or Brave, then choose the serial device for your ESP32.")}</span></div>
