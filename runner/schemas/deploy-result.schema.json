@@ -53,6 +53,25 @@
             "null"
           ]
         },
+        "detected_hardware_id": {
+          "type": ["string", "null"]
+        },
+        "runtime_capability_results": {
+          "type": "object",
+          "additionalProperties": {
+            "type": ["boolean", "string", "null"]
+          }
+        },
+        "required_capabilities": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "required_accessories": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
         "serial_port": {
           "type": [
             "string",

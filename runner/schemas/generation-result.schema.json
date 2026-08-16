@@ -35,6 +35,25 @@
         "app": {
           "$ref": "https://schemas.blockless.dev/mpos-ai-app/v1/common-defs.schema.json#/$defs/app"
         },
+        "required_capabilities": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "required_accessories": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 },
+          "uniqueItems": true
+        },
+        "runtime_fallbacks": {
+          "type": "object",
+          "additionalProperties": { "type": "string" }
+        },
+        "physical_validation_required": { "type": "boolean" },
+        "capability_contract": { "type": "object", "additionalProperties": true },
+        "skill_commit": { "type": ["string", "null"] },
+        "mpos_commit": { "type": ["string", "null"] },
+        "board_capabilities_schema": { "type": "object", "additionalProperties": true },
         "files_written": {
           "type": "array",
           "items": {

@@ -23,4 +23,10 @@ describe("classifyWasmFailure", () => {
   it("fails closed for unknown bridge failures", () => {
     expect(classifyWasmFailure({ message: "unexpected browser bridge state" })).toBe("infrastructure");
   });
+
+  it("never repairs missing OS or physical capability contracts", () => {
+    expect(classifyWasmFailure({ code: "WEB_PREVIEW_UNSUPPORTED" })).toBe("infrastructure");
+    expect(classifyWasmFailure({ code: "HARDWARE_CAPABILITY_UNAVAILABLE" })).toBe("infrastructure");
+    expect(classifyWasmFailure({ code: "MPOS_CAPABILITY_API_MISSING", repairable: true })).toBe("infrastructure");
+  });
 });

@@ -37,6 +37,7 @@ from .runner_services import (
     STAGE_SKILLS,
     api_summary_version,
     device_service,
+    hardware_capability_registry,
     mpos_skill_adapter,
     script_dispatcher,
 )
@@ -266,6 +267,9 @@ class SessionService:
             "skills_commit": _git_commit(
                 PROJECT_ROOT / "vendor" / "MicroPython_Skills"
             ),
+            "mpos_commit": _git_commit(PROJECT_ROOT / "vendor" / "MicroPythonOS"),
+            "skill_commit": _git_commit(PROJECT_ROOT / "vendor" / "MicroPython_Skills"),
+            "board_capabilities_schema": hardware_capability_registry.describe(),
             "web_preview_notice": (
                 "Web preview is a quick browser compatibility preview. It does not "
                 "replace real hardware deployment."
@@ -782,6 +786,14 @@ class GeneratedApp(Activity):
             ):
                 return self.get(existing["session_id"])
 
+        required_capabilities = request.required_capabilities or hardware_capability_registry.infer(request.prompt)
+        capability_contract = hardware_capability_registry.resolve(
+            required_capabilities, request.runtime_fallbacks
+        )
+        physical_validation_required = (
+            request.physical_validation_required
+            or capability_contract.get("physical_validation_required", False)
+        )
         session_id = f"sess_{uuid.uuid4().hex[:16]}"
         root = self._root(session_id)
         (root / "artifacts").mkdir(parents=True)
@@ -840,11 +852,17 @@ class GeneratedApp(Activity):
                 "version": request.version,
                 "targets": request.targets,
             },
+            "required_capabilities": required_capabilities,
+            "required_accessories": request.required_accessories,
+            "runtime_fallbacks": request.runtime_fallbacks,
+            "physical_validation_required": physical_validation_required,
+            "capability_contract": capability_contract,
             "capabilities": request.capabilities.model_dump(),
             "repo_commit": self.capabilities()["repo_commit"],
             "skills_commit": self.capabilities()["skills_commit"],
             "input_hash": input_hash,
             "api_summary_version": api_summary_version(),
+            "board_capabilities_schema": hardware_capability_registry.describe(),
             "permissions": [
                 {
                     "permission_id": permission_id,
@@ -928,6 +946,7 @@ class GeneratedApp(Activity):
                         "choices": ["allow_once", "deny"],
                         "decision": "pending",
                         "expires_at": None,
+                        "separate_confirmation": True,
                     },
                 ]
                 if "physical-device" in request.targets
@@ -939,6 +958,30 @@ class GeneratedApp(Activity):
             "last_error": None,
             "generation": None,
         }
+        sensitive_permissions = []
+        if "audio.input" in required_capabilities:
+            sensitive_permissions.append(("microphone_access", "允许使用麦克风", "App 将在真机读取麦克风输入。", "microphone probe/read"))
+        if request.required_accessories:
+            sensitive_permissions.append(("external_wiring", "确认外接硬件接线", "请确认配件、电压和接线符合设备说明。", "confirm external accessory wiring"))
+        prompt_text = request.prompt.casefold()
+        if "storage.sdcard" in required_capabilities and any(term in prompt_text for term in ("format", "格式化")):
+            sensitive_permissions.append(("sd_format", "允许格式化 SD 卡", "该操作会清除存储卡数据，必须单独确认。", "format SD card"))
+        if any(term in prompt_text for term in ("firmware flash", "flash firmware", "刷固件", "烧录固件")):
+            sensitive_permissions.append(("firmware_flash", "允许刷写固件", "固件写入可能导致设备重启，必须单独确认。", "flash device firmware"))
+        for permission_type, title, description, command in sensitive_permissions:
+            state["permissions"].append({
+                "permission_id": f"perm_{permission_type}_{uuid.uuid4().hex[:12]}",
+                "permission_type": permission_type,
+                "title": title,
+                "description": description,
+                "risk": "high",
+                "required": True,
+                "command_preview": command,
+                "choices": ["allow_once", "deny"],
+                "decision": "pending",
+                "expires_at": None,
+                "separate_confirmation": True,
+            })
         self._write_state(state)
         self._write_artifact_json(
             state,
@@ -953,6 +996,11 @@ class GeneratedApp(Activity):
                 "next_phase": "mpos-analyze-app-web",
                 "targets": request.targets,
                 "capabilities": request.capabilities.model_dump(),
+                "required_capabilities": required_capabilities,
+                "required_accessories": request.required_accessories,
+                "runtime_fallbacks": request.runtime_fallbacks,
+                "physical_validation_required": physical_validation_required,
+                "capability_contract": state["capability_contract"],
             },
         )
         state["checkpoint_history"].append(self._checkpoint_record(state, "session_created", "mpos-analyze-app-web"))
@@ -1052,6 +1100,8 @@ class GeneratedApp(Activity):
         for permission in state["permissions"]:
             if not permission.get("required") or permission.get("decision") != "pending":
                 continue
+            if permission.get("separate_confirmation"):
+                continue
             permission["decision"] = "allow_once"
             permission["decision_idempotency_key"] = (
                 f"{request.idempotency_key}:{permission['permission_id']}"
@@ -1072,13 +1122,22 @@ class GeneratedApp(Activity):
 
         state["permission_batch_idempotency_key"] = request.idempotency_key
         if changed:
-            state["status"] = "created"
+            pending_separate = any(
+                item.get("required")
+                and item.get("decision") == "pending"
+                and item.get("separate_confirmation")
+                for item in state["permissions"]
+            )
+            state["status"] = "blocked" if pending_separate else "created"
             state["last_error"] = None
             self._event(
                 state,
                 "status_update",
                 "mpos-plan-app-web",
-                {"status": "ready", "message": "全部必需权限已一次性确认"},
+                {
+                    "status": "blocked" if pending_separate else "ready",
+                    "message": "仍有高风险权限需要单独确认" if pending_separate else "全部必需权限已一次性确认",
+                },
             )
             self._write_state(state)
         return self.get(session_id)
@@ -1389,7 +1448,13 @@ class GeneratedApp(Activity):
                             "prompt_normalized_zh": user_input["prompt_normalized_zh"],
                             "prompt_normalized_en": user_input["prompt_normalized_en"],
                         },
-                        "requirements": {"prompt": user_input["prompt_original"]},
+                        "requirements": {
+                            "prompt": user_input["prompt_original"],
+                            "required_capabilities": state.get("required_capabilities", []),
+                            "required_accessories": state.get("required_accessories", []),
+                            "runtime_fallbacks": state.get("runtime_fallbacks", {}),
+                            "physical_validation_required": state.get("physical_validation_required", False),
+                        },
                         "api_plan": {
                             "mpos_summary": state["api_summary_version"].get(
                                 "mpos_api_summary.json"
@@ -1402,7 +1467,10 @@ class GeneratedApp(Activity):
                             "required": False,
                             "classification": "builtin-mpos-and-app-local-only",
                         },
-                        "test_plan": {"targets": user_input["targets"]},
+                        "test_plan": {
+                            "targets": user_input["targets"],
+                            "capability_contract": state.get("capability_contract", {}),
+                        },
                         "warnings": [],
                         "structured_errors": [],
                         "handoff": {"next_phase": "mpos-prepare-deps-web"},
@@ -1445,6 +1513,10 @@ class GeneratedApp(Activity):
                             revision=int(state["revision_id"].removeprefix("r")),
                             previous_code=previous_code,
                             runtime_error=request.runtime_error,
+                            required_capabilities=state.get("required_capabilities", []),
+                            required_accessories=state.get("required_accessories", []),
+                            runtime_fallbacks=state.get("runtime_fallbacks", {}),
+                            physical_validation_required=state.get("physical_validation_required", False),
                             ai_provider="auto",
                         )
                     )
@@ -1466,6 +1538,14 @@ class GeneratedApp(Activity):
                         / generated.package_name
                     )
                     for generated_file in generated.files:
+                        if generated_file.path == "generation_result.json":
+                            result_payload = json.loads(generated_file.content)
+                            result_payload.update({
+                                "skill_commit": state.get("skills_commit"),
+                                "mpos_commit": state.get("repo_commit"),
+                                "board_capabilities_schema": state.get("board_capabilities_schema", {}),
+                            })
+                            generated_file.content = json.dumps(result_payload, ensure_ascii=False, indent=2)
                         target = (
                             self._root(session_id)
                             / "artifacts"
@@ -1508,6 +1588,17 @@ class GeneratedApp(Activity):
                     syntax_result = script_dispatcher.run(
                         "python_syntax", app_root / "assets" / "main.py"
                     )
+                    hardware_policy = script_dispatcher.run_hardware_policy(
+                        self._root(session_id) / "project", generation["package_name"]
+                    )
+                    if not hardware_policy.get("ok"):
+                        raise GenerationError(
+                            "Generated App violates the MicroPythonOS hardware access policy",
+                            code="DIRECT_HARDWARE_ACCESS_FORBIDDEN",
+                            owner="app",
+                            retryable=True,
+                            details=hardware_policy.get("result", hardware_policy),
+                        )
                     desktop_requested = "desktop-preview" in user_input["targets"]
                     desktop_result: dict[str, Any] = {
                         "status": "skipped",
@@ -1547,7 +1638,7 @@ class GeneratedApp(Activity):
                         "phase": phase,
                         "result": (
                             "success"
-                            if syntax_result.get("ok")
+                            if syntax_result.get("ok") and hardware_policy.get("ok")
                             and desktop_result["status"] in {"passed", "skipped"}
                             else "blocked"
                         ),
@@ -1560,7 +1651,10 @@ class GeneratedApp(Activity):
                             )
                         },
                         "acceptance_tests": generation.get("acceptance_tests", []),
-                        "controlled_checks": {"python_syntax": syntax_result},
+                        "controlled_checks": {
+                            "python_syntax": syntax_result,
+                            "hardware_policy": hardware_policy,
+                        },
                         "warnings": [],
                         "structured_errors": [],
                         "handoff": {"next_phase": "mpos-package-app-web"},
@@ -1708,7 +1802,7 @@ class GeneratedApp(Activity):
                     ),
                     "stage": action,
                     "phase": phase,
-                    "owner": "external" if code.startswith("AI_UPSTREAM_") else "app",
+                    "owner": getattr(exc, "owner", "external" if code.startswith("AI_UPSTREAM_") else "app"),
                     "retryable": getattr(exc, "retryable", True),
                     "details": {
                         "resume_checkpoint_id": resume_checkpoint_id,
@@ -1831,6 +1925,17 @@ class GeneratedApp(Activity):
         state["input"]["prompt_language"] = request.prompt_language
         state["input"]["prompt_normalized_zh"] = request.prompt
         state["input"]["prompt_normalized_en"] = request.prompt
+        if request.required_capabilities is not None:
+            state["required_capabilities"] = request.required_capabilities
+        if request.required_accessories is not None:
+            state["required_accessories"] = request.required_accessories
+        if request.runtime_fallbacks is not None:
+            state["runtime_fallbacks"] = request.runtime_fallbacks
+        if request.physical_validation_required is not None:
+            state["physical_validation_required"] = request.physical_validation_required
+        state["capability_contract"] = hardware_capability_registry.resolve(
+            state.get("required_capabilities", []), state.get("runtime_fallbacks", {})
+        )
         state["status"] = "created"
         state["current_phase"] = "mpos-analyze-app-web"
         state["checkpoint_id"] = "session_created"
@@ -1921,7 +2026,10 @@ class GeneratedApp(Activity):
                         "required": False,
                         "classification": "builtin-mpos-and-app-local-only",
                     },
-                    "test_plan": {"targets": user_input["targets"]},
+                    "test_plan": {
+                        "targets": user_input["targets"],
+                        "capability_contract": state.get("capability_contract", {}),
+                    },
                     "deploy_plan": {
                         "physical_requested": "physical-device"
                         in user_input["targets"],
@@ -1993,6 +2101,10 @@ class GeneratedApp(Activity):
                         revision=int(state["revision_id"].removeprefix("r")),
                         previous_code=state.get("pending_repair", {}).get("previous_code"),
                         runtime_error=state.get("pending_repair", {}).get("runtime_error"),
+                        required_capabilities=state.get("required_capabilities", []),
+                        required_accessories=state.get("required_accessories", []),
+                        runtime_fallbacks=state.get("runtime_fallbacks", {}),
+                        physical_validation_required=state.get("physical_validation_required", False),
                         ai_provider="auto",
                     ),
                     attempt_sink=lambda record: self._write_generation_attempt(
@@ -2022,6 +2134,14 @@ class GeneratedApp(Activity):
                     / generated.package_name
                 )
                 for generated_file in generated.files:
+                    if generated_file.path == "generation_result.json":
+                        result_payload = json.loads(generated_file.content)
+                        result_payload.update({
+                            "skill_commit": state.get("skills_commit"),
+                            "mpos_commit": state.get("repo_commit"),
+                            "board_capabilities_schema": state.get("board_capabilities_schema", {}),
+                        })
+                        generated_file.content = json.dumps(result_payload, ensure_ascii=False, indent=2)
                     if generated_file.path == "generation_result.json":
                         target = self._root(session_id) / "artifacts" / generated_file.path
                     else:
@@ -2092,6 +2212,17 @@ class GeneratedApp(Activity):
                 syntax_result = script_dispatcher.run(
                     "python_syntax", app_root / "assets" / "main.py"
                 )
+                hardware_policy = script_dispatcher.run_hardware_policy(
+                    self._root(session_id) / "project", generated.package_name
+                )
+                if not hardware_policy.get("ok"):
+                    raise GenerationError(
+                        "Generated App violates the MicroPythonOS hardware access policy",
+                        code="DIRECT_HARDWARE_ACCESS_FORBIDDEN",
+                        owner="app",
+                        retryable=True,
+                        details=hardware_policy.get("result", hardware_policy),
+                    )
                 desktop_result: dict[str, Any] = {
                     "status": "skipped",
                     "reason": (
@@ -2149,6 +2280,7 @@ class GeneratedApp(Activity):
                     "acceptance_tests": generated.acceptance_tests,
                     "controlled_checks": {
                         "python_syntax": syntax_result,
+                        "hardware_policy": hardware_policy,
                         "arbitrary_shell_allowed": False,
                     },
                     "warnings": [
@@ -2423,7 +2555,7 @@ class GeneratedApp(Activity):
                     ),
                     "stage": "generation",
                     "phase": "mpos-gen-app-web",
-                    "owner": "external" if code.startswith("AI_UPSTREAM_") else "app",
+                    "owner": getattr(exc, "owner", "external" if code.startswith("AI_UPSTREAM_") else "app"),
                     "retryable": getattr(exc, "retryable", True),
                     "details": {
                         "attempt": state["attempts"].get("mpos-gen-app-web", 1),
@@ -2481,7 +2613,14 @@ class GeneratedApp(Activity):
             **skill,
             "micropythonos_commit": state.get("repo_commit"),
             "micropython_skills_commit": state.get("skills_commit"),
+            "skill_commit": state.get("skills_commit"),
+            "mpos_commit": state.get("repo_commit"),
             "api_summary_version": state.get("api_summary_version", {}),
+            "board_capabilities_schema": state.get("board_capabilities_schema", {}),
+            "required_capabilities": state.get("required_capabilities", []),
+            "required_accessories": state.get("required_accessories", []),
+            "runtime_fallbacks": state.get("runtime_fallbacks", {}),
+            "physical_validation_required": state.get("physical_validation_required", False),
             "output_files": [item["path"] for item in state.get("artifacts", [])],
             "warnings": state.get("warnings", []),
             "error": state.get("last_error"),
@@ -3213,7 +3352,30 @@ class GeneratedApp(Activity):
         if state.get("preview_idempotency_key") == request.idempotency_key:
             return state
         state["preview_idempotency_key"] = request.idempotency_key
-        if request.result == "success":
+        contracts = state.get("capability_contract", {}).get("contracts", {})
+        web_unsupported = sorted(
+            name for name, contract in contracts.items()
+            if contract.get("web_preview") == "unsupported_without_emulation"
+        )
+        if request.result == "partial" or (request.result == "failed" and web_unsupported):
+            error = {
+                "code": "WEB_PREVIEW_UNSUPPORTED",
+                "message": request.message or "Required hardware cannot be exercised in Web preview",
+                "stage": "test",
+                "phase": "mpos-test-app-web",
+                "owner": "external",
+                "retryable": False,
+                "details": {"capabilities": web_unsupported},
+                "logs": [],
+            }
+            state["status"] = "completed"
+            state["current_phase"] = "mpos-publish-app-web"
+            state["checkpoint_id"] = "web_preview_partial"
+            state["next_phase"] = None
+            state["last_error"] = error
+            state["structured_errors"].append(error)
+            payload = {"result": "partial", "checkpoint_id": "web_preview_partial", "structured_errors": [error]}
+        elif request.result == "success":
             self._checkpoint(
                 state,
                 "mpos-test-app-web",
@@ -3287,6 +3449,8 @@ class GeneratedApp(Activity):
             "DEVICE_PROBE_FAILED",
             "SCRIPT_TIMEOUT",
             "DEVICE_DEPLOY_FAILED",
+            "HARDWARE_CAPABILITY_UNAVAILABLE",
+            "MPOS_CAPABILITY_API_MISSING",
         }
         error_code = (
             request.error_code
@@ -3300,6 +3464,8 @@ class GeneratedApp(Activity):
             "DEVICE_PROBE_FAILED": (True, None),
             "SCRIPT_TIMEOUT": (None, None),
             "DEVICE_DEPLOY_FAILED": (None, None),
+            "HARDWARE_CAPABILITY_UNAVAILABLE": (True, True),
+            "MPOS_CAPABILITY_API_MISSING": (True, True),
         }
         inferred_hardware, inferred_mpos = inferred_facts[error_code]
         hardware_available = (
@@ -3324,8 +3490,8 @@ class GeneratedApp(Activity):
                     "message": request.message or "浏览器设备操作失败",
                     "stage": "deploy",
                     "phase": "mpos-deploy-app-web",
-                    "owner": "device",
-                    "retryable": True,
+                    "owner": "os_api" if error_code == "MPOS_CAPABILITY_API_MISSING" else "device",
+                    "retryable": error_code not in {"HARDWARE_CAPABILITY_UNAVAILABLE", "MPOS_CAPABILITY_API_MISSING"},
                     "details": {
                         "transport": request.transport,
                         "board": request.board,
@@ -3333,6 +3499,8 @@ class GeneratedApp(Activity):
                         "usb_product_id": request.usb_product_id,
                         "hardware_available": hardware_available,
                         "micropythonos_installed": micropythonos_installed,
+                        "detected_hardware_id": request.detected_hardware_id,
+                        "runtime_capability_results": request.runtime_capability_results,
                     },
                     "logs": ["activity_log.jsonl"],
                 }
@@ -3344,6 +3512,10 @@ class GeneratedApp(Activity):
             "mode": "mpk-install" if installed else request.transport,
             "hardware_available": hardware_available,
             "board": request.board,
+            "detected_hardware_id": request.detected_hardware_id,
+            "runtime_capability_results": request.runtime_capability_results,
+            "required_capabilities": state.get("required_capabilities", []),
+            "required_accessories": state.get("required_accessories", []),
             "usb_vendor_id": request.usb_vendor_id,
             "usb_product_id": request.usb_product_id,
             "serial_port": (

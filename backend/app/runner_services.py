@@ -34,9 +34,111 @@ STAGE_CHECKPOINTS = {
     "publish-check": "publish_check_done",
 }
 
+BOARD_CAPABILITIES_PATH = (
+    SKILLS_ROOT / "mpos-dev-web" / "reference" / "board_capabilities.json"
+)
+HARDWARE_CAPABILITIES_DOC = (
+    SKILLS_ROOT / "mpos-dev" / "reference" / "docs-hardware-capabilities.md"
+)
+
 
 class SkillContractError(RuntimeError):
     pass
+
+
+class HardwareCapabilityRegistry:
+    """Authoritative capability contract; static board rows are advisory only."""
+
+    def __init__(self, path: Path = BOARD_CAPABILITIES_PATH) -> None:
+        self.path = path
+
+    def load(self) -> dict[str, Any]:
+        if not self.path.is_file():
+            raise SkillContractError("MPOS_CAPABILITY_CONTRACT_MISSING")
+        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        if not isinstance(payload.get("feature_contracts"), dict):
+            raise SkillContractError("MPOS_CAPABILITY_CONTRACT_INVALID")
+        return payload
+
+    def describe(self) -> dict[str, Any]:
+        payload = self.load()
+        raw = self.path.read_bytes()
+        return {
+            "schema_version": payload.get("schema_version"),
+            "sha256": hashlib.sha256(raw).hexdigest(),
+            "path": str(self.path.relative_to(PROJECT_ROOT)).replace("\\", "/"),
+            "documentation": str(HARDWARE_CAPABILITIES_DOC.relative_to(PROJECT_ROOT)).replace("\\", "/"),
+        }
+
+    def infer(self, prompt: str) -> list[str]:
+        text = prompt.casefold()
+        keywords = {
+            "camera": ("camera", "摄像", "相机", "拍照", "二维码"),
+            "audio.input": ("microphone", "mic", "麦克风", "录音", "语音输入"),
+            "audio.output": ("speaker", "audio", "扬声器", "播放声音", "蜂鸣"),
+            "sensor.imu": ("imu", "accelerometer", "gyroscope", "陀螺仪", "加速度"),
+            "sensor.environmental": ("temperature sensor", "humidity", "温湿度", "气压"),
+            "lights.rgb": ("rgb", "neopixel", "彩灯", "灯带"),
+            "battery": ("battery", "电池", "电量"),
+            "storage.sdcard": ("sd card", "sdcard", "存储卡", "sd 卡"),
+            "network": ("wifi", "network", "联网", "网络"),
+            "gps": ("gps", "定位", "经纬度"),
+            "infrared": ("infrared", "ir remote", "红外"),
+            "lora": ("lora", "远距离无线"),
+            "input.pointer": ("touch", "pointer", "触摸", "鼠标"),
+            "input.encoder": ("encoder", "旋钮", "编码器"),
+            "input.keypad": ("keypad", "键盘", "按键矩阵"),
+        }
+        return [name for name, terms in keywords.items() if any(term in text for term in terms)]
+
+    def resolve(
+        self,
+        required: list[str],
+        fallbacks: dict[str, str] | None = None,
+    ) -> dict[str, Any]:
+        payload = self.load()
+        contracts = payload["feature_contracts"]
+        unknown = sorted(set(required) - set(contracts))
+        if unknown:
+            return {
+                "status": "blocked",
+                "error": {
+                    "code": "MPOS_CAPABILITY_API_MISSING",
+                    "message": "MicroPythonOS has no capability contract for: " + ", ".join(unknown),
+                    "owner": "os_api",
+                    "retryable": False,
+                    "details": {"capabilities": unknown},
+                },
+            }
+        selected = {name: contracts[name] for name in required}
+        missing_api = [name for name, item in selected.items() if not item.get("portable_api")]
+        if missing_api:
+            return {
+                "status": "blocked",
+                "error": {
+                    "code": "MPOS_CAPABILITY_API_MISSING",
+                    "message": "Required capability is not exposed by a portable Manager API: " + ", ".join(missing_api),
+                    "owner": "os_api",
+                    "retryable": False,
+                    "details": {"capabilities": missing_api},
+                },
+            }
+        partial = [name for name, item in selected.items() if item.get("contract_status") == "partial"]
+        return {
+            "status": "partial" if partial else "portable" if selected else "not_required",
+            "required_capabilities": required,
+            "contracts": selected,
+            "runtime_fallbacks": fallbacks or {},
+            "physical_validation_required": any(
+                bool(item.get("physical_validation_required")) for item in selected.values()
+            ),
+            "warnings": [
+                f"{name}: " + "; ".join(item.get("limitations", []))
+                for name, item in selected.items()
+                if item.get("limitations")
+            ],
+            "partial_capabilities": partial,
+        }
 
 
 @dataclass(frozen=True)
@@ -331,6 +433,50 @@ class ScriptDispatcher:
             "stderr": result.stderr[-4000:],
         }
 
+    def run_hardware_policy(
+        self, repo: Path, app_fullname: str, timeout: int = 30
+    ) -> dict[str, Any]:
+        script = SKILLS_ROOT / "mpos-gen-app" / "scripts" / "check_app_hardware_policy.py"
+        executable = self._resolve_interpreter("python")
+        if not script.is_file() or not executable:
+            return {"ok": False, "error": {"code": "TOOLCHAIN_MISSING", "owner": "toolchain", "retryable": True}}
+        try:
+            result = subprocess.run(
+                [
+                    executable,
+                    str(script),
+                    "--repo",
+                    str(repo),
+                    "--app-fullname",
+                    app_fullname,
+                ],
+                cwd=repo,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "SCRIPT_TIMEOUT",
+                    "owner": "toolchain",
+                    "retryable": True,
+                    "details": {"timeout": timeout},
+                },
+            }
+        try:
+            payload = json.loads((result.stdout or "").strip())
+        except json.JSONDecodeError:
+            payload = {}
+        return {
+            "ok": result.returncode == 0,
+            "result": payload,
+            "stdout": result.stdout[-8000:],
+            "stderr": result.stderr[-8000:],
+        }
+
 
 class DeviceService:
     """Read-only capability probe. Device writes remain unavailable by default."""
@@ -378,5 +524,6 @@ def api_summary_version() -> dict[str, str]:
 
 
 mpos_skill_adapter = MposSkillAdapter()
+hardware_capability_registry = HardwareCapabilityRegistry()
 script_dispatcher = ScriptDispatcher()
 device_service = DeviceService()

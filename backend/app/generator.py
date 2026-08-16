@@ -19,6 +19,7 @@ from typing import Any, Callable
 import httpx
 
 from .models import GenerateRequest, GenerateResponse, GeneratedFile
+from .runner_services import hardware_capability_registry
 
 
 SYSTEM_PROMPT = """
@@ -344,9 +345,15 @@ class GenerationError(RuntimeError):
         message: str,
         *,
         details: dict[str, Any] | None = None,
+        code: str = "GENERATION_FAILED",
+        owner: str = "app",
+        retryable: bool = True,
     ) -> None:
         super().__init__(message)
         self.details = details or {}
+        self.code = code
+        self.owner = owner
+        self.retryable = retryable
 
 
 class UpstreamGenerationError(GenerationError):
@@ -367,6 +374,7 @@ class UpstreamGenerationError(GenerationError):
         self.retryable = retryable
         self.failover_allowed = failover_allowed
         self.details = details or {}
+        self.owner = "external"
 
 
 class ApiValidationError(GenerationError):
@@ -390,6 +398,18 @@ def _build_user_prompt(request: GenerateRequest, correction: str = "") -> str:
         f"{VISUAL_REQUIREMENTS}\n{visual_direction}\n{GENERAL_UI_BLUEPRINT}"
         f"\n{ui_blueprint}"
     )
+    if request.required_capabilities:
+        contract = hardware_capability_registry.resolve(
+            request.required_capabilities, request.runtime_fallbacks
+        )
+        user_prompt += (
+            "\n\n<HARDWARE_CAPABILITY_CONTRACT>\n"
+            "按能力生成，禁止选择或猜测开发板。只能使用下列契约中列出的 mpos Manager API；"
+            "运行时必须先 probe/has_*，不可用时使用 fallback，并在 onDestroy 清理资源。"
+            "禁止 mpos.board、machine.Pin/I2C/SPI/UART/I2S/ADC、NeoPixel、GPIO/总线映射和设备 ID。\n"
+            + json.dumps(contract, ensure_ascii=False)
+            + "\n</HARDWARE_CAPABILITY_CONTRACT>"
+        )
     if _is_shooter_prompt(request.prompt):
         user_prompt += (
             "\n\n这是射击游戏，属于强交互任务。验收条件："
@@ -1080,7 +1100,24 @@ def _validate_code(code: str) -> list[str]:
             if is_blocking_on_create or condition_is_always_true:
                 blocking_while_nodes[id(child)] = int(getattr(child, "lineno", 0))
     for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and (
+            node.module == "mpos.board" or (node.module or "").startswith("mpos.board.")
+        ):
+            hits.append("mpos.board.*（必须使用 Manager 能力探测）")
+        elif isinstance(node, ast.ImportFrom) and node.module in {"machine", "neopixel"}:
+            hits.append(f"{node.module}（必须使用 mpos Manager API）")
+        elif isinstance(node, ast.Import) and any(
+            alias.name == "machine" or alias.name.startswith("mpos.board")
+            for alias in node.names
+        ):
+            hits.append("直接硬件模块（必须使用 mpos Manager API）")
         if isinstance(node, ast.Call):
+            dotted_call = _dotted_name(node.func) if isinstance(node.func, ast.Attribute) else None
+            if dotted_call and any(
+                dotted_call.endswith(f".{name}")
+                for name in ("Pin", "I2C", "SPI", "UART", "I2S", "ADC", "NeoPixel")
+            ):
+                hits.append(f"{dotted_call}（禁止直接访问硬件）")
             if isinstance(node.func, ast.Name) and node.func.id in forbidden_calls:
                 hits.append(node.func.id)
             elif (
@@ -3037,6 +3074,18 @@ async def generate_app(
     *,
     attempt_sink: GenerationAttemptSink | None = None,
 ) -> GenerateResponse:
+    capability_contract = hardware_capability_registry.resolve(
+        request.required_capabilities, request.runtime_fallbacks
+    )
+    if capability_contract.get("status") == "blocked":
+        error = capability_contract["error"]
+        raise GenerationError(
+            error["message"],
+            code=error["code"],
+            owner=error["owner"],
+            retryable=error["retryable"],
+            details=error.get("details", {}),
+        )
     budget_seconds = _optional_timeout_env(
         "AI_OVERALL_TIMEOUT_SECONDS",
         default=360.0,
@@ -3305,6 +3354,14 @@ async def generate_app(
         },
         "files_written": ["MANIFEST.JSON", "icon_64x64.png", "assets/main.py"],
         "api_usage": api_usage,
+        "required_capabilities": request.required_capabilities,
+        "required_accessories": request.required_accessories,
+        "runtime_fallbacks": request.runtime_fallbacks,
+        "physical_validation_required": (
+            request.physical_validation_required
+            or capability_contract.get("physical_validation_required", False)
+        ),
+        "capability_contract": capability_contract,
         "validation": {"gates": warnings},
         "acceptance_tests": acceptance_tests,
         "warnings": warnings,
@@ -3341,4 +3398,12 @@ async def generate_app(
         prompt_normalized_zh=prompt_normalized_zh,
         prompt_normalized_en=prompt_normalized_en,
         store_metadata=store_metadata,
+        required_capabilities=request.required_capabilities,
+        required_accessories=request.required_accessories,
+        runtime_fallbacks=request.runtime_fallbacks,
+        physical_validation_required=(
+            request.physical_validation_required
+            or capability_contract.get("physical_validation_required", False)
+        ),
+        capability_contract=capability_contract,
     )

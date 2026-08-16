@@ -24,6 +24,10 @@ class PublicGenerateRequest(BaseModel):
     revision: int = Field(default=1, ge=1, le=9999)
     previous_code: str | None = Field(default=None, max_length=100_000)
     runtime_error: str | None = Field(default=None, max_length=8000)
+    required_capabilities: list[str] = Field(default_factory=list, max_length=32)
+    required_accessories: list[str] = Field(default_factory=list, max_length=32)
+    runtime_fallbacks: dict[str, str] = Field(default_factory=dict)
+    physical_validation_required: bool = False
 
     @field_validator("package_name")
     @classmethod
@@ -65,6 +69,11 @@ class GenerateResponse(BaseModel):
     prompt_normalized_zh: str = ""
     prompt_normalized_en: str = ""
     store_metadata: dict[str, Any] = Field(default_factory=dict)
+    required_capabilities: list[str] = Field(default_factory=list)
+    required_accessories: list[str] = Field(default_factory=list)
+    runtime_fallbacks: dict[str, str] = Field(default_factory=dict)
+    physical_validation_required: bool = False
+    capability_contract: dict[str, Any] = Field(default_factory=dict)
 
 
 class PublicGenerateResponse(BaseModel):
@@ -80,6 +89,11 @@ class PublicGenerateResponse(BaseModel):
     prompt_normalized_zh: str = ""
     prompt_normalized_en: str = ""
     store_metadata: dict[str, Any] = Field(default_factory=dict)
+    required_capabilities: list[str] = Field(default_factory=list)
+    required_accessories: list[str] = Field(default_factory=list)
+    runtime_fallbacks: dict[str, str] = Field(default_factory=dict)
+    physical_validation_required: bool = False
+    capability_contract: dict[str, Any] = Field(default_factory=dict)
 
 
 class RequirementMessage(BaseModel):
@@ -146,6 +160,10 @@ class SessionCreateRequest(BaseModel):
         Literal["desktop-preview", "web-preview", "physical-device", "package-only"]
     ] = ["web-preview", "package-only"]
     capabilities: Capabilities = Field(default_factory=Capabilities)
+    required_capabilities: list[str] = Field(default_factory=list, max_length=32)
+    required_accessories: list[str] = Field(default_factory=list, max_length=32)
+    runtime_fallbacks: dict[str, str] = Field(default_factory=dict)
+    physical_validation_required: bool = False
 
     @field_validator("protocol_version")
     @classmethod
@@ -165,6 +183,10 @@ class SessionActionRequest(BaseModel):
     previous_code: str | None = Field(default=None, max_length=100_000)
     runtime_error: str | None = Field(default=None, max_length=8000)
     timeout_seconds: int = Field(default=180, ge=10, le=600)
+    required_capabilities: list[str] | None = Field(default=None, max_length=32)
+    required_accessories: list[str] | None = Field(default=None, max_length=32)
+    runtime_fallbacks: dict[str, str] | None = None
+    physical_validation_required: bool | None = None
 
 
 class AuthCredentials(BaseModel):
@@ -192,10 +214,14 @@ class RevisionRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=200)
     prompt: str = Field(min_length=3, max_length=4000)
     prompt_language: Literal["zh-CN", "en-US", "mixed", "unknown"] = "unknown"
+    required_capabilities: list[str] | None = Field(default=None, max_length=32)
+    required_accessories: list[str] | None = Field(default=None, max_length=32)
+    runtime_fallbacks: dict[str, str] | None = None
+    physical_validation_required: bool | None = None
 
 
 class PreviewResultRequest(SessionActionRequest):
-    result: Literal["success", "failed", "timeout"]
+    result: Literal["success", "partial", "failed", "timeout"]
     message: str = Field(default="", max_length=8000)
 
 
@@ -222,7 +248,9 @@ class DeviceResultRequest(BaseModel):
     error_code: str | None = Field(default=None, max_length=100)
     hardware_available: bool | None = None
     micropythonos_installed: bool | None = None
-    board: str = Field(default="Waveshare ESP32-S3-Touch-LCD-2", max_length=200)
+    board: str = Field(default="", max_length=200)
+    detected_hardware_id: str | None = Field(default=None, max_length=200)
+    runtime_capability_results: dict[str, bool | str | None] = Field(default_factory=dict)
     usb_vendor_id: int | None = Field(default=None, ge=0, le=0xFFFF)
     usb_product_id: int | None = Field(default=None, ge=0, le=0xFFFF)
     installed_path: str | None = Field(default=None, max_length=500)

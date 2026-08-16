@@ -18,6 +18,14 @@ const infrastructureCodes = new Set([
   "WASM_REPL_STARTUP_TIMEOUT",
   "WASM_RAW_REPL_TIMEOUT",
   "WASM_STARTUP_TIMEOUT",
+  "WEB_PREVIEW_UNSUPPORTED",
+  "HARDWARE_CAPABILITY_UNAVAILABLE",
+  "MPOS_CAPABILITY_API_MISSING",
+]);
+const nonRepairableCapabilityCodes = new Set([
+  "WEB_PREVIEW_UNSUPPORTED",
+  "HARDWARE_CAPABILITY_UNAVAILABLE",
+  "MPOS_CAPABILITY_API_MISSING",
 ]);
 
 /**
@@ -26,10 +34,11 @@ const infrastructureCodes = new Set([
  * can never start an expensive generation loop.
  */
 export const classifyWasmFailure = (failure: WasmFailure): WasmFailureKind => {
+  const code = String(failure.code || "").toUpperCase();
+  if (nonRepairableCapabilityCodes.has(code)) return "infrastructure";
   if (failure.repairable === true) return "application";
   if (failure.repairable === false) return "infrastructure";
 
-  const code = String(failure.code || "").toUpperCase();
   if (applicationCodes.has(code) || code.startsWith("APP_")) return "application";
   if (infrastructureCodes.has(code) || code.startsWith("WASM_")) return "infrastructure";
 
@@ -42,4 +51,3 @@ export const classifyWasmFailure = (failure: WasmFailure): WasmFailureKind => {
   }
   return "infrastructure";
 };
-
