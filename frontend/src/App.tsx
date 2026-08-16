@@ -295,6 +295,7 @@ const hardwareSponsors = [
   ["lilygo", "LILYGO", "/sponsors/lilygo.png"],
   ["freenove", "Freenove", "/sponsors/freenove.png"],
 ] as const;
+const quickStartGuideUrl = "https://f1829ryac0m.feishu.cn/wiki/Kskcw9lZCiBHSgkswx7ctvGynPh";
 export default function App() {
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem("mpos-language") === "en" ? "en" : "zh");
   const isZh = language === "zh";
@@ -1893,6 +1894,10 @@ export default function App() {
             `约 ${publicSystemStatus.retry_after_seconds} 秒后再次检查…`,
             `Checking again in about ${publicSystemStatus.retry_after_seconds} seconds…`,
           )}</div>
+          <a className="auth-guide-link" href={quickStartGuideUrl} target="_blank" rel="noreferrer">
+            <span>↗</span>
+            <div><strong>{tr("查看快速上手教程", "Open the quick start guide")}</strong><small>{tr("从创建 App 到浏览器仿真与 ESP32 真机部署", "From app creation to browser simulation and ESP32 deployment")}</small></div>
+          </a>
         </section>
       </div>
     );
@@ -1957,6 +1962,10 @@ export default function App() {
               >{authMode === "login"
                 ? tr("没有账号？立即注册", "No account? Create one")
                 : tr("已经有账号？返回登录", "Already registered? Sign in")}</button>
+              <a className="auth-guide-link" href={quickStartGuideUrl} target="_blank" rel="noreferrer">
+                <span>↗</span>
+                <div><strong>{tr("第一次使用？查看快速上手教程", "New here? Open the quick start guide")}</strong><small>{tr("创建、预览、真机部署与发布一步步说明", "Step-by-step creation, preview, device deployment, and publishing")}</small></div>
+              </a>
               <small className="auth-notice">{tr(
                 "订阅采用人工收款与人工开通；密码只以安全哈希保存在后端数据库。",
                 "Subscriptions use manual payment and activation. Passwords are stored only as secure hashes.",
@@ -2008,6 +2017,18 @@ export default function App() {
           <p>{tr("说出想法 → 浏览器预览 → 真机运行 → 发布分享", "Idea → Preview → Device → Share")}</p>
           <h1>{tr("让创客 App 先跑起来，", "Make, preview, deploy, and share ")}<em>{tr("再传播出去。", "MicroPythonOS apps from the browser.")}</em></h1>
         </section>
+
+        <a className="quick-start-guide" href={quickStartGuideUrl} target="_blank" rel="noreferrer">
+          <span className="quick-start-guide-icon">↗</span>
+          <div>
+            <strong>{tr("快速上手 Blockless-Make", "Blockless-Make quick start")}</strong>
+            <small>{tr(
+              "从一句需求开始，完成 AI 生成、浏览器仿真、ESP32 真机部署和 uPyStore 发布。",
+              "Start with one idea, then generate, simulate, deploy to ESP32, and publish to uPyStore. (Guide in Chinese)",
+            )}</small>
+          </div>
+          <b>{tr("查看完整教程", "Open guide")} →</b>
+        </a>
 
         <div className="workspace" id="builder">
           <section className="card input-card">
