@@ -61,6 +61,9 @@ session/artifact，Render 重启不会把持久数据留在临时磁盘里。
 
 ## Runtime boundaries
 
+跨设备硬件能力、运行时探测、生成门禁、前后端字段和真机验收的详细设计见
+[`cross-device-capability-integration.md`](cross-device-capability-integration.md)。该设计明确不增加板卡选择器，并区分可移植 MPOS API、板级私有能力和外接配件。
+
 - Skill 文件定义阶段契约，不能向后端注入 shell。
 - `ScriptDispatcher` 只执行服务器预定义的白名单操作。
 - Desktop smoke 仅在 Linux SDL binary、controller 和 runner 同时存在时执行；
