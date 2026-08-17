@@ -1,3 +1,4 @@
+import contextlib
 import json
 import sqlite3
 import tempfile
@@ -32,6 +33,7 @@ class AccessControlTests(unittest.TestCase):
 
         session_module.SESSION_ROOT = Path(self.temp.name, "sessions").resolve()
         auth = AuthService(f"sqlite:///{Path(self.temp.name, 'auth.db')}")
+        self.auth = auth
         main_module.auth_service = auth
         main_module.billing_service = BillingService(engine=auth.engine)
         main_module.session_service = SessionService()
@@ -47,6 +49,9 @@ class AccessControlTests(unittest.TestCase):
         main_module.billing_service = self.original_billing_service
         main_module.auth_service = self.original_auth_service
         session_module.SESSION_ROOT = self.original_root
+        # Release the SQLite pool before removing the directory: on Windows the
+        # open handle turns cleanup into a PermissionError and fails the test.
+        self.auth.engine.dispose()
         self.temp.cleanup()
 
     def _register(
@@ -242,7 +247,9 @@ class AccessControlTests(unittest.TestCase):
 
     def test_existing_sqlite_database_receives_default_user_role(self) -> None:
         legacy_path = Path(self.temp.name, "legacy.db")
-        with sqlite3.connect(legacy_path) as connection:
+        # closing(): sqlite3's own context manager commits but does not close,
+        # and the surviving handle blocks the temp-dir cleanup on Windows.
+        with contextlib.closing(sqlite3.connect(legacy_path)) as connection, connection:
             connection.execute(
                 """
                 CREATE TABLE app_users (
@@ -271,6 +278,7 @@ class AccessControlTests(unittest.TestCase):
         with service.engine.connect() as connection:
             legacy_user = connection.execute(select(users)).mappings().one()
         self.assertEqual(legacy_user["role"], ROLE_USER)
+        service.engine.dispose()
 
     def test_unauthenticated_response_keeps_local_cors_headers(self) -> None:
         response = self.client_a.get(

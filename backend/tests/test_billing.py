@@ -14,6 +14,10 @@ class BillingServiceTests(unittest.TestCase):
         self.user_id = "browser-test-user"
 
     def tearDown(self) -> None:
+        # Release the SQLite connection pool first. On Windows the open handle
+        # makes the temp-dir removal raise PermissionError, which fails the
+        # test even though everything it asserted passed.
+        self.service.engine.dispose()
         self.temp.cleanup()
 
     def test_new_user_receives_fifty_credits(self) -> None:
