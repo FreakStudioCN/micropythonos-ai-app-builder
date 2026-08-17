@@ -14,6 +14,18 @@ import {
   stages,
 } from "../src/App";
 
+// Windows ships the interpreter as `python`, so a hard-coded `python3` made
+// spawnSync return status null and the assertion below read as a syntax error
+// in the generated receiver rather than as a missing binary.
+const PYTHON = (() => {
+  for (const candidate of ["python3", "python", "py"]) {
+    if (spawnSync(candidate, ["-c", "print(1)"], { encoding: "utf8" }).status === 0) {
+      return candidate;
+    }
+  }
+  throw new Error("no working Python interpreter (tried python3, python, py)");
+})();
+
 describe("buildFastPathExtractorLine", () => {
   it("keeps the extractor inside the fast-path receiver try suite", () => {
     const extractorLine = buildFastPathExtractorLine(
@@ -28,7 +40,7 @@ describe("buildFastPathExtractorLine", () => {
       " pass",
     ].join("\n");
     const result = spawnSync(
-      "python3",
+      PYTHON,
       [
         "-c",
         "import sys; compile(sys.stdin.read(), '<fast-path-receiver>', 'exec')",
