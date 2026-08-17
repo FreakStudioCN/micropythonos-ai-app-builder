@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .capability_inference import analyze_capabilities
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SKILLS_ROOT = PROJECT_ROOT / "vendor" / "MicroPython_Skills"
@@ -83,31 +84,23 @@ class HardwareCapabilityRegistry:
             "documentation": str(HARDWARE_CAPABILITIES_DOC.relative_to(PROJECT_ROOT)).replace("\\", "/"),
         }
 
+    def classify(self, prompt: str) -> dict[str, str]:
+        """Inferred capabilities mapped to how strong the evidence was."""
+        non_portable = frozenset(
+            name
+            for name, item in self.load()["feature_contracts"].items()
+            if not item.get("portable_api")
+        )
+        return analyze_capabilities(prompt, non_portable)
+
     def infer(self, prompt: str) -> list[str]:
-        text = prompt.casefold()
-        keywords = {
-            "camera": ("camera", "摄像", "相机", "拍照", "二维码"),
-            "audio.input": ("microphone", "mic", "麦克风", "录音", "语音输入"),
-            "audio.output": ("speaker", "audio", "扬声器", "播放声音", "蜂鸣"),
-            "sensor.imu": ("imu", "accelerometer", "gyroscope", "陀螺仪", "加速度"),
-            "sensor.environmental": ("temperature sensor", "humidity", "温湿度", "气压"),
-            "lights.rgb": ("rgb", "neopixel", "彩灯", "灯带"),
-            "battery": ("battery", "电池", "电量"),
-            "storage.sdcard": ("sd card", "sdcard", "存储卡", "sd 卡"),
-            "network": ("wifi", "network", "联网", "网络"),
-            "gps": ("gps", "定位", "经纬度"),
-            "infrared": ("infrared", "ir remote", "红外"),
-            "lora": ("lora", "远距离无线"),
-            "input.pointer": ("touch", "pointer", "触摸", "鼠标"),
-            "input.encoder": ("encoder", "旋钮", "编码器"),
-            "input.keypad": ("keypad", "键盘", "按键矩阵"),
-        }
-        return [name for name, terms in keywords.items() if any(term in text for term in terms)]
+        return list(self.classify(prompt))
 
     def resolve(
         self,
         required: list[str],
         fallbacks: dict[str, str] | None = None,
+        sources: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         payload = self.load()
         contracts = payload["feature_contracts"]
@@ -142,8 +135,12 @@ class HardwareCapabilityRegistry:
             "required_capabilities": required,
             "contracts": selected,
             "runtime_fallbacks": fallbacks or {},
+            # A capability guessed from a topic word must not demand a device the
+            # user may not own. Names absent from `sources` were stated outright.
             "physical_validation_required": any(
-                bool(item.get("physical_validation_required")) for item in selected.values()
+                bool(item.get("physical_validation_required"))
+                for name, item in selected.items()
+                if (sources or {}).get(name, "declared") != "inferred"
             ),
             "warnings": [
                 f"{name}: " + "; ".join(item.get("limitations", []))

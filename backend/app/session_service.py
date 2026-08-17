@@ -802,9 +802,10 @@ class GeneratedApp(Activity):
             ):
                 return self.get(existing["session_id"])
 
-        required_capabilities = request.required_capabilities or hardware_capability_registry.infer(request.prompt)
+        capability_sources = {} if request.required_capabilities else hardware_capability_registry.classify(request.prompt)
+        required_capabilities = request.required_capabilities or list(capability_sources)
         capability_contract = hardware_capability_registry.resolve(
-            required_capabilities, request.runtime_fallbacks
+            required_capabilities, request.runtime_fallbacks, capability_sources
         )
         physical_validation_required = (
             request.physical_validation_required
