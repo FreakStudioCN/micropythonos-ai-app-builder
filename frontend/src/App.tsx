@@ -259,6 +259,17 @@ interface StageSessionSnapshot {
   last_error?: { stage: string } | null;
   generation?: unknown;
 }
+/**
+ * Idempotency key for a browser preview result.
+ *
+ * The revision has to be part of it. The backend drops a preview result whose
+ * key it has already recorded, so a key built from the session alone meant every
+ * revision after the first re-sent r1's key, was discarded as a duplicate, and
+ * left that revision stuck in `waiting_preview` forever.
+ */
+export const previewResultKey = (sessionId: string, revision?: number) =>
+  `preview-success-${sessionId}-r${revision ?? 1}`;
+
 export const stageIndexForSession = (session: StageSessionSnapshot) => {
   if (session.last_error) return stageIndexForError(session.last_error.stage);
   if (session.status === "waiting_device") return stageIndexForError("deploy");
@@ -875,7 +886,7 @@ export default function App() {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              idempotency_key: `preview-success-${savedSession}`,
+              idempotency_key: previewResultKey(savedSession, resultRef.current?.revision),
               result: "success",
               message: "MicroPythonOS WASM installed and launched the generated app through AppManager",
             }),
@@ -1478,6 +1489,11 @@ export default function App() {
       }
       const updated = await response.json() as SessionState;
       setSessionState(updated);
+      // The screenshot is often the last missing publish artifact, so this call
+      // is what completes the session. Without mirroring the server's verdict the
+      // UI keeps showing the previous blocked state for work that is now done.
+      setStatus(updated.status);
+      setCurrentStage(stageIndexForSession(updated));
       setToast(tr("截图已加入发布材料", "Screenshot added to publishing materials"));
     } catch (error) {
       setToast(error instanceof Error ? error.message : tr("截图上传失败", "Screenshot upload failed"));
