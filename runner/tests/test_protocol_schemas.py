@@ -296,7 +296,7 @@ class ProtocolSchemaTests(unittest.TestCase):
                 "phase": "mpos-deploy-app-web",
                 "mode": "web-preview",
                 "hardware_available": False,
-                "board": None,
+                "hardware_id": None,
                 "serial_port": None,
                 "micropythonos_installed": "unknown",
                 "permission_decisions": [],

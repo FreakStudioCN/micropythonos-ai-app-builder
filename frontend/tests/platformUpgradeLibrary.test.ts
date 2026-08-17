@@ -8,6 +8,7 @@ import {
   hasGenerationActivityChanged,
   isPlatformActionAllowed,
   normalizePublicSystemStatus,
+  previewResultKey,
   MAX_SHOWCASE_MPK_BYTES,
   readVerifiedShowcaseMpk,
   resolveTrustedShowcaseMpkUrl,
@@ -153,5 +154,29 @@ describe("WASM bridge origin", () => {
       "data:text/html,unsafe",
       "https://builder.example/apps",
     )).toThrow("HTTP(S)");
+  });
+});
+
+describe("previewResultKey", () => {
+  it("scopes the key to the revision so a later preview is not deduped away", () => {
+    const r1 = previewResultKey("success", "sess_abc", 1);
+    const r2 = previewResultKey("success", "sess_abc", 2);
+    // The backend drops a preview result whose key it has already recorded.
+    // Equal keys here meant every revision after r1 hung in waiting_preview.
+    expect(r1).not.toBe(r2);
+  });
+
+  it("keeps a retry of the same preview idempotent", () => {
+    expect(previewResultKey("partial", "sess_abc", 3))
+      .toBe(previewResultKey("partial", "sess_abc", 3));
+  });
+
+  it("separates a partial preview from a successful one", () => {
+    expect(previewResultKey("partial", "sess_abc", 1))
+      .not.toBe(previewResultKey("success", "sess_abc", 1));
+  });
+
+  it("defaults a missing revision to r1 rather than undefined", () => {
+    expect(previewResultKey("success", "sess_abc", undefined)).toBe("preview-success-sess_abc-r1");
   });
 });

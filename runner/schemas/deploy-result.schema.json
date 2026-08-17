@@ -11,7 +11,7 @@
       "required": [
         "mode",
         "hardware_available",
-        "board",
+        "hardware_id",
         "serial_port",
         "micropythonos_installed",
         "permission_decisions",
@@ -47,11 +47,64 @@
             "null"
           ]
         },
-        "board": {
+        "hardware_id": {
+          "description": "DeviceInfo.hardware_id, diagnostics only. Never a selector or a precondition, and never defaulted to a specific board.",
           "type": [
             "string",
             "null"
           ]
+        },
+        "detected_hardware_id": {
+          "description": "Hardware id actually read back from the authorised device.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "board_metadata_is_advisory": {
+          "description": "Always true: board_capabilities.json may only add context, never accept or reject a device.",
+          "type": "boolean"
+        },
+        "capability_versions": {
+          "description": "Pinned Skills/MPOS commits and capability schema, so resuming a session cannot silently switch API snapshots.",
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "runtime_capability_results": {
+          "description": "Runtime probe evidence per required capability. Probe results are authoritative over the static board table.",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "capability",
+              "available"
+            ],
+            "properties": {
+              "capability": {
+                "type": "string",
+                "minLength": 1
+              },
+              "available": {
+                "description": "null means the probe could not be evaluated. That is not the same as absent hardware.",
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "probe": {
+                "type": "string"
+              },
+              "detail": {
+                "type": "string"
+              },
+              "source": {
+                "type": "string"
+              }
+            },
+            "additionalProperties": false
+          }
         },
         "serial_port": {
           "type": [

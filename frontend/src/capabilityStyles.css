@@ -1,0 +1,60 @@
+/*
+ * Styling for the capability read-outs (CapabilityTags, DeviceCapabilityPanel).
+ *
+ * Its own file rather than an append to styles.css: the capability layer is a
+ * self-contained feature, and styles.css is already long enough that finding
+ * anything in it is a chore.
+ *
+ * The status colours carry meaning and must stay distinguishable: green is
+ * "confirmed on real hardware", red is "blocked and not fixable by editing the
+ * App", amber is "works with a caveat", grey is "not measured". Grey must never
+ * read as red — "we did not measure it" is not "the hardware is missing".
+ */
+
+.capability-tags { margin-top: 14px; padding: 13px; background: #f8fafc; border: 1px solid #dbe3ee; border-radius: 11px; }
+.capability-tags h3 { margin: 0 0 5px; font-size: 13px; }
+.capability-hint { margin: 0 0 10px; color: #7a8498; font-size: 11px; line-height: 1.6; }
+.capability-tags > ul, .capability-probe-results, .capability-accessories ul, .capability-confirmations ul { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 0; list-style: none; }
+
+.capability-tag, .capability-probe-results > li { display: flex; flex-direction: column; gap: 3px; padding: 9px 11px; border: 1px solid transparent; border-radius: 9px; font-size: 11px; }
+.capability-tag strong, .capability-probe-results strong { font-size: 12px; letter-spacing: -.01em; }
+.capability-tag small, .capability-probe-results small { color: #687286; font-size: 10px; }
+.capability-tag em, .capability-probe-results em { color: #687286; font-size: 10px; font-style: normal; line-height: 1.55; }
+.capability-probe-results code { width: fit-content; padding: 3px 6px; background: rgba(23, 32, 51, .06); border-radius: 5px; font-size: 10px; }
+
+/* Confirmed on the device, or portable with no caveat. */
+.status-portable, .status-device_available { color: #126538; background: #ecf9f0; border-color: #bfe8cc; }
+/* Runs, but with a limit the user should know about. */
+.status-preview_only, .status-device_required { color: #92400e; background: #fffbeb; border-color: #fde68a; }
+/* Blocked, and not by anything in the generated App. */
+.status-waiting_os_api, .status-device_unavailable { color: #9f1e1e; background: #fff0f0; border-color: #fecaca; }
+/* Deliberately neutral: unmeasured is not the same as absent. */
+.status-device_unknown { color: #475069; background: #f1f4f9; border-color: #d5dce8; }
+
+.capability-fallback { color: #3730a3 !important; }
+.capability-no-repair { color: inherit !important; opacity: .82; }
+
+.capability-accessories, .capability-confirmations { margin-top: 11px; padding-top: 10px; border-top: 1px dashed #dbe3ee; }
+.capability-accessories h4, .capability-confirmations h4 { margin: 0 0 6px; font-size: 11px; }
+.capability-accessories li, .capability-confirmations li { display: flex; flex-direction: column; gap: 3px; padding: 7px 9px; color: #344054; background: white; border: 1px solid #dbe3ee; border-radius: 8px; font-size: 11px; }
+.capability-confirmations em { color: #92400e; font-size: 10px; font-style: normal; }
+
+.capability-preview-note, .capability-physical-note { margin: 10px 0 0; padding: 9px 11px; border-radius: 8px; font-size: 11px; line-height: 1.6; }
+.capability-preview-note { color: #92400e; background: #fffbeb; border: 1px solid #fde68a; }
+.capability-physical-note { color: #3730a3; background: #eef2ff; border: 1px solid #c7d2fe; }
+
+.device-capability-panel { margin-top: 14px; padding: 14px; background: white; border: 1px solid #dbe3ee; border-radius: 11px; }
+.device-capability-panel h3 { margin: 0 0 9px; font-size: 13px; }
+.device-capability-panel dl { display: grid; grid-template-columns: auto 1fr; gap: 5px 12px; margin: 0 0 11px; font-size: 11px; }
+.device-capability-panel dt { color: #7a8498; }
+.device-capability-panel dd { display: flex; align-items: baseline; gap: 8px; margin: 0; color: #344054; font-weight: 700; }
+.device-capability-panel dd a { color: #4f46e5; font-weight: 800; }
+.device-capability-panel > button { margin-bottom: 11px; padding: 8px 12px; color: #3730a3; background: #eef2ff; border: 1px solid #c7d2fe; border-radius: 8px; font-size: 12px; font-weight: 800; }
+.device-capability-panel > button:hover:enabled { background: #e0e7ff; }
+
+.capability-warnings { display: flex; flex-direction: column; gap: 5px; margin: 11px 0 0; padding: 11px; color: #92400e; background: #fffbeb; border: 1px solid #fde68a; border-radius: 9px; font-size: 11px; list-style: none; }
+.capability-advisory-note { margin: 11px 0 0; color: #7a8498; font-size: 10px; line-height: 1.6; }
+
+@media (max-width: 720px) {
+  .device-capability-panel dl { grid-template-columns: 1fr; }
+}

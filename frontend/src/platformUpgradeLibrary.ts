@@ -194,3 +194,34 @@ export const buildShowcaseRunMessage = (
   packageName,
   mpkBase64,
 });
+
+/**
+ * Which generation-wait budget ran out: no activity for a while, or the
+ * overall ceiling. Lives here with the other generation-wait helpers.
+ */
+export type GenerationWaitTimeoutKind = "idle" | "overall";
+export const getGenerationWaitTimeoutKind = (
+  now: number,
+  startedAt: number,
+  lastActivityAt: number,
+  idleTimeoutMs: number,
+  overallTimeoutMs: number,
+): GenerationWaitTimeoutKind | null => {
+  if (now - startedAt >= overallTimeoutMs) return "overall";
+  if (now - lastActivityAt >= idleTimeoutMs) return "idle";
+  return null;
+};
+
+/**
+ * Idempotency key for a browser preview result.
+ *
+ * The revision has to be part of it. The backend drops a preview result whose
+ * key it has already seen, so a key built from the session alone meant every
+ * revision after the first re-sent r1's key, was discarded as a duplicate, and
+ * left that revision stuck in `waiting_preview` forever.
+ */
+export const previewResultKey = (
+  outcome: "success" | "partial",
+  sessionId: string,
+  revision: number | undefined,
+) => `preview-${outcome}-${sessionId}-r${revision ?? 1}`;

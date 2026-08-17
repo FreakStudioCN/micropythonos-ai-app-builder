@@ -6,6 +6,36 @@ PROTOCOL_VERSION = "mpos-ai-app/v1"
 AIProviderId = Literal["auto", "deepseek_primary", "deepseek_secondary", "aigocode"]
 
 
+class CapabilityRequirements(BaseModel):
+    """Abstract hardware requirements carried by a session end to end.
+
+    Deliberately has no ``target_board``: the browser never asks the user to
+    pick a board, and the running MicroPythonOS is the only authority on what
+    hardware actually exists.
+    """
+
+    required_capabilities: list[str] = Field(default_factory=list, max_length=32)
+    required_accessories: list[str] = Field(default_factory=list, max_length=32)
+    # Bounded like its sibling lists: one fallback sentence per capability.
+    runtime_fallbacks: dict[str, str] = Field(default_factory=dict, max_length=32)
+    physical_validation_required: bool = False
+
+
+class CapabilityProbeResult(BaseModel):
+    """One runtime probe outcome from a connected device.
+
+    ``available=None`` means the probe could not be evaluated (for example the
+    contract's probe expression takes a parameter). That is explicitly not the
+    same as ``False``: reporting "not measured" as "hardware absent" would
+    fabricate a device verdict.
+    """
+
+    capability: str = Field(min_length=1, max_length=64)
+    available: bool | None = None
+    probe: str = Field(default="", max_length=200)
+    detail: str = Field(default="", max_length=2000)
+
+
 class SystemStatusResponse(BaseModel):
     status: Literal["ready", "maintenance"]
     maintenance_mode: bool
@@ -13,7 +43,7 @@ class SystemStatusResponse(BaseModel):
     retry_after_seconds: int = Field(ge=1, le=86400)
 
 
-class GenerateRequest(BaseModel):
+class GenerateRequest(CapabilityRequirements):
     prompt: str = Field(min_length=3, max_length=4000)
     package_name: str = "com.example.myapp"
     display_name: str = "我的 App"
@@ -56,6 +86,15 @@ class GenerateResponse(BaseModel):
     prompt_normalized_zh: str = ""
     prompt_normalized_en: str = ""
     store_metadata: dict[str, Any] = Field(default_factory=dict)
+    required_capabilities: list[str] = Field(default_factory=list)
+    required_accessories: list[str] = Field(default_factory=list)
+    runtime_fallbacks: dict[str, str] = Field(default_factory=dict)
+    physical_validation_required: bool = False
+    capability_contracts: list[dict[str, Any]] = Field(default_factory=list)
+    capability_warnings: list[str] = Field(default_factory=list)
+    skill_commit: str = ""
+    mpos_commit: str = ""
+    board_capabilities_schema: str = ""
 
 
 class RequirementMessage(BaseModel):
@@ -100,7 +139,7 @@ class Capabilities(BaseModel):
     upystore_publish: bool = False
 
 
-class SessionCreateRequest(BaseModel):
+class SessionCreateRequest(CapabilityRequirements):
     protocol_version: str = PROTOCOL_VERSION
     idempotency_key: str = Field(min_length=8, max_length=200)
     prompt: str = Field(min_length=3, max_length=4000)
@@ -123,6 +162,9 @@ class SessionCreateRequest(BaseModel):
     targets: list[
         Literal["desktop-preview", "web-preview", "physical-device", "package-only"]
     ] = ["web-preview", "package-only"]
+    # Runner/browser environment capabilities. Kept strictly separate from the
+    # App's required_capabilities: one describes where code can run, the other
+    # describes what hardware the App needs.
     capabilities: Capabilities = Field(default_factory=Capabilities)
 
     @field_validator("protocol_version")
@@ -167,7 +209,7 @@ class DemoErrorInjectionRequest(BaseModel):
     ] = "LVGL_API_MISSING"
 
 
-class RevisionRequest(BaseModel):
+class RevisionRequest(CapabilityRequirements):
     idempotency_key: str = Field(min_length=8, max_length=200)
     prompt: str = Field(min_length=3, max_length=4000)
     prompt_language: Literal["zh-CN", "en-US", "mixed", "unknown"] = "unknown"
@@ -175,8 +217,11 @@ class RevisionRequest(BaseModel):
 
 
 class PreviewResultRequest(SessionActionRequest):
-    result: Literal["success", "failed", "timeout"]
+    # "partial" reports a preview that ran but could not exercise a physical
+    # capability. It is not a failure and must never start a code-repair loop.
+    result: Literal["success", "failed", "timeout", "partial"]
     message: str = Field(default="", max_length=8000)
+    unsupported_capabilities: list[str] = Field(default_factory=list, max_length=32)
 
 
 class PermissionDecisionRequest(BaseModel):
@@ -202,7 +247,13 @@ class DeviceResultRequest(BaseModel):
     error_code: str | None = Field(default=None, max_length=100)
     hardware_available: bool | None = None
     micropythonos_installed: bool | None = None
-    board: str = Field(default="Waveshare ESP32-S3-Touch-LCD-2", max_length=200)
+    # Diagnostics only, read from DeviceInfo after the user authorises the
+    # device. Never a selector, never a precondition, and never defaulted to a
+    # specific board: an unlisted board that probes successfully is still valid.
+    hardware_id: str = Field(default="", max_length=200)
+    runtime_capability_results: list[CapabilityProbeResult] = Field(
+        default_factory=list, max_length=32
+    )
     usb_vendor_id: int | None = Field(default=None, ge=0, le=0xFFFF)
     usb_product_id: int | None = Field(default=None, ge=0, le=0xFFFF)
     installed_path: str | None = Field(default=None, max_length=500)

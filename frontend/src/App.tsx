@@ -6,6 +6,9 @@ import {
   WASM_RUNTIME_URL,
 } from "./config";
 import { WebSerialDeviceClient, type DeviceConnectionState } from "./deviceSerial";
+import { DeviceCapabilityPanel } from "./CapabilityPanel";
+import type { CapabilityProbeOutcome } from "./capabilities";
+import { probeCapabilities, readHardwareId, type DeviceExecute } from "./deviceCapabilities";
 import {
   describeProviderResult,
   emptyProviderCatalog,
@@ -19,155 +22,46 @@ import {
   encodeShowcaseMpk,
   fetchVerifiedShowcaseMpk,
   getBridgeTargetOrigin,
+  getGenerationWaitTimeoutKind,
   hasGenerationActivityChanged,
   isPlatformActionAllowed,
-  isValidShowcaseSha256,
   normalizePublicSystemStatus,
+  previewResultKey,
   unavailablePublicSystemStatus,
   type GenerationActivitySnapshot,
+  type GenerationWaitTimeoutKind,
   type PublicSystemStatus,
 } from "./platformUpgradeLibrary";
 
-type Status = "idle" | "created" | "running" | "waiting_preview" | "waiting_device" | "completed" | "failed" | "blocked" | "cancelled" | "timeout";
-type Language = "zh" | "en";
-type AuthStatus = "loading" | "signed_out" | "signed_in";
-type AccountRole = "user" | "superadmin";
-interface GeneratedFile {
-  path: string;
-  content: string;
-}
-interface GenerationResult {
-  package_name: string;
-  summary: string;
-  manifest: Record<string, unknown>;
-  files: GeneratedFile[];
-  mpk_base64: string;
-  model: string;
-  warnings: string[];
-  acceptance_tests: string[];
-  mpk_filename: string;
-  revision: number;
-  provider?: string;
-  failover_used?: boolean;
-  attempted_providers?: string[];
-  prompt_normalized_zh?: string;
-  prompt_normalized_en?: string;
-  store_metadata?: Record<string, string>;
-}
-interface Artifact {
-  id: string;
-  role: string;
-  path: string;
-  mime: string;
-  size: number;
-  display_name: string;
-  phase: string;
-  sha256: string;
-  kind: string;
-}
-interface Permission {
-  permission_id: string;
-  permission_type: string;
-  title: string;
-  description: string;
-  risk: "low" | "medium" | "high";
-  command_preview: string;
-  required: boolean;
-  decision: "pending" | "allow_once" | "deny";
-}
-interface StructuredError {
-  code: string;
-  message: string;
-  stage: string;
-  owner: string;
-  retryable: boolean;
-}
-interface SessionState {
-  session_id: string;
-  revision_id: string;
-  status: "blocked" | "created" | "running" | "waiting_preview" | "waiting_device" | "completed" | "failed" | "cancelled" | "timeout";
-  checkpoint_id: string;
-  current_phase: string;
-  permissions: Permission[];
-  artifacts: Artifact[];
-  warnings: string[];
-  last_error: StructuredError | null;
-  generation: GenerationResult | null;
-  input: {
-    prompt_original: string;
-    package_name: string;
-    display_name: string;
-    publisher: string;
-    version: string;
-    ai_provider?: string;
-    targets: string[];
-    prompt_normalized_zh?: string;
-    prompt_normalized_en?: string;
-  };
-}
-type SessionSummary = Omit<SessionState, "generation"> & { generation?: GenerationResult | null };
-interface BillingAccount {
-  user_id: string;
-  username: string;
-  role: AccountRole;
-  credits: number;
-  unlimited_credits: boolean;
-  generations_remaining: number;
-  generation_limit: number;
-  generation_cost: number;
-  initial_credits: number;
-}
-interface RequirementMessage {
-  role: "user" | "assistant";
-  content: string;
-}
-interface RequirementChatResult {
-  assistant_message: string;
-  ready: boolean;
-  refined_prompt: string;
-  missing_fields: string[];
-  brief: Record<string, unknown>;
-  model: string;
-}
-interface SaveFileHandle {
-  createWritable(): Promise<{
-    write(data: Blob): Promise<void>;
-    close(): Promise<void>;
-  }>;
-}
-type SaveFilePickerWindow = Window & {
-  showSaveFilePicker?: (options: {
-    suggestedName: string;
-    types: Array<{
-      description: string;
-      accept: Record<string, string[]>;
-    }>;
-  }) => Promise<SaveFileHandle>;
-};
-interface ShowcaseApp {
-  fullname: string;
-  name: string;
-  category: string;
-  version: string;
-  shortDescription: string;
-  longDescription: string;
-  screenshotUrl: string;
-  mpkUrl: string;
-  sha256: string;
-  featured: boolean;
-}
-export type GenerationWaitTimeoutKind = "idle" | "overall";
-export const getGenerationWaitTimeoutKind = (
-  now: number,
-  startedAt: number,
-  lastActivityAt: number,
-  idleTimeoutMs: number,
-  overallTimeoutMs: number,
-): GenerationWaitTimeoutKind | null => {
-  if (now - startedAt >= overallTimeoutMs) return "overall";
-  if (now - lastActivityAt >= idleTimeoutMs) return "idle";
-  return null;
-};
+import type {
+  AccountRole,
+  Artifact,
+  AuthStatus,
+  BillingAccount,
+  GeneratedFile,
+  GenerationResult,
+  Language,
+  Permission,
+  RequirementChatResult,
+  RequirementMessage,
+  SessionState,
+  SessionSummary,
+  ShowcaseApp,
+  Status,
+  StructuredError,
+} from "./types";
+import { isShowcaseApp } from "./types";
+export { stages, stageIndexForError, stageIndexForCheckpoint, stageIndexForSession } from "./stages";
+import { stages, stageIndexForError, stageIndexForCheckpoint, stageIndexForSession } from "./stages";
+import { ArtifactsPanel } from "./ArtifactsPanel";
+import { AuthScreen, MaintenanceScreen } from "./AuthGate";
+import { downloadArtifactFile, downloadMpkFile, downloadText } from "./downloads";
+import { EcosystemCard } from "./EcosystemCard";
+import { PermissionModal } from "./PermissionModal";
+import { PreviewPane } from "./PreviewPane";
+import { ProgressCard } from "./ProgressCard";
+import { RequirementModal } from "./RequirementModal";
+
 
 const defaultPrompt = "做一个极简四则运算计算器，按钮要大，适合触摸屏";
 const defaultPromptEn = "Build a minimal four-function calculator with large touch-friendly buttons";
@@ -179,125 +73,10 @@ const apiFetch = (input: RequestInfo | URL, init: RequestInit = {}) => fetch(
   input,
   { ...init, credentials: "include" },
 );
-export const stages = [
-  ["analysis", "需求分析"],
-  ["api_check", "MicroPythonOS / LVGL API 校验"],
-  ["generation", "AI 生成代码"],
-  ["test", "桌面 / Web 预览测试"],
-  ["package", "生成真实 MPK"],
-  ["deploy", "真实设备部署"],
-  ["publish", "发布准备检查"],
-] as const;
-export const stageIndexForError = (stage?: string) => {
-  const indexByStage: Record<string, number> = {
-    analysis: 0,
-    api: 1,
-    api_check: 1,
-    generation: 2,
-    test: 3,
-    package: 4,
-    deploy: 5,
-    publish: 6,
-  };
-  return stage ? (indexByStage[stage] ?? 2) : 2;
-};
-export const stageIndexForCheckpoint = (checkpoint?: string) => {
-  const indexByCheckpoint: Record<string, number> = {
-    session_created: 0,
-    requirements_analyzed: 1,
-    api_checked: 2,
-    code_generated: 3,
-    desktop_test_done: 4,
-    web_preview_done: 4,
-    package_done: 5,
-    device_deploy_done: 6,
-    publish_check_done: 6,
-    completed: 6,
-  };
-  return checkpoint ? (indexByCheckpoint[checkpoint] ?? 0) : 0;
-};
-interface StageSessionSnapshot {
-  status: string;
-  checkpoint_id?: string;
-  last_error?: { stage: string } | null;
-  generation?: unknown;
-}
-export const stageIndexForSession = (session: StageSessionSnapshot) => {
-  if (session.last_error) return stageIndexForError(session.last_error.stage);
-  if (session.status === "waiting_device") return stageIndexForError("deploy");
-  if (session.status === "waiting_preview") return stageIndexForError("test");
-  if (session.status === "completed") return stages.length - 1;
-  const checkpointStage = stageIndexForCheckpoint(session.checkpoint_id);
-  if (checkpointStage > 0) return checkpointStage;
-  return session.generation ? stageIndexForError("test") : 0;
-};
-const isShowcaseApp = (value: unknown): value is ShowcaseApp => {
-  if (!value || typeof value !== "object") return false;
-  const item = value as Record<string, unknown>;
-  return [
-    "fullname",
-    "name",
-    "category",
-    "version",
-    "shortDescription",
-    "longDescription",
-    "screenshotUrl",
-    "mpkUrl",
-  ].every((key) => typeof item[key] === "string")
-    && isValidShowcaseSha256(item.sha256)
-    && typeof item.featured === "boolean";
-};
-const verifiedBoards = [
-  ["Freenove", "ESP32-S3 Display", "ESP32-S3", "触摸屏", "入门交互"],
-  ["Fri3d Camp", "2024 Badge", "ESP32-S3", "徽章屏幕", "活动徽章"],
-  ["Fri3d Camp", "2026 Badge", "ESP32-S3", "徽章屏幕", "活动作品"],
-  ["LilyGO", "T4 V1.3", "ESP32", "大屏", "信息面板"],
-  ["LilyGO", "T-Display S3", "ESP32-S3", "彩色小屏", "便携工具"],
-  ["LilyGO", "T-HMI", "ESP32-S3", "触摸屏", "人机界面"],
-  ["LilyGO", "T-Watch S3 Plus", "ESP32-S3", "腕上触摸屏", "穿戴应用"],
-  ["M5Stack", "Core2", "ESP32", "触摸屏", "新手创作"],
-  ["M5Stack", "Fire", "ESP32", "彩色屏", "传感器项目"],
-  ["Makerfabs", "MaTouch ESP32-S3 SPI IPS 2.8\" + OV3660", "ESP32-S3", "2.8\" 触摸屏", "视觉项目"],
-  ["Hardkernel", "ODROID-GO", "ESP32", "游戏屏幕", "掌机应用"],
-  ["SQUiXL", "SQUiXL", "ESP32-S3", "触摸屏", "桌面信息"],
-  ["DFRobot", "UniHiker K10", "ESP32-S3", "彩色屏", "STEM 课堂"],
-  ["unPhone", "unPhone 9", "ESP32-S3", "触摸屏", "移动创作"],
-  ["Waveshare", "ESP32-S3-Touch-LCD-2", "ESP32-S3", "2\" 触摸屏", "新手与展示"],
-] as const;
 export default function App() {
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem("mpos-language") === "en" ? "en" : "zh");
   const isZh = language === "zh";
   const tr = (zh: string, en: string) => isZh ? zh : en;
-  const boardText = (value: string) => {
-    if (isZh) return value;
-    const translations: Record<string, string> = {
-      "触摸屏": "touch display",
-      "徽章屏幕": "badge display",
-      "大屏": "large display",
-      "彩色小屏": "compact color display",
-      "腕上触摸屏": "watch touch display",
-      "2.8\" 触摸屏": "2.8\" touch display",
-      "游戏屏幕": "game display",
-      "彩色屏": "color display",
-      "2\" 触摸屏": "2\" touch display",
-      "入门交互": "beginner interaction",
-      "活动徽章": "event badge",
-      "活动作品": "event projects",
-      "信息面板": "information panels",
-      "便携工具": "portable tools",
-      "人机界面": "HMI projects",
-      "穿戴应用": "wearables",
-      "新手创作": "beginner making",
-      "传感器项目": "sensor projects",
-      "视觉项目": "vision projects",
-      "掌机应用": "handheld games",
-      "桌面信息": "desktop information",
-      "STEM 课堂": "STEM classrooms",
-      "移动创作": "mobile making",
-      "新手与展示": "beginners and demos",
-    };
-    return translations[value] || value;
-  };
   const [prompt, setPrompt] = useState(defaultPrompt);
   const [packageName, setPackageName] = useState("com.example.myapp");
   const [displayName, setDisplayName] = useState("我的 App");
@@ -328,6 +107,24 @@ export default function App() {
   const [serialConnected, setSerialConnected] = useState(false);
   const [deviceConnectionDetail, setDeviceConnectionDetail] = useState("");
   const [deviceState, setDeviceState] = useState<DeviceConnectionState>("disconnected");
+  const [capabilityProbes, setCapabilityProbes] = useState<CapabilityProbeOutcome[]>([]);
+  const [capabilityProbing, setCapabilityProbing] = useState(false);
+  const [detectedHardwareId, setDetectedHardwareId] = useState("");
+  // null = not checked yet. Never inferred from "a serial port opened": any
+  // USB-serial board opens fine without MicroPythonOS on it.
+  const [mposDetected, setMposDetected] = useState<boolean | null>(null);
+
+  // Probe evidence belongs to one device and one session. Carrying it across a
+  // disconnect or a session switch would attribute one board's hardware to
+  // another, which is exactly what this feature exists to prevent.
+  const previewUnsupportedRef = useRef<string[]>([]);
+
+  const resetCapabilityEvidence = () => {
+    setCapabilityProbes([]);
+    setDetectedHardwareId("");
+    setMposDetected(null);
+    previewUnsupportedRef.current = [];
+  };
   const [deviceLogs, setDeviceLogs] = useState("");
   const [deviceCommand, setDeviceCommand] = useState("");
   const [deviceBusy, setDeviceBusy] = useState("");
@@ -624,6 +421,7 @@ export default function App() {
     localStorage.removeItem("mpos-session-id");
     setBillingAccount(null);
     setSessionState(null);
+    resetCapabilityEvidence();
     setHistory([]);
     setResult(null);
     setStatus("idle");
@@ -633,6 +431,7 @@ export default function App() {
 
   const applySession = (session: SessionState) => {
     localStorage.setItem("mpos-session-id", session.session_id);
+    resetCapabilityEvidence();
     setSessionState(session);
     setPrompt(session.input.prompt_original);
     setPackageName(session.input.package_name);
@@ -810,21 +609,45 @@ export default function App() {
           setLogs((items) => [...items, liveText(`[showcase] ${showcaseName} 已在 WASM 中启动 ✓`, `[showcase] ${showcaseName} started in WASM ✓`)]);
           return;
         }
+        const previewUnsupported = previewUnsupportedRef.current;
         setRuntimeStatus(liveText("App 正在真实 MicroPythonOS WASM 中运行", "App is running in real MicroPythonOS WASM"));
         setCurrentStage(stages.length - 1);
-        setStatus("completed");
         setLogs((items) => [...items, liveText("[preview] App 已在 MicroPythonOS WASM 中启动 ✓", "[preview] App started in MicroPythonOS WASM ✓")]);
+        if (previewUnsupported.length > 0) {
+          setLogs((items) => [...items, liveText(
+            `[preview] 预览无法验证 ${previewUnsupported.join("、")}，需在真机确认`,
+            `[preview] Preview cannot verify ${previewUnsupported.join(", ")}; confirm on a real device`,
+          )]);
+        }
         const savedSession = localStorage.getItem("mpos-session-id");
         if (savedSession) {
           void apiFetch(`${apiUrl}/api/sessions/${savedSession}/actions/preview-result`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
-              idempotency_key: `preview-success-${savedSession}`,
-              result: "success",
+              idempotency_key: previewResultKey(previewUnsupported.length > 0 ? "partial" : "success", savedSession, resultRef.current?.revision),
+              result: previewUnsupported.length > 0 ? "partial" : "success",
               message: "MicroPythonOS WASM installed and launched the generated app through AppManager",
+              unsupported_capabilities: previewUnsupported,
             }),
-          }).then((response) => response.json()).then((session: SessionState) => setSessionState(session));
+          }).then((response) => response.json()).then((session: SessionState) => {
+            setSessionState(session);
+            // The server owns the verdict (the capability gate usually makes this "blocked"), and the history list stays on the old status unless it is re-fetched.
+            setStatus(session.status);
+            refreshHistory();
+          }).catch((error: unknown) => {
+            // Say so instead of leaving a green "✓ running" on screen: if this
+            // post never lands the session stays in waiting_preview forever,
+            // and the preview it is waiting for has already happened.
+            const reason = error instanceof Error ? error.message : String(error);
+            setErrorMessage(liveText(
+              `预览已成功，但结果没能回报后端（${reason}）。请点击重试，否则会话会一直停在等待预览。`,
+              `The preview succeeded but its result did not reach the backend (${reason}). Retry, or the session stays stuck waiting for a preview.`,
+            ));
+            setLogs((items) => [...items, `[preview] result POST failed: ${reason}`]);
+          });
+        } else {
+          setStatus("completed");
         }
       } else if (message.type === "MPOS_ERROR") {
         if (executionTimer.current !== null) window.clearTimeout(executionTimer.current);
@@ -838,11 +661,16 @@ export default function App() {
           setLogs((items) => [...items, `[showcase] ${detail}`]);
           return;
         }
+        // Repair first: a real code defect must not be misread as a hardware
+        // limit just because the App also happens to need a camera. The repair
+        // path is already capped at 2 attempts, so this cannot loop forever.
         if (repairHandler.current(detail)) {
           setRuntimeStatus(liveText(`发现兼容问题，DeepSeek 正在自动修复（${repairAttempts.current}/2）…`, `Compatibility issue found. DeepSeek is repairing it (${repairAttempts.current}/2)…`));
           setLogs((items) => [...items, liveText(`[repair] WASM 发现兼容错误，正在自动修复：${detail}`, `[repair] WASM compatibility error found; repairing: ${detail}`)]);
           return;
         }
+        // Repairs are exhausted: this is a genuine defect, not a preview
+        // limit. Reclassifying it as "partial" here hid real bugs.
         setRuntimeStatus(detail);
         setErrorMessage(detail);
         setCurrentStage(3);
@@ -940,6 +768,7 @@ export default function App() {
       setResult(null);
       resultRef.current = null;
       setSessionState(null);
+      resetCapabilityEvidence();
     }
     lastRun.current = "";
     if (!repair) {
@@ -1192,7 +1021,10 @@ export default function App() {
     }
     setPermissionBusy("__all__");
     try {
-      const response = await fetch(
+      // apiFetch, not fetch: this endpoint is behind the session cookie, and a
+      // bare fetch omits credentials, so approve-all 401s on every split
+      // frontend/backend deployment and the run can never start.
+      const response = await apiFetch(
         `${apiUrl}/api/sessions/${sessionState.session_id}/permissions/allow-all`,
         {
           method: "POST",
@@ -1255,32 +1087,12 @@ export default function App() {
     void run();
   };
 
-  const download = (filename: string, content: string) => {
-    const blob = new Blob([content], { type: "application/octet-stream" });
-    const url = URL.createObjectURL(blob);
-    const anchor = document.createElement("a");
-    anchor.href = url;
-    anchor.download = filename;
-    anchor.click();
-    URL.revokeObjectURL(url);
-    setToast(tr(`已下载 ${filename}`, `Downloaded ${filename}`));
-  };
+  const download = (filename: string, content: string) =>
+    downloadText(filename, content, tr, setToast);
 
-  const downloadArtifact = async (artifact: Artifact) => {
-    try {
-      const response = await apiFetch(`${apiUrl}/api/artifacts/${artifact.id}`);
-      if (!response.ok) throw new Error(tr("无权下载该产物", "Artifact download is unavailable"));
-      const url = URL.createObjectURL(await response.blob());
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = artifact.display_name;
-      anchor.click();
-      URL.revokeObjectURL(url);
-      setToast(tr(`已下载 ${artifact.display_name}`, `Downloaded ${artifact.display_name}`));
-    } catch (error) {
-      setToast(error instanceof Error ? error.message : tr("下载失败", "Download failed"));
-    }
-  };
+  const downloadArtifact = (artifact: Artifact) => downloadArtifactFile(
+    artifact, apiFetch, `${apiUrl}/api/artifacts/${artifact.id}`, tr, setToast,
+  );
 
   const uploadScreenshot = async (file: File) => {
     const sessionId = sessionState?.session_id;
@@ -1321,6 +1133,12 @@ export default function App() {
       }
       const updated = await response.json() as SessionState;
       setSessionState(updated);
+      // The screenshot is often the last missing publish artifact, so this call
+      // is what completes the session. Without mirroring the server's verdict
+      // the UI keeps showing "blocked" and a retry button for finished work.
+      setStatus(updated.status);
+      setCurrentStage(stageIndexForSession(updated));
+      refreshHistory();
       setToast(tr("截图已加入发布材料", "Screenshot added to publishing materials"));
     } catch (error) {
       setToast(error instanceof Error ? error.message : tr("截图上传失败", "Screenshot upload failed"));
@@ -1386,6 +1204,7 @@ export default function App() {
       serialClientRef.current = null;
       setSerialConnected(false);
       setDeviceState("disconnected");
+      resetCapabilityEvidence();
       setDeviceBusy("");
       setDeviceProgress(0);
       setDeviceMessage(tr("设备已断开。", "Device disconnected."));
@@ -1396,6 +1215,9 @@ export default function App() {
     deviceResult: "probe_success" | "install_success" | "launch_success" | "failed",
     message: string,
     installedPath?: string,
+    // Probing and reporting happen in the same tick, so the state setters have
+    // not re-rendered yet; the caller passes what it just measured.
+    freshEvidence?: { hardwareId: string; probes: CapabilityProbeOutcome[] },
   ) => {
     const sessionId = localStorage.getItem("mpos-session-id");
     if (!sessionId) return;
@@ -1406,7 +1228,9 @@ export default function App() {
         body: JSON.stringify({
           idempotency_key: `device-result-${deviceResult}-${crypto.randomUUID()}`,
           result: deviceResult,
-          board: "Waveshare ESP32-S3-Touch-LCD-2",
+          // Diagnostics only, and only what the device actually reported.
+          hardware_id: freshEvidence?.hardwareId ?? detectedHardwareId,
+          runtime_capability_results: freshEvidence?.probes ?? capabilityProbes,
           usb_vendor_id: deviceInfoRef.current.usbVendorId,
           usb_product_id: deviceInfoRef.current.usbProductId,
           installed_path: installedPath,
@@ -1424,6 +1248,62 @@ export default function App() {
         "[device] 真机结果暂时无法写入后端审计日志",
         "[device] Could not persist the device result to the backend audit log",
       )]);
+    }
+  };
+
+  const capabilityAnalysis = sessionState?.capability_analysis ?? null;
+
+  // The postMessage handler is installed once and cannot read sessionState, and
+  // applySession only runs on restore — so mirror it here, where every session
+  // update lands, instead of on one path that the normal run() flow skips.
+  useEffect(() => {
+    previewUnsupportedRef.current =
+      sessionState?.capability_analysis?.web_preview_unsupported ?? [];
+  }, [sessionState]);
+
+  // Runs the contract probes on the authorised device. A probe that cannot be
+  // evaluated stays "unknown"; it is never downgraded into "hardware absent".
+  const probeDeviceCapabilities = async () => {
+    if (!isPlatformActionAllowed(systemStatusConfirmed, publicSystemStatus.maintenance)) {
+      setDeviceError(tr("系统升级期间暂不允许设备操作。", "Device actions are unavailable during maintenance."));
+      return;
+    }
+    const client = serialClientRef.current;
+    if (!client?.connected || !capabilityAnalysis) return;
+    // Shares deviceBusy with installs and app control: probing writes REPL
+    // command lines, and an in-flight MPK transfer reads an exact byte count
+    // from the same stream, so an interleaved probe silently corrupts it.
+    if (deviceBusy) {
+      setDeviceError(tr("设备正忙，请等待当前操作完成。", "The device is busy; wait for the current operation to finish."));
+      return;
+    }
+    setDeviceError("");
+    setDeviceBusy("capability-probe");
+    setCapabilityProbing(true);
+    try {
+      const execute: DeviceExecute = (source, timeoutMs) => client.execute(source, timeoutMs);
+      const hardwareId = await readHardwareId(execute);
+      const probes = await probeCapabilities(execute, capabilityAnalysis.capability_contracts);
+      setDetectedHardwareId(hardwareId);
+      setCapabilityProbes(probes);
+      // The completion gate needs this evidence server-side. Leaving it in
+      // browser memory made it reach the backend only as an incidental payload
+      // of some later install or launch — and never at all if the user probed
+      // and stopped there.
+      await recordDeviceResult(
+        "probe_success",
+        tr("能力探测完成。", "Capability probing finished."),
+        undefined,
+        { hardwareId, probes },
+      );
+    } catch (error) {
+      setDeviceError(tr(
+        `能力探测失败：${error instanceof Error ? error.message : String(error)}`,
+        `Capability probing failed: ${error instanceof Error ? error.message : String(error)}`,
+      ));
+    } finally {
+      setCapabilityProbing(false);
+      setDeviceBusy("");
     }
   };
 
@@ -1466,6 +1346,9 @@ export default function App() {
       const reason = finalError instanceof Error ? finalError.message : String(finalError);
       setDeviceError(reason);
       setDeviceLogs((previous) => `${previous}\n[ERROR] ${reason}\n`.slice(-100_000));
+      if (label === "probe") {
+        setMposDetected(false);
+      }
       if (["probe", "install", "run", "restart"].includes(label)) {
         await recordDeviceResult("failed", reason);
       }
@@ -1581,6 +1464,7 @@ export default function App() {
       "print('MicroPythonOS: ready')",
     ].join("\n"));
     const message = tr("MicroPythonOS 已就绪，可以安装和运行 App。", "MicroPythonOS is ready for app install and launch.");
+    setMposDetected(true);
     setDeviceMessage(message);
     await recordDeviceResult("probe_success", message);
   });
@@ -1658,37 +1542,26 @@ export default function App() {
     setDeviceMessage(tr(`已重启 ${appName}`, `Restarted ${appName}`));
   });
 
-  const downloadMpk = async () => {
+  const desktopScreenshot = sessionState?.artifacts.find((item) => item.role === "desktop_screenshot");
+
+  const handleWasmFrameLoad = () => {
+    lastRun.current = "";
+    setWasmReady(false);
+    setRuntimeStatus(tr("正在启动 MicroPythonOS WASM…", "Starting MicroPythonOS WASM…"));
+    iframeRef.current?.contentWindow?.postMessage({ source: "mpos-builder", type: "PING" }, wasmRuntimeOrigin);
+    window.setTimeout(() => iframeRef.current?.contentWindow?.postMessage({ source: "mpos-builder", type: "PING" }, wasmRuntimeOrigin), 1500);
+    if (wasmTimer.current !== null) window.clearTimeout(wasmTimer.current);
+    wasmTimer.current = window.setTimeout(() => {
+      const detail = tr("MicroPythonOS WASM 启动超时，请刷新页面后重试。", "MicroPythonOS WASM startup timed out. Refresh and retry.");
+      setRuntimeStatus(detail);
+      setErrorMessage(detail);
+      setStatus("timeout");
+    }, 120000);
+  };
+
+  const downloadMpk = () => {
     if (!result) return;
-    const binary = window.atob(result.mpk_base64);
-    const bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
-    const blob = new Blob([bytes], { type: "application/zip" });
-    const pickerWindow = window as SaveFilePickerWindow;
-    if (pickerWindow.showSaveFilePicker) {
-      try {
-        const handle = await pickerWindow.showSaveFilePicker({
-          suggestedName: result.mpk_filename,
-          types: [{
-            description: "MicroPythonOS package",
-            accept: { "application/zip": [".mpk"] },
-          }],
-        });
-        const writable = await handle.createWritable();
-        await writable.write(blob);
-        await writable.close();
-      } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") return;
-        throw error;
-      }
-    } else {
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement("a");
-      anchor.href = url;
-      anchor.download = result.mpk_filename;
-      anchor.click();
-      URL.revokeObjectURL(url);
-    }
-    setToast(tr(`已下载真实 ${result.mpk_filename}`, `Downloaded ${result.mpk_filename}`));
+    void downloadMpkFile(result.mpk_base64, result.mpk_filename, tr, setToast);
   };
 
   const requestRequirementHelp = async (
@@ -1698,7 +1571,7 @@ export default function App() {
     setRequirementBusy(true);
     setRequirementError("");
     try {
-      const response = await fetch(`${apiUrl}/api/requirements/chat`, {
+      const response = await apiFetch(`${apiUrl}/api/requirements/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -1777,94 +1650,25 @@ export default function App() {
   };
 
   if (publicSystemStatus.maintenance) {
-    return (
-      <div className="auth-page">
-        <section className="auth-card">
-          <div className="auth-brand"><span>BM</span><div><strong>Blockless-Make-APP</strong><small>MicroPythonOS AI Builder</small></div></div>
-          <div className="auth-heading">
-            <span>{tr("维护模式", "MAINTENANCE")}</span>
-            <h1>{tr("系统正在升级", "System upgrade in progress")}</h1>
-            <p>{publicSystemStatus.message || tr(
-              "生成和设备部署已暂时关闭。页面会自动检查，服务恢复后无需重新登录。",
-              "Generation and device deployment are temporarily unavailable. This page checks automatically and restores access without another sign-in.",
-            )}</p>
-          </div>
-          <div className="auth-loading">{tr(
-            `约 ${publicSystemStatus.retry_after_seconds} 秒后再次检查…`,
-            `Checking again in about ${publicSystemStatus.retry_after_seconds} seconds…`,
-          )}</div>
-        </section>
-      </div>
-    );
+    return <MaintenanceScreen language={language} systemStatus={publicSystemStatus} />;
   }
 
   if (authStatus !== "signed_in") {
     return (
-      <div className="auth-page">
-        <button
-          className="language-button auth-language"
-          onClick={() => setLanguage(isZh ? "en" : "zh")}
-        >{isZh ? "English" : "中文"}</button>
-        <section className="auth-card">
-          <div className="auth-brand"><span>BM</span><div><strong>Blockless-Make-APP</strong><small>MicroPythonOS AI Builder</small></div></div>
-          {authStatus === "loading" ? (
-            <div className="auth-loading">{tr("正在连接内测服务…", "Connecting to the beta service…")}</div>
-          ) : (
-            <>
-              <div className="auth-heading">
-                <span>{tr("正式内测", "PRIVATE BETA")}</span>
-                <h1>{authMode === "login" ? tr("欢迎回来", "Welcome back") : tr("创建内测账号", "Create your beta account")}</h1>
-                <p>{authMode === "login"
-                  ? tr("登录后继续查看自己的项目和剩余点数。", "Sign in to restore your projects and credits.")
-                  : tr("每个账号获得 50 个免费内测点数，可生成约 5 个版本。", "Each account receives 50 beta credits, enough for about 5 revisions.")}</p>
-              </div>
-              <form className="auth-form" onSubmit={submitAuth}>
-                <label htmlFor="auth-username">{tr("用户名", "Username")}</label>
-                <input
-                  id="auth-username"
-                  value={authUsername}
-                  onChange={(event) => setAuthUsername(event.target.value)}
-                  minLength={3}
-                  maxLength={32}
-                  autoComplete="username"
-                  required
-                  autoFocus
-                />
-                <label htmlFor="auth-password">{tr("密码", "Password")}</label>
-                <input
-                  id="auth-password"
-                  type="password"
-                  value={authPassword}
-                  onChange={(event) => setAuthPassword(event.target.value)}
-                  minLength={8}
-                  maxLength={128}
-                  autoComplete={authMode === "login" ? "current-password" : "new-password"}
-                  required
-                />
-                {authError && <div className="auth-error">{authError}</div>}
-                <button className="main-button auth-submit" type="submit" disabled={authBusy}>
-                  {authBusy
-                    ? tr("请稍候…", "Please wait…")
-                    : authMode === "login" ? tr("登录", "Sign in") : tr("注册并进入", "Create account")}
-                </button>
-              </form>
-              <button
-                className="auth-switch"
-                onClick={() => {
-                  setAuthMode(authMode === "login" ? "register" : "login");
-                  setAuthError("");
-                }}
-              >{authMode === "login"
-                ? tr("没有账号？免费注册", "No account? Register free")
-                : tr("已经有账号？返回登录", "Already registered? Sign in")}</button>
-              <small className="auth-notice">{tr(
-                "当前版本不收费、不充值、不自动订阅。密码只以安全哈希保存在后端数据库。",
-                "No payments, top-ups, or automatic subscriptions. Passwords are stored only as secure hashes.",
-              )}</small>
-            </>
-          )}
-        </section>
-      </div>
+      <AuthScreen
+        language={language}
+        authStatus={authStatus}
+        authMode={authMode}
+        authUsername={authUsername}
+        authPassword={authPassword}
+        authError={authError}
+        authBusy={authBusy}
+        onLanguageToggle={() => setLanguage(isZh ? "en" : "zh")}
+        onModeToggle={() => { setAuthMode(authMode === "login" ? "register" : "login"); setAuthError(""); }}
+        onUsernameChange={setAuthUsername}
+        onPasswordChange={setAuthPassword}
+        onSubmit={submitAuth}
+      />
     );
   }
 
@@ -2021,6 +1825,18 @@ export default function App() {
                   />
                   <button type="submit" disabled={!serialConnected || !deviceCommand.trim() || Boolean(deviceBusy)}>{tr("发送", "Send")}</button>
                 </form>
+                {capabilityAnalysis && (
+                  <DeviceCapabilityPanel
+                    analysis={capabilityAnalysis}
+                    language={language}
+                    micropythonosDetected={mposDetected}
+                    hardwareId={detectedHardwareId}
+                    probes={capabilityProbes}
+                    warnings={sessionState?.warnings ?? []}
+                    onProbe={() => void probeDeviceCapabilities()}
+                    probing={capabilityProbing}
+                  />
+                )}
               </section>
             )}
 
@@ -2032,30 +1848,20 @@ export default function App() {
             </div>
           </section>
 
-          <section className="card progress-card">
-            <h2>{tr("生成进度", "Generation progress")}</h2>
-            {status === "idle" && currentStage < 0 && <div className="empty-progress"><b>1</b><span>{tr("输入你的想法", "Describe your idea")}</span><b>2</b><span>{tr("允许浏览器模拟运行", "Allow browser simulation")}</span><b>3</b><span>{tr("预览并下载 App", "Preview and download")}</span></div>}
-            {(status !== "idle" || currentStage >= 0) && (
-              <ol className="timeline">
-                {stages.map(([english, chinese], index) => {
-                  const stageStatus = ["failed", "timeout", "cancelled"].includes(status) && index === currentStage ? "error" : index < currentStage || (status === "completed" && index === currentStage) ? "done" : index === currentStage ? "active" : "waiting";
-                  return <li className={stageStatus} key={english}><i>{stageStatus === "done" ? "✓" : stageStatus === "error" ? "!" : index + 1}</i><div><strong>{isZh ? chinese : english}</strong>{isZh && <small>{english}</small>}</div><span>{stageStatus === "done" ? tr("成功", "Done") : stageStatus === "active" ? tr("进行中", "Running") : stageStatus === "error" ? tr("失败", "Failed") : tr("等待", "Waiting")}</span></li>;
-                })}
-              </ol>
-            )}
-            {status === "completed" && <div className="success-box"><strong>{sessionState?.input.targets.includes("web-preview") ? tr("App 已在 MicroPythonOS WASM 中真实运行", "App is running in MicroPythonOS WASM") : tr("所选生成和打包阶段已完成", "Selected generation and packaging stages are complete")}</strong>{providerResult && <span>AI: {providerResult.provider} · {providerResult.model}{providerResult.failoverUsed ? tr(` · 已安全切换（${providerResult.attempted.join(" → ")}）`, ` · Safe failover (${providerResult.attempted.join(" → ")})`) : ""}</span>}<span>{tr(`当前版本 ${sessionState?.revision_id || "r1"}；可以继续描述修改，不会覆盖上一成功版本。`, `Current revision ${sessionState?.revision_id || "r1"}. Continue editing without overwriting the last successful revision.`)}</span><button onClick={() => { setContinuing(true); setStatus("idle"); setToast(tr("请修改上方需求，然后点击“生成新版本”", "Edit the prompt, then click Generate revision")); }}>{tr("继续修改这个 App", "Continue editing this app")}</button></div>}
-            {["failed", "timeout", "cancelled", "blocked"].includes(status) && <div className={`error-box state-${status}`}>
-              <strong>{status === "timeout" ? tr("运行超时", "Timed out") : status === "cancelled" ? tr("任务已取消", "Cancelled") : status === "blocked" ? tr("等待处理", "Blocked") : tr("真实生成失败", "Generation failed")}</strong>
-              {sessionState?.last_error && <code>{sessionState.last_error.code} · {sessionState.last_error.stage} · owner: {sessionState.last_error.owner}</code>}
-              <span>{errorMessage}</span>
-              <div>
-                {status === "blocked" && sessionState?.permissions.some((item) => item.required && item.decision === "pending") && <button onClick={() => setPermissionOpen(true)}>{tr("处理权限", "Review permissions")}</button>}
-                {status === "timeout" && sessionState?.status !== "timeout" && <button onClick={() => void continueWaiting()}>{tr("继续等待后台结果", "Keep waiting for backend")}</button>}
-                {(status !== "timeout" || sessionState?.status === "timeout") && <button onClick={retry}>{tr("从失败检查点重试", "Retry from checkpoint")}</button>}
-              </div>
-            </div>}
-            {sessionState?.warnings.length ? <div className="warning-box"><strong>{tr("警告（不等于失败）", "Warnings (not failures)")}</strong>{sessionState.warnings.map((warning) => <span key={warning}>⚠ {warning}</span>)}</div> : null}
-          </section>
+          <ProgressCard
+            language={language}
+            status={status}
+            currentStage={currentStage}
+            sessionState={sessionState}
+            capabilityAnalysis={capabilityAnalysis}
+            capabilityProbes={capabilityProbes}
+            providerResult={providerResult}
+            errorMessage={errorMessage}
+            onContinueEditing={() => { setContinuing(true); setStatus("idle"); setToast(tr("请修改上方需求，然后点击“生成新版本”", "Edit the prompt, then click Generate revision")); }}
+            onReviewPermissions={() => setPermissionOpen(true)}
+            onKeepWaiting={() => void continueWaiting()}
+            onRetry={retry}
+          />
         </div>
 
         {history.length > 0 && <section className="card history-card">
@@ -2200,36 +2006,8 @@ export default function App() {
           )}
         </details>
 
-        <section className="card ecosystem-card" id="devices">
-          <div className="section-heading">
-            <div><span>{tr("真实适配能力", "Verified targets")}</span><h2>{tr("硬件生态与运行目标", "Hardware Ecosystem")}</h2></div>
-            <p>{tr("15 款物理板卡 + Linux/macOS 桌面目标 + WebAssembly Web 目标。", "15 physical boards, Linux/macOS desktop, and WebAssembly Web targets.")}</p>
-          </div>
-          <div className="target-strip">
-            <article><b>15</b><span>{tr("真实适配板卡", "verified boards")}</span></article>
-            <article><b>Web</b><span>WebAssembly</span></article>
-            <article><b>Desktop</b><span>Linux / macOS</span></article>
-          </div>
-          <details className="board-details">
-            <summary>{tr("查看全部 15 款真实适配板卡", "View all 15 verified boards")}</summary>
-            <div className="board-grid">
-              {verifiedBoards.map(([brand, model, platform, screen, use]) => (
-                <article key={`${brand}-${model}`}>
-                  <div><span className="verified-dot" />{tr("已真实适配", "Verified")}</div>
-                  <strong>{brand}</strong>
-                  <h3>{model}</h3>
-                  <p>{platform} · {boardText(screen)}</p>
-                  <small>{tr("推荐：", "Best for: ")}{boardText(use)}</small>
-                </article>
-              ))}
-            </div>
-          </details>
-          <div className="planned-note">
-            <strong>Tuya / 涂鸦智能</strong>
-            <span>{tr("3 款带屏板卡为重点适配方向；当前仅作概念演示，并非真实适配。", "Three display boards are a priority direction. Concept demo only; not currently verified.")}</span>
-            <b>{tr("规划适配", "Planned")}</b>
-          </div>
-        </section>
+
+        <EcosystemCard isZh={isZh} />
 
         <section className="card result-card" id="preview">
           <div className="tabs">
@@ -2238,150 +2016,63 @@ export default function App() {
             <button className={activeTab === "artifacts" ? "active" : ""} onClick={() => setActiveTab("artifacts")}>{tr("生成产物", "Artifacts")}</button>
           </div>
           {activeTab === "preview" && (
-            <div className="preview-pane">
-              <div className="preview-copy">
-                <h3>{tr("浏览器模拟屏幕", "Browser Simulator")}</h3>
-                <p>{tr("右边不是假图片，里面运行的是实际的 MicroPythonOS WebAssembly；生成成功后可以直接点击 App。", "The device on the right runs real MicroPythonOS WebAssembly. You can interact with the app after generation.")}</p>
-                <p className="preview-limit">{tr("Web 预览只是浏览器兼容性预览，不等于真机验证。摄像头、IMU、GPIO、串口、蓝牙、音频、SD 卡和实体按键必须上真机测试。", "Web preview is a browser compatibility preview, not hardware validation. Camera, IMU, GPIO, serial, Bluetooth, audio, SD card, and physical buttons require a real device.")}</p>
-                <div className={`runtime-pill ${["failed", "timeout"].includes(status) ? "error" : wasmReady ? "ready" : ""}`}>
-                  <i />{runtimeStatus}
-                </div>
-                {sessionState?.artifacts.find((item) => item.role === "desktop_screenshot") && <img className="desktop-screenshot" src={`${apiUrl}/api/artifacts/${sessionState.artifacts.find((item) => item.role === "desktop_screenshot")!.id}`} alt={tr("桌面测试截图", "Desktop smoke screenshot")} />}
-                {result && <>
-                  <small className="preview-summary">{result.summary} · {providerResult?.provider} · {providerResult?.model}{providerResult?.failoverUsed ? tr(" · 已执行安全 failover", " · Safe failover used") : ""}</small>
-                  <small className="preview-summary">{tr(
-                    `AI 规范化需求：${result.prompt_normalized_zh || sessionState?.input.prompt_normalized_zh || prompt}`,
-                    `Normalized requirement: ${result.prompt_normalized_en || sessionState?.input.prompt_normalized_en || prompt}`,
-                  )}</small>
-                </>}
-              </div>
-              <div className="device wasm-device">
-                <div className="device-status"><span>10:24</span><span>● WiFi　87%</span></div>
-                <iframe
-                  ref={iframeRef}
-                  title="MicroPythonOS WebAssembly Runtime"
-                  src={wasmRuntimeUrl}
-                  allow="clipboard-read; clipboard-write"
-                  onLoad={() => {
-                    lastRun.current = "";
-                    setWasmReady(false);
-                    setRuntimeStatus(tr("正在启动 MicroPythonOS WASM…", "Starting MicroPythonOS WASM…"));
-                    iframeRef.current?.contentWindow?.postMessage({ source: "mpos-builder", type: "PING" }, wasmRuntimeOrigin);
-                    window.setTimeout(() => iframeRef.current?.contentWindow?.postMessage({ source: "mpos-builder", type: "PING" }, wasmRuntimeOrigin), 1500);
-                    if (wasmTimer.current !== null) window.clearTimeout(wasmTimer.current);
-                    wasmTimer.current = window.setTimeout(() => {
-                      const detail = tr("MicroPythonOS WASM 启动超时，请刷新页面后重试。", "MicroPythonOS WASM startup timed out. Refresh and retry.");
-                      setRuntimeStatus(detail);
-                      setErrorMessage(detail);
-                      setStatus("timeout");
-                    }, 120000);
-                  }}
-                />
-              </div>
-            </div>
+            <PreviewPane
+              language={language}
+              status={status}
+              wasmReady={wasmReady}
+              runtimeStatus={runtimeStatus}
+              desktopScreenshotUrl={desktopScreenshot ? `${apiUrl}/api/artifacts/${desktopScreenshot.id}` : null}
+              result={result}
+              providerResult={providerResult}
+              normalizedZh={result?.prompt_normalized_zh || sessionState?.input.prompt_normalized_zh || prompt}
+              normalizedEn={result?.prompt_normalized_en || sessionState?.input.prompt_normalized_en || prompt}
+              iframeRef={iframeRef}
+              wasmRuntimeUrl={wasmRuntimeUrl}
+              onIframeLoad={handleWasmFrameLoad}
+            />
           )}
           {activeTab === "logs" && <div className="logs"><button onClick={() => { navigator.clipboard.writeText(logs.join("\n")); setToast(tr("日志已复制", "Logs copied")); }}>{tr("复制日志", "Copy logs")}</button><pre>{logs.length ? logs.join("\n") : tr("// 点击“开始生成 App”后，这里会显示日志。", "// Logs will appear here after you generate an app.")}</pre></div>}
           {activeTab === "artifacts" && (
-            result
-              ? <div className="artifacts">
-                  {sessionState?.artifacts.length
-                    ? <ul>{sessionState.artifacts.map((artifact) => <li key={artifact.id}><span>▣　{artifact.path}<small>{artifact.role} · {artifact.kind} · {Math.ceil(artifact.size / 1024)} KB</small><small>{artifact.mime} · {artifact.phase}</small><code title={artifact.sha256}>sha256: {artifact.sha256.slice(0, 16)}…</code></span><button onClick={() => void downloadArtifact(artifact)}>{tr("下载", "Download")}</button></li>)}</ul>
-                    : <ul>{result.files.map((file) => <li key={file.path}><span>▣　{file.path}</span><button onClick={() => download(file.path, file.content)}>{tr("下载", "Download")}</button></li>)}</ul>}
-                  <div className="mpk"><div><strong>{result.mpk_filename}</strong><small>{tr("包含真实 MANIFEST.JSON 和 assets/main.py，文件名符合 _rN 发布规则", "Contains MANIFEST.JSON and assets/main.py with the required _rN release name")}</small></div><button onClick={downloadMpk}>{tr("下载真实 .mpk", "Download .mpk")}</button></div>
-                  <div className="publish-guide">
-                    <strong>{tr("uPyStore 发布检查", "uPyStore checklist")}</strong>
-                    <span>{tr("✓ Manifest　✓ _rN.mpk　△ Web/真机验证　△ PNG/JPEG/WebP 截图。发布材料 ZIP 已进入上方产物列表；这里只提供手工上传引导。", "✓ Manifest  ✓ _rN.mpk  △ Web/device validation  △ PNG/JPEG/WebP screenshot. The publishing ZIP is listed above; upload remains manual.")}</span>
-                    <label className="secondary-button">
-                      {screenshotBusy ? tr("正在上传截图…", "Uploading screenshot…") : tr("添加发布截图", "Add publishing screenshot")}
-                      <input
-                        type="file"
-                        accept="image/png,image/jpeg,image/webp"
-                        disabled={screenshotBusy}
-                        hidden
-                        onChange={(event) => {
-                          const file = event.target.files?.[0];
-                          event.currentTarget.value = "";
-                          if (file) void uploadScreenshot(file);
-                        }}
-                      />
-                    </label>
-                    <a href="https://upystore.io/developer" target="_blank" rel="noreferrer">{tr("打开 uPyStore 开发者入口", "Open uPyStore Developer")}</a>
-                  </div>
-                </div>
-              : <div className="not-ready">{tr("真实生成成功后，这里会出现 AI 生成的源码和 `.mpk`。", "AI-generated source files and the `.mpk` will appear here after generation.")}</div>
+            <ArtifactsPanel
+              language={language}
+              result={result}
+              artifacts={sessionState?.artifacts ?? []}
+              screenshotBusy={screenshotBusy}
+              onDownloadArtifact={(artifact) => void downloadArtifact(artifact)}
+              onDownloadFile={(file) => download(file.path, file.content)}
+              onDownloadMpk={downloadMpk}
+              onUploadScreenshot={(file) => void uploadScreenshot(file)}
+            />
           )}
         </section>
       </main>
 
-      {requirementOpen && <div className="modal-backdrop"><div className="modal requirement-modal">
-        <section className="requirement-modal-title">
-          <div><span>AI</span><div><h2>{tr("需求刻画助手", "Requirement assistant")}</h2><p>{tr("先把想法聊清楚，再交给生成器", "Clarify the idea before sending it to the generator")}</p></div></div>
-          <button aria-label={tr("关闭", "Close")} onClick={() => setRequirementOpen(false)}>×</button>
-        </section>
-        <div className="requirement-chat">
-          {requirementMessages.map((message, index) => (
-            <article className={message.role} key={`${message.role}-${index}`}>
-              <b>{message.role === "user" ? tr("你", "You") : tr("AI 助手", "AI assistant")}</b>
-              <p>{message.content}</p>
-            </article>
-          ))}
-          {requirementBusy && <article className="assistant thinking"><b>{tr("AI 助手", "AI assistant")}</b><p>{tr("正在理解你的想法…", "Understanding your idea…")}</p></article>}
-        </div>
-        {requirementError && <div className="requirement-chat-error">{requirementError}</div>}
-        {requirementResult?.ready && requirementResult.refined_prompt
-          ? <div className="requirement-ready">
-              <strong>✓ {tr("需求已经整理好", "Requirement ready")}</strong>
-              <p>{requirementResult.refined_prompt}</p>
-            </div>
-          : <div className="requirement-compose">
-              <textarea
-                value={requirementInput}
-                disabled={requirementBusy}
-                placeholder={tr("回答这个问题，也可以直接说“按你的建议”", "Answer the question, or say “use your recommendation”")}
-                onChange={(event) => setRequirementInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    sendRequirementAnswer();
-                  }
-                }}
-              />
-              <button className="main-button" disabled={!requirementInput.trim() || requirementBusy} onClick={sendRequirementAnswer}>{tr("发送", "Send")}</button>
-            </div>}
-        <div className="requirement-actions">
-          <button className="secondary-button" disabled={requirementBusy} onClick={() => setRequirementOpen(false)}>{tr("稍后再说", "Later")}</button>
-          {!requirementResult?.ready && <button className="secondary-button" disabled={requirementBusy} onClick={() => void requestRequirementHelp(requirementMessages, true)}>{tr("现在整理成完整需求", "Finish requirement now")}</button>}
-          {requirementResult?.ready && <button className="main-button" onClick={applyRefinedRequirement}>{tr("采用这份需求", "Use this requirement")}</button>}
-        </div>
-        <small className="requirement-note">{tr("这里只整理产品需求，不会生成代码或扣除生成点数。", "This step only refines requirements. It does not generate code or consume generation credits.")}</small>
-      </div></div>}
+      {requirementOpen && (
+        <RequirementModal
+          language={language}
+          messages={requirementMessages}
+          input={requirementInput}
+          busy={requirementBusy}
+          error={requirementError}
+          result={requirementResult}
+          onInputChange={setRequirementInput}
+          onSend={sendRequirementAnswer}
+          onFinish={() => void requestRequirementHelp(requirementMessages, true)}
+          onApply={applyRefinedRequirement}
+          onClose={() => setRequirementOpen(false)}
+        />
+      )}
 
-      {permissionOpen && sessionState && <div className="modal-backdrop"><div className="modal permission-host">
-        <h2>{tr("确认操作权限", "Review permissions")}</h2>
-        <p>{tr("你可以逐项决定，也可以在下方一键允许全部必需权限。所有授权只对本次会话生效。", "Review permissions individually or allow all required permissions below. Approvals apply only to this session.")}</p>
-        <div className="permission-list">
-          {sessionState.permissions.filter((item) => item.required).map((permission) => (
-            <article className={`permission-card risk-${permission.risk} decision-${permission.decision}`} key={permission.permission_id}>
-              <header><strong>{permission.title}</strong><span>{permission.risk}</span></header>
-              <p>{permission.description}</p>
-              <code>{permission.command_preview}</code>
-              <small>{permission.permission_type} · {permission.permission_id}</small>
-              {permission.decision === "pending"
-                ? <div><button disabled={Boolean(permissionBusy)} className="secondary-button" onClick={() => void decidePermission(permission, "deny")}>{tr("拒绝", "Deny")}</button><button disabled={Boolean(permissionBusy)} className="main-button" onClick={() => void decidePermission(permission, "allow_once")}>{permissionBusy === permission.permission_id ? tr("保存中…", "Saving…") : tr("仅允许一次", "Allow once")}</button></div>
-                : <b>{permission.decision === "allow_once" ? tr("✓ 已允许一次", "✓ Allowed once") : tr("✕ 已拒绝", "✕ Denied")}</b>}
-            </article>
-          ))}
-        </div>
-        <small>{tr("API Key 只保存在 backend/.env。模型不能发送任意 shell，也不能绕过这些权限。", "The API key stays in backend/.env. The model cannot send arbitrary shell commands or bypass these permissions.")}</small>
-        <div>
-          <button className="secondary-button" onClick={() => setPermissionOpen(false)}>{tr("稍后处理", "Later")}</button>
-          <button
-            className="main-button"
-            disabled={Boolean(permissionBusy) || sessionState.permissions.some((item) => item.required && item.decision === "deny")}
-            onClick={() => void allowAllPermissions()}
-          >{permissionBusy === "__all__" ? tr("正在一键确认…", "Approving…") : tr("一键确认并开始运行", "Approve all and run")}</button>
-        </div>
-      </div></div>}
+      {permissionOpen && sessionState && (
+        <PermissionModal
+          language={language}
+          permissions={sessionState.permissions}
+          permissionBusy={permissionBusy}
+          onDecide={(permission, decision) => void decidePermission(permission, decision)}
+          onAllowAll={() => void allowAllPermissions()}
+          onClose={() => setPermissionOpen(false)}
+        />
+      )}
       {toast && <div className="toast">{toast}</div>}
     </div>
   );

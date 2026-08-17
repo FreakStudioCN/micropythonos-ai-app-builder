@@ -11,18 +11,23 @@ import shutil
 import subprocess
 import uuid
 import zipfile
-from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fastapi.encoders import jsonable_encoder
-
-from .generator import GenerationError, _build_mpk, _default_icon_png, generate_app
+from .capabilities import (
+    CAPABILITY_ERROR_SEMANTICS,
+    CapabilityContractError,
+    allows_code_repair,
+    capability_error,
+    capability_versions,
+    is_capability_error,
+)
+from .capability_policy import PolicyGateError
+from .capability_extraction import analyze_requirements
+from .device_service import device_service
+from .generator import GenerationError, _default_icon_png, generate_app
 from .models import (
     PROTOCOL_VERSION,
-    DemoErrorInjectionRequest,
-    DemoSessionRequest,
-    DeviceResultRequest,
     GenerateRequest,
     PermissionBatchDecisionRequest,
     PermissionDecisionRequest,
@@ -36,11 +41,16 @@ from .object_storage import session_object_store
 from .runner_services import (
     STAGE_SKILLS,
     api_summary_version,
-    device_service,
+    capability_reference,
     mpos_skill_adapter,
     script_dispatcher,
 )
+from .session_common import _json_dump, _json_load, _now
+from .session_demo import SessionDemoMixin
+from .session_device import SessionDeviceMixin
 from .session_index import EventLogCache, SessionIndex
+from .session_publish import SessionPublishMixin
+from .session_redaction import _redact_text, _redact_value
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -49,58 +59,6 @@ SESSION_ROOT = Path(
 ).resolve()
 ARTIFACT_ID_RE = re.compile(r"^[a-zA-Z0-9_.-]+$")
 INSTALLER_URL = "https://install.micropythonos.com/"
-
-DEMO_SEEDS: dict[str, dict[str, str]] = {
-    "countdown": {
-        "prompt_zh": "做一个课堂倒计时器，深色主题，有开始、暂停和重置按钮。",
-        "prompt_en": "Build a dark classroom countdown timer with start, pause and reset controls.",
-        "package_name": "com.demo.classroom_timer",
-        "display_name_zh": "课堂倒计时",
-        "display_name_en": "Classroom Timer",
-        "summary": "一个适合课堂投屏演示的深色倒计时器。",
-        "headline": "05:00",
-        "caption": "READY · CLASSROOM TIMER",
-    },
-    "calendar": {
-        "prompt_zh": "做一个精美的深色日历，可以查看本月日期。",
-        "prompt_en": "Build a polished dark calendar for viewing the current month.",
-        "package_name": "com.demo.calendar",
-        "display_name_zh": "星空日历",
-        "display_name_en": "Starlight Calendar",
-        "summary": "一个深色主题、适合触摸屏的月历。",
-        "headline": "JULY 2026",
-        "caption": "MON  TUE  WED  THU  FRI",
-    },
-    "device-dashboard": {
-        "prompt_zh": "做一个酷炫的 ESP32 设备状态面板，显示温度、网络和电量。",
-        "prompt_en": "Build a polished ESP32 status dashboard showing temperature, network and battery.",
-        "package_name": "com.demo.device_dashboard",
-        "display_name_zh": "设备脉搏",
-        "display_name_en": "Device Pulse",
-        "summary": "一个展示温度、网络和电量的设备状态面板。",
-        "headline": "42°C  ·  87%",
-        "caption": "DEVICE ONLINE · WIFI STRONG",
-    },
-}
-
-
-def _now() -> str:
-    return datetime.now(UTC).isoformat()
-
-
-def _json_dump(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(
-        json.dumps(jsonable_encoder(value), ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
-    temporary.replace(path)
-
-
-def _json_load(path: Path) -> dict[str, Any]:
-    return json.loads(path.read_text(encoding="utf-8"))
-
 
 def _git_commit(path: Path) -> str:
     try:
@@ -134,57 +92,11 @@ def _git_commit(path: Path) -> str:
     return value or "unknown"
 
 
-def _redact_text(value: str) -> str:
-    """Remove host-only and secret-like values from user-facing exports."""
-    value = re.sub(
-        r"(?i)\b(?:sk|api)[-_][a-z0-9_-]{12,}\b",
-        "[REDACTED_TOKEN]",
-        value,
-    )
-    value = re.sub(
-        r"(?i)(authorization\s*:\s*bearer\s+)[^\s\"']+",
-        r"\1[REDACTED_TOKEN]",
-        value,
-    )
-    value = re.sub(
-        r"(?i)\b(?:COM\d+|/dev/(?:tty|cu)\S+)\b",
-        "[REDACTED_SERIAL]",
-        value,
-    )
-    value = re.sub(
-        r"(?i)(?:[a-z]:\\(?:[^\\\r\n]+\\)+|/(?:home|users|var|tmp)/)"
-        r"[^\s\"']*",
-        "[REDACTED_PATH]",
-        value,
-    )
-    return value
-
-
-def _redact_value(value: Any) -> Any:
-    if isinstance(value, dict):
-        return {
-            key: (
-                "[REDACTED]"
-                if any(
-                    marker in key.lower()
-                    for marker in ("token", "api_key", "secret", "serial_port")
-                )
-                else _redact_value(item)
-            )
-            for key, item in value.items()
-        }
-    if isinstance(value, list):
-        return [_redact_value(item) for item in value]
-    if isinstance(value, str):
-        return _redact_text(value)
-    return value
-
-
 class SessionNotFound(KeyError):
     pass
 
 
-class SessionService:
+class SessionService(SessionDemoMixin, SessionDeviceMixin, SessionPublishMixin):
     def __init__(self, object_store: Any | None = None) -> None:
         SESSION_ROOT.mkdir(parents=True, exist_ok=True)
         self._object_store = object_store or session_object_store
@@ -230,6 +142,7 @@ class SessionService:
                 "replace real hardware deployment."
             ),
             "desktop_preview_details": desktop_capability,
+            "capability_reference": capability_reference(),
         }
 
     def _root(self, session_id: str) -> Path:
@@ -430,252 +343,6 @@ class SessionService:
         artifact = next(item for item in state["artifacts"] if item["role"] == role)
         return bundle, artifact
 
-    def create_demo(
-        self,
-        request: DemoSessionRequest,
-        user_id: str = "local-test-user",
-    ) -> dict[str, Any]:
-        seed = DEMO_SEEDS[request.seed]
-        state = self.create(
-            SessionCreateRequest(
-                idempotency_key=f"demo:{request.seed}:{request.idempotency_key}",
-                prompt=(
-                    seed["prompt_zh"]
-                    if request.ui_locale == "zh-CN"
-                    else seed["prompt_en"]
-                ),
-                prompt_language=(
-                    "zh-CN" if request.ui_locale == "zh-CN" else "en-US"
-                ),
-                ui_locale=request.ui_locale,
-                package_name=seed["package_name"],
-                display_name=(
-                    seed["display_name_zh"]
-                    if request.ui_locale == "zh-CN"
-                    else seed["display_name_en"]
-                ),
-                display_name_zh=seed["display_name_zh"],
-                display_name_en=seed["display_name_en"],
-                short_description_zh=seed["summary"],
-                short_description_en=seed["summary"],
-                long_description_zh=seed["summary"],
-                long_description_en=seed["summary"],
-                release_notes_zh="固定演示版本",
-                release_notes_en="Deterministic demo release",
-                category="demo",
-                publisher="MicroPythonOS",
-                version="1.0.0",
-                targets=["web-preview", "package-only"],
-            ),
-            user_id=user_id,
-        )
-        if state.get("demo_seed") == request.seed:
-            return state
-        for permission in state["permissions"]:
-            if permission.get("required"):
-                permission["decision"] = "allow_once"
-                permission["decided_at"] = _now()
-                permission["decision_source"] = "demo_seed"
-        root = self._root(state["session_id"])
-        app_root = (
-            root
-            / "project"
-            / "internal_filesystem"
-            / "apps"
-            / seed["package_name"]
-        )
-        app_root.mkdir(parents=True, exist_ok=True)
-        manifest = {
-            "fullname": seed["package_name"],
-            "name": seed["display_name_en"],
-            "publisher": "MicroPythonOS",
-            "version": "1.0.0",
-            "activities": [
-                {"entrypoint": "assets/main.py", "classname": "GeneratedApp"}
-            ],
-        }
-        code = f'''import lvgl as lv
-from mpos import Activity
-
-class GeneratedApp(Activity):
-    def onCreate(self):
-        screen = lv.obj()
-        screen.set_style_bg_color(lv.color_hex(0x0B1020), 0)
-        title = lv.label(screen)
-        title.set_text("{seed['display_name_en']}")
-        title.set_pos(18, 18)
-        headline = lv.label(screen)
-        headline.set_text("{seed['headline']}")
-        headline.set_pos(18, 82)
-        caption = lv.label(screen)
-        caption.set_text("{seed['caption']}")
-        caption.set_pos(18, 142)
-        hint = lv.label(screen)
-        hint.set_text("MicroPythonOS · DEMO")
-        hint.set_pos(18, 202)
-        self.setContentView(screen)
-'''
-        manifest_path = app_root / "MANIFEST.JSON"
-        source_path = app_root / "assets" / "main.py"
-        source_path.parent.mkdir(parents=True, exist_ok=True)
-        manifest_path.write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2), encoding="utf-8"
-        )
-        source_path.write_text(code, encoding="utf-8")
-        generation_result = {
-            "schema_version": "mpos-gen-app-web-v1",
-            "phase": "mpos-gen-app-web",
-            "result": "success",
-            "summary": seed["summary"],
-            "model": "deterministic-demo-seed",
-            "demo_seed": request.seed,
-            "warnings": [],
-            "structured_errors": [],
-        }
-        generation_path = root / "artifacts" / "generation_result.json"
-        _json_dump(generation_path, generation_result)
-        for path, kind, role in (
-            (manifest_path, "source", "app_manifest"),
-            (source_path, "source", "app_source"),
-            (generation_path, "result", "generation_result"),
-        ):
-            self._register_artifact(state, path, "mpos-gen-app-web", kind, role)
-        mpk_filename = f"{seed['package_name']}_r1.mpk"
-        mpk_path = root / "artifacts" / mpk_filename
-        mpk_path.write_bytes(
-            base64.b64decode(_build_mpk(seed["package_name"], manifest, code))
-        )
-        self._register_artifact(
-            state, mpk_path, "mpos-package-app-web", "package", "mpk"
-        )
-        for name, phase, payload in (
-            (
-                "app_test_result",
-                "mpos-test-app-web",
-                {
-                    "result": "success",
-                    "web_preview": {"status": "passed", "mode": "demo_seed"},
-                    "warnings": [],
-                    "structured_errors": [],
-                },
-            ),
-            (
-                "package_result",
-                "mpos-package-app-web",
-                {
-                    "result": "success",
-                    "package": {"filename": mpk_filename, "revision": 1},
-                    "warnings": [],
-                    "structured_errors": [],
-                },
-            ),
-            (
-                "publish_result",
-                "mpos-publish-app-web",
-                {
-                    "result": "success",
-                    "status": "ready_for_manual_upload",
-                    "publish_ready": False,
-                    "upystore": {
-                        "home_url": "https://upystore.io/",
-                        "developer_url": "https://upystore.io/developer",
-                        "mode": "manual_guidance",
-                    },
-                    "checks": [
-                        {"name": "manifest.publisher", "status": "passed"},
-                        {"name": "mpk_release_filename", "status": "passed"},
-                    ],
-                    "warnings": [],
-                    "structured_errors": [],
-                },
-            ),
-        ):
-            self._write_artifact_json(state, name, phase, payload)
-        state["demo_seed"] = request.seed
-        state["generation"] = {
-            "package_name": seed["package_name"],
-            "summary": seed["summary"],
-            "manifest": manifest,
-            "files": [
-                {"path": "MANIFEST.JSON", "content": json.dumps(manifest)},
-                {"path": "assets/main.py", "content": code},
-            ],
-            "model": "deterministic-demo-seed",
-            "mpk_filename": mpk_filename,
-            "revision": 1,
-        }
-        state["input"]["prompt_normalized_zh"] = seed["prompt_zh"]
-        state["input"]["prompt_normalized_en"] = seed["prompt_en"]
-        state["status"] = "running"
-        state["checkpoint_id"] = "publish_check_done"
-        state["current_phase"] = "mpos-publish-app-web"
-        state["next_phase"] = None
-        state["completed_phases"] = list(STAGE_SKILLS.values())
-        state["warnings"] = []
-        state["last_error"] = None
-        state["structured_errors"] = []
-        self._write_manifest(state)
-        self._write_publish_bundle(state)
-        state["status"] = "completed"
-        state["checkpoint_id"] = "completed"
-        self._apply_final_artifact_gate(state, completion_requested=True)
-        self._write_session_bundle(state)
-        self._write_manifest(state)
-        self._write_state(state)
-        self._event(
-            state,
-            "status_update",
-            "mpos-publish-app-web",
-            {
-                "status": state["status"],
-                "message": f"已恢复固定演示：{seed['display_name_zh']}",
-                "demo_seed": request.seed,
-            },
-        )
-        return self.get(state["session_id"])
-
-    def inject_demo_error(
-        self, session_id: str, request: DemoErrorInjectionRequest
-    ) -> dict[str, Any]:
-        if os.getenv("MPOS_DEMO_ERROR_INJECTION", "false").lower() not in {
-            "1",
-            "true",
-            "yes",
-            "on",
-        }:
-            raise PermissionError("Demo error injection is disabled")
-        state = self._read(session_id)
-        task = self._tasks.get(session_id)
-        if task and not task.done():
-            raise ValueError("Cannot inject an error while the session is running")
-        if state.get("demo_error_idempotency_key") == request.idempotency_key:
-            return state
-        messages = {
-            "LVGL_API_MISSING": "演示错误：当前 API summary 中不存在 lv.obj.get_pos",
-            "SCRIPT_TIMEOUT": "演示错误：受控测试脚本执行超时",
-            "DEVICE_NOT_CONNECTED": "演示错误：未检测到可部署设备",
-            "WEB_PREVIEW_BUILD_FAILED": "演示错误：Web preview 构建失败",
-        }
-        error = {
-            "code": request.code,
-            "message": messages[request.code],
-            "stage": "generation",
-            "phase": "mpos-gen-app-web",
-            "owner": "app",
-            "retryable": True,
-            "details": {"injected": True, "demo_only": True},
-            "logs": ["activity_log.jsonl"],
-        }
-        state["demo_error_idempotency_key"] = request.idempotency_key
-        state["status"] = "failed"
-        state["checkpoint_id"] = "failed"
-        state["next_phase"] = "mpos-gen-app-web"
-        state["last_error"] = error
-        state.setdefault("structured_errors", []).append(error)
-        self._write_state(state)
-        self._event(state, "structured_error", "mpos-gen-app-web", error)
-        return self.get(session_id)
-
     def events(self, session_id: str) -> list[dict[str, Any]]:
         path = self._root(session_id) / "activity_log.jsonl"
         return self._event_cache.read(session_id, path)
@@ -740,6 +407,14 @@ class GeneratedApp(Activity):
         input_hash = hashlib.sha256(
             json.dumps(request.model_dump(), sort_keys=True).encode("utf-8")
         ).hexdigest()
+        # Capability analysis replaces board selection: the request never names
+        # a board, so the App's abstract hardware needs are derived here and
+        # then carried through every checkpoint, revision and artifact.
+        capability_analysis = analyze_requirements(
+            request.prompt,
+            locale=request.ui_locale,
+            model_capabilities=request.required_capabilities,
+        )
         state: dict[str, Any] = {
             "schema_version": "mpos-ai-app-session-v1",
             "protocol_version": PROTOCOL_VERSION,
@@ -776,7 +451,24 @@ class GeneratedApp(Activity):
                 "version": request.version,
                 "targets": request.targets,
                 "ai_provider": request.ai_provider,
+                "required_capabilities": capability_analysis[
+                    "required_capabilities"
+                ],
+                "required_accessories": (
+                    request.required_accessories
+                    or capability_analysis["required_accessories"]
+                ),
+                "runtime_fallbacks": (
+                    request.runtime_fallbacks
+                    or capability_analysis["runtime_fallbacks"]
+                ),
+                "physical_validation_required": (
+                    request.physical_validation_required
+                    or capability_analysis["physical_validation_required"]
+                ),
             },
+            "capability_analysis": capability_analysis,
+            "capability_versions": capability_versions(),
             "capabilities": request.capabilities.model_dump(),
             "repo_commit": self.capabilities()["repo_commit"],
             "skills_commit": self.capabilities()["skills_commit"],
@@ -1024,6 +716,17 @@ class GeneratedApp(Activity):
         self, session_id: str, request: SessionActionRequest
     ) -> dict[str, Any]:
         state = self._read(session_id)
+        unrepairable = self._refuse_unrepairable(state)
+        if unrepairable is not None:
+            # Do not spend another generation on something regenerating cannot
+            # fix; keep the original owner/attribution intact.
+            state["structured_errors"] = [
+                error
+                for error in state.get("structured_errors", [])
+                if error is not unrepairable
+            ] + [unrepairable]
+            self._write_state(state)
+            return self.get(session_id)
         task = self._tasks.get(session_id)
         if task and not task.done():
             return state
@@ -1240,6 +943,19 @@ class GeneratedApp(Activity):
                 },
             )
 
+    def _refuse_unrepairable(self, state: dict[str, Any]) -> dict[str, Any] | None:
+        """Block a retry whose last error nobody can fix by regenerating code.
+
+        Missing OS APIs, absent device hardware and preview limits are not App
+        defects. Without this check the retry endpoint happily spends another
+        model call on an error the code can never resolve.
+        """
+        error = state.get("last_error") or {}
+        code = str(error.get("code", ""))
+        if is_capability_error(code) and not allows_code_repair(code):
+            return error
+        return None
+
     def start_action(
         self, session_id: str, action: str, request: SessionActionRequest
     ) -> dict[str, Any]:
@@ -1382,6 +1098,21 @@ class GeneratedApp(Activity):
                             ai_provider=(
                                 request.ai_provider
                                 or user_input.get("ai_provider", "auto")
+                            ),
+                            # Without these the capability contract never
+                            # reaches the prompt and the portability gate
+                            # silently degrades to a no-op.
+                            required_capabilities=user_input.get(
+                                "required_capabilities", []
+                            ),
+                            required_accessories=user_input.get(
+                                "required_accessories", []
+                            ),
+                            runtime_fallbacks=user_input.get(
+                                "runtime_fallbacks", {}
+                            ),
+                            physical_validation_required=user_input.get(
+                                "physical_validation_required", False
                             ),
                         )
                     )
@@ -1608,7 +1339,13 @@ class GeneratedApp(Activity):
                         state, completion_requested=True
                     )
                 self._write_state(state)
-            except (GenerationError, OSError, ValueError) as exc:
+            except (
+                GenerationError,
+                PolicyGateError,
+                CapabilityContractError,
+                OSError,
+                ValueError,
+            ) as exc:
                 state = self._read(session_id)
                 message = str(exc)
                 code = getattr(
@@ -1628,8 +1365,21 @@ class GeneratedApp(Activity):
                     ),
                     "stage": action,
                     "phase": phase,
-                    "owner": "external" if code.startswith("AI_UPSTREAM_") else "app",
-                    "retryable": getattr(exc, "retryable", True),
+                    # Capability errors carry a fixed owner/retryable pair.
+                    # Relabelling them "app"/retryable is what feeds device and
+                    # OS limits back into the code-repair loop.
+                    "owner": (
+                        CAPABILITY_ERROR_SEMANTICS[code][0]
+                        if is_capability_error(code)
+                        else "external"
+                        if code.startswith("AI_UPSTREAM_")
+                        else "app"
+                    ),
+                    "retryable": (
+                        CAPABILITY_ERROR_SEMANTICS[code][1]
+                        if is_capability_error(code)
+                        else getattr(exc, "retryable", True)
+                    ),
                     "details": {
                         "resume_checkpoint_id": resume_checkpoint_id,
                         **getattr(exc, "details", {}),
@@ -1740,6 +1490,36 @@ class GeneratedApp(Activity):
         state["input"]["prompt_language"] = request.prompt_language
         state["input"]["prompt_normalized_zh"] = request.prompt
         state["input"]["prompt_normalized_en"] = request.prompt
+        # Re-analyse the new instruction and union it with what the session
+        # already required: a follow-up edit adds hardware needs, it does not
+        # silently drop the ones the App already depends on.
+        revised = analyze_requirements(
+            request.prompt,
+            locale=state["input"].get("ui_locale", "zh-CN"),
+            model_capabilities=[
+                *state["input"].get("required_capabilities", []),
+                *request.required_capabilities,
+            ],
+        )
+        state["input"]["required_capabilities"] = revised["required_capabilities"]
+        state["input"]["required_accessories"] = sorted(
+            {
+                *state["input"].get("required_accessories", []),
+                *request.required_accessories,
+                *revised["required_accessories"],
+            }
+        )
+        state["input"]["runtime_fallbacks"] = {
+            **revised["runtime_fallbacks"],
+            **state["input"].get("runtime_fallbacks", {}),
+            **request.runtime_fallbacks,
+        }
+        state["input"]["physical_validation_required"] = bool(
+            revised["physical_validation_required"]
+            or state["input"].get("physical_validation_required")
+        )
+        state["capability_analysis"] = revised
+        state["capability_versions"] = capability_versions()
         if request.ai_provider is not None:
             state["input"]["ai_provider"] = request.ai_provider
         state["status"] = "created"
@@ -1905,6 +1685,16 @@ class GeneratedApp(Activity):
                         previous_code=state.get("pending_repair", {}).get("previous_code"),
                         runtime_error=state.get("pending_repair", {}).get("runtime_error"),
                         ai_provider=user_input.get("ai_provider", "auto"),
+                        required_capabilities=user_input.get(
+                            "required_capabilities", []
+                        ),
+                        required_accessories=user_input.get(
+                            "required_accessories", []
+                        ),
+                        runtime_fallbacks=user_input.get("runtime_fallbacks", {}),
+                        physical_validation_required=user_input.get(
+                            "physical_validation_required", False
+                        ),
                     ),
                     attempt_sink=lambda record: self._write_generation_attempt(
                         state, generation_run, record
@@ -2159,7 +1949,7 @@ class GeneratedApp(Activity):
                     "result": "blocked" if physical_requested else "partial",
                     "mode": "install-site" if physical_requested else "web-preview",
                     "hardware_available": False,
-                    "board": None,
+                    "hardware_id": None,
                     "serial_port": None,
                     "micropythonos_installed": "unknown",
                     "install_url": "https://install.micropythonos.com/",
@@ -2308,7 +2098,13 @@ class GeneratedApp(Activity):
                     state["current_phase"],
                     {"result": "cancelled", "checkpoint_id": "cancelled"},
                 )
-            except (GenerationError, OSError, ValueError) as exc:
+            except (
+                GenerationError,
+                PolicyGateError,
+                CapabilityContractError,
+                OSError,
+                ValueError,
+            ) as exc:
                 state = self._read(session_id)
                 message = str(exc)
                 code = getattr(
@@ -2328,8 +2124,21 @@ class GeneratedApp(Activity):
                     ),
                     "stage": "generation",
                     "phase": "mpos-gen-app-web",
-                    "owner": "external" if code.startswith("AI_UPSTREAM_") else "app",
-                    "retryable": getattr(exc, "retryable", True),
+                    # Capability errors carry a fixed owner/retryable pair.
+                    # Relabelling them "app"/retryable is what feeds device and
+                    # OS limits back into the code-repair loop.
+                    "owner": (
+                        CAPABILITY_ERROR_SEMANTICS[code][0]
+                        if is_capability_error(code)
+                        else "external"
+                        if code.startswith("AI_UPSTREAM_")
+                        else "app"
+                    ),
+                    "retryable": (
+                        CAPABILITY_ERROR_SEMANTICS[code][1]
+                        if is_capability_error(code)
+                        else getattr(exc, "retryable", True)
+                    ),
                     "details": {
                         "attempt": state["attempts"].get("mpos-gen-app-web", 1),
                         "resume_checkpoint_id": resume_checkpoint_id,
@@ -2387,6 +2196,8 @@ class GeneratedApp(Activity):
             "micropythonos_commit": state.get("repo_commit"),
             "micropython_skills_commit": state.get("skills_commit"),
             "api_summary_version": state.get("api_summary_version", {}),
+            "capability_versions": state.get("capability_versions", {}),
+            "capability_analysis": state.get("capability_analysis", {}),
             "output_files": [item["path"] for item in state.get("artifacts", [])],
             "warnings": state.get("warnings", []),
             "error": state.get("last_error"),
@@ -2481,7 +2292,7 @@ class GeneratedApp(Activity):
         result.setdefault("result", "partial")
         result.setdefault("mode", "web-preview")
         result.setdefault("hardware_available", False)
-        result.setdefault("board", None)
+        result.setdefault("hardware_id", None)
         result.setdefault("serial_port", None)
         result.setdefault("micropythonos_installed", "unknown")
         result.setdefault("permission_decisions", permission_decisions)
@@ -2493,194 +2304,6 @@ class GeneratedApp(Activity):
         result.setdefault("structured_errors", [])
         result.setdefault("handoff", {"next_phase": "mpos-publish-app-web"})
         return result
-
-    def _normalize_publish_result(
-        self, state: dict[str, Any], value: dict[str, Any]
-    ) -> dict[str, Any]:
-        result = dict(value)
-        user_input = state.get("input", {})
-        metadata = result.get("app_metadata")
-        if not isinstance(metadata, dict):
-            metadata = {}
-        app = result.get("app")
-        if not isinstance(app, dict):
-            app = {}
-        app.setdefault("fullname", user_input.get("package_name", "com.example.app"))
-        app.setdefault(
-            "name",
-            metadata.get("display_name_en")
-            or metadata.get("display_name_zh")
-            or user_input.get("display_name", "Generated App"),
-        )
-        app.setdefault("publisher", user_input.get("publisher", "unknown"))
-        app.setdefault("version", user_input.get("version", "0.1.0"))
-        app.setdefault("metadata", metadata)
-
-        mpk = result.get("mpk")
-        if not isinstance(mpk, dict):
-            mpk = {}
-        mpk_artifact = next(
-            (
-                item
-                for item in reversed(state.get("artifacts", []))
-                if item.get("role") == "mpk"
-            ),
-            None,
-        )
-        revision_id = str(state.get("revision_id", "r1"))
-        fallback_filename = (
-            f"{user_input.get('package_name', 'com.example.app')}_{revision_id}.mpk"
-        )
-        filename = str(
-            mpk.get("filename")
-            or (Path(str(mpk_artifact.get("path", ""))).name if mpk_artifact else "")
-            or fallback_filename
-        )
-        mpk.setdefault("filename", filename)
-        mpk.setdefault(
-            "path",
-            str(mpk_artifact.get("path"))
-            if mpk_artifact
-            else f"artifacts/{filename}",
-        )
-
-        screenshot_artifacts = []
-        for artifact in state.get("artifacts", []):
-            if artifact.get("role") not in {
-                "desktop_screenshot",
-                "publish_screenshot",
-            }:
-                continue
-            path = self._final_artifact_path(state, artifact)
-            if path and self._valid_publish_screenshot(
-                path, str(artifact.get("mime", ""))
-            ):
-                screenshot_artifacts.append(artifact)
-        screenshot_ids = [
-            str(item["id"])
-            for item in screenshot_artifacts
-            if item.get("id")
-        ]
-        screenshot_ready = bool(screenshot_ids)
-        publish_ready = bool(result.get("publish_ready", False))
-        release_readiness = (
-            "ready_for_manual_upload"
-            if publish_ready
-            else "blocked"
-            if result.get("result") == "blocked"
-            else "partial"
-        )
-        upystore = result.get("upystore")
-        if not isinstance(upystore, dict):
-            upystore = {}
-        comparison_status = str(
-            upystore.get("version_status", "unknown_unverified")
-        )
-        if comparison_status not in {
-            "not_checked",
-            "not_published",
-            "current",
-            "update_available",
-            "conflict",
-            "unknown_unverified",
-        }:
-            comparison_status = "unknown_unverified"
-        bundle_artifact = next(
-            (
-                item
-                for item in reversed(state.get("artifacts", []))
-                if item.get("role") == "publish_materials_bundle"
-            ),
-            None,
-        )
-
-        result.setdefault("schema_version", "mpos-publish-app-web-v1")
-        result.setdefault("phase", "mpos-publish-app-web")
-        result.setdefault("result", "partial")
-        result.setdefault("publish_ready", False)
-        result["release_readiness"] = release_readiness
-        result.setdefault("blockers", [])
-        result["app"] = app
-        result["mpk"] = mpk
-        result["screenshot_readiness"] = {
-            "ready": screenshot_ready,
-            "artifact_ids": screenshot_ids,
-            "missing": [] if screenshot_ready else ["publish_screenshot"],
-        }
-        result["upystore_comparison"] = {"status": comparison_status}
-        result.setdefault(
-            "manual_upload_guidance",
-            {
-                "developer_url": str(
-                    upystore.get("developer_url", "https://upystore.io/developer")
-                ),
-                "steps": ["Upload the prepared MPK and publish screenshots."],
-                "bundle_artifact_id": (
-                    bundle_artifact.get("id") if bundle_artifact else None
-                ),
-            },
-        )
-        result.setdefault("warnings", [])
-        result.setdefault("structured_errors", [])
-        result.setdefault("handoff", {"next_phase": None})
-        return result
-
-    @staticmethod
-    def _publish_bundle_value(value: Any) -> Any:
-        if isinstance(value, dict):
-            blocked_keys = {
-                "authorization",
-                "cookie",
-                "credential",
-                "credentials",
-                "installed_path",
-                "log_excerpt",
-                "password",
-                "secret",
-                "serial_port",
-                "token",
-            }
-            return {
-                key: SessionService._publish_bundle_value(item)
-                for key, item in value.items()
-                if not any(
-                    marker in key.lower()
-                    for marker in blocked_keys | {"api_key"}
-                )
-            }
-        if isinstance(value, list):
-            return [SessionService._publish_bundle_value(item) for item in value]
-        if isinstance(value, str):
-            return _redact_text(value)
-        return value
-
-    @classmethod
-    def _publish_deploy_result(cls, value: dict[str, Any]) -> dict[str, Any]:
-        allowed = {
-            "schema_version",
-            "phase",
-            "stage",
-            "result",
-            "mode",
-            "hardware_available",
-            "board",
-            "micropythonos_installed",
-            "app_installed",
-            "app_launched",
-            "client_attested",
-            "server_verified",
-            "permission_decisions",
-            "warnings",
-            "structured_errors",
-            "handoff",
-        }
-        publish_value = {
-            key: item for key, item in value.items() if key in allowed
-        }
-        publish_value.update(
-            {"serial_port": None, "commands": [], "logs": []}
-        )
-        return cls._publish_bundle_value(publish_value)
 
     def _write_artifact_json(
         self, state: dict[str, Any], name: str, phase: str, value: dict[str, Any]
@@ -2922,8 +2545,16 @@ class GeneratedApp(Activity):
                     "message": message,
                     "stage": "publish",
                     "phase": "mpos-publish-app-web",
-                    "owner": owner,
-                    "retryable": True,
+                    "owner": (
+                        CAPABILITY_ERROR_SEMANTICS[code][0]
+                        if is_capability_error(code)
+                        else owner
+                    ),
+                    "retryable": (
+                        CAPABILITY_ERROR_SEMANTICS[code][1]
+                        if is_capability_error(code)
+                        else True
+                    ),
                     "details": {
                         "gate": "final_artifacts_only",
                         "artifact_role": artifact_role,
@@ -2953,6 +2584,48 @@ class GeneratedApp(Activity):
                 owner="user",
                 expected="PNG/JPEG/WebP",
             )
+        # A capability the connected device does not expose is a hard stop:
+        # completing and publishing anyway would ship an App that cannot run.
+        # Skip the gate's own re-emitted copies, or each run appends another
+        # one and the list grows without bound (2 -> 3 -> 4 ...).
+        unavailable = [
+            error
+            for error in state.get("structured_errors", [])
+            if error.get("code") == "HARDWARE_CAPABILITY_UNAVAILABLE"
+            and not self._is_final_artifact_error(error)
+        ]
+        for error in unavailable:
+            missing_error(
+                "runtime_capability",
+                "已连接设备缺少所需能力："
+                + str(error.get("details", {}).get("capability", "")),
+                code="HARDWARE_CAPABILITY_UNAVAILABLE",
+                owner="device",
+                expected="runtime probe available=true",
+            )
+
+        # Hardware Apps must not be completed on preview evidence alone.
+        if state["input"].get("physical_validation_required"):
+            probed = {
+                item.get("capability")
+                for item in state.get("runtime_capability_results", [])
+                if item.get("available") is True
+            }
+            evidenced = state.get("capability_analysis", {}).get(
+                "evidenced_capabilities"
+            )
+            if evidenced is None:
+                evidenced = state["input"].get("required_capabilities", [])
+            unproven = [name for name in evidenced if name not in probed]
+            if unproven:
+                missing_error(
+                    "physical_validation",
+                    "以下能力尚未在真机上验证通过：" + "、".join(unproven),
+                    code="PHYSICAL_VALIDATION_REQUIRED",
+                    owner="user",
+                    expected="runtime_capability_results with available=true",
+                )
+
         if not upload_metadata_ready:
             missing_error(
                 "upload_metadata",
@@ -2976,17 +2649,20 @@ class GeneratedApp(Activity):
                 state["status"] = "blocked"
                 state["checkpoint_id"] = "publish_check_done"
                 state["current_phase"] = "mpos-publish-app-web"
+                blocked_roles = {
+                    error["details"]["artifact_role"] for error in errors
+                }
                 state["next_phase"] = (
                     "mpos-package-app-web"
-                    if any(
-                        error["details"]["artifact_role"] == "mpk"
-                        for error in errors
-                    )
+                    if "mpk" in blocked_roles
                     else "mpos-test-app-web"
-                    if any(
-                        error["details"]["artifact_role"] == "publish_screenshot"
-                        for error in errors
-                    )
+                    if "publish_screenshot" in blocked_roles
+                    # Capability evidence comes from a device, so sending the
+                    # user back to the publish phase that just failed is a
+                    # dead end.
+                    else "mpos-deploy-app-web"
+                    if blocked_roles
+                    & {"runtime_capability", "physical_validation"}
                     else "mpos-publish-app-web"
                 )
                 state["final_artifact_gate_blocked"] = True
@@ -3001,7 +2677,13 @@ class GeneratedApp(Activity):
             state["final_artifact_gate_blocked"] = False
 
         if publish_result and publish_path:
-            gate_blockers = {"mpk", "publish_screenshot", "upload_metadata"}
+            gate_blockers = {
+                "mpk",
+                "publish_screenshot",
+                "upload_metadata",
+                "runtime_capability",
+                "physical_validation",
+            }
             blockers = [
                 blocker
                 for blocker in publish_result.get("blockers", [])
@@ -3127,6 +2809,45 @@ class GeneratedApp(Activity):
                 "checkpoint_id": "completed",
                 "message": request.message or "浏览器 WASM 验证通过",
             }
+        elif request.result == "partial":
+            # The preview ran but could not exercise a physical capability.
+            # This is an external limit: it must not set a retryable App error
+            # and must not route the session back to code generation.
+            unsupported = list(request.unsupported_capabilities) or list(
+                state.get("capability_analysis", {}).get(
+                    "web_preview_unsupported", []
+                )
+            )
+            errors = [
+                capability_error(
+                    "WEB_PREVIEW_UNSUPPORTED",
+                    f"Web 预览无法运行 {name}，该能力只能在真机上验证",
+                    stage="test",
+                    capability=name,
+                )
+                for name in unsupported
+            ] or [
+                capability_error(
+                    "WEB_PREVIEW_UNSUPPORTED",
+                    request.message or "Web 预览无法模拟所需的物理硬件",
+                    stage="test",
+                )
+            ]
+            for error in errors:
+                error["phase"] = "mpos-test-app-web"
+                error["logs"] = ["activity_log.jsonl"]
+                state["structured_errors"].append(error)
+                self._event(state, "structured_error", "mpos-test-app-web", error)
+            state["status"] = "blocked"
+            state["checkpoint_id"] = "web_preview_partial"
+            state["next_phase"] = "mpos-deploy-app-web"
+            state["input"]["physical_validation_required"] = True
+            payload = {
+                "result": "partial",
+                "checkpoint_id": state["checkpoint_id"],
+                "structured_errors": errors,
+                "repairable": False,
+            }
         else:
             code = (
                 "WEB_PREVIEW_TIMEOUT"
@@ -3168,202 +2889,6 @@ class GeneratedApp(Activity):
         self._event(state, "phase_complete", "mpos-test-app-web", payload)
         return self.get(session_id)
 
-    def record_device_result(
-        self, session_id: str, request: DeviceResultRequest
-    ) -> dict[str, Any]:
-        state = self._read(session_id)
-        if state.get("device_result_idempotency_key") == request.idempotency_key:
-            return state
-        state["device_result_idempotency_key"] = request.idempotency_key
-        success = request.result != "failed"
-        installed = request.result in {"install_success", "launch_success"}
-        launched = request.result == "launch_success"
-        allowed_error_codes = {
-            "DEVICE_NOT_CONNECTED",
-            "DEVICE_BOOTLOADER_NOT_FOUND",
-            "MPOS_NOT_INSTALLED_ON_DEVICE",
-            "DEVICE_PROBE_FAILED",
-            "SCRIPT_TIMEOUT",
-            "DEVICE_DEPLOY_FAILED",
-        }
-        error_code = (
-            request.error_code
-            if request.error_code in allowed_error_codes
-            else "DEVICE_DEPLOY_FAILED"
-        )
-        inferred_facts: dict[str, tuple[bool | None, bool | None]] = {
-            "DEVICE_NOT_CONNECTED": (False, None),
-            "DEVICE_BOOTLOADER_NOT_FOUND": (True, None),
-            "MPOS_NOT_INSTALLED_ON_DEVICE": (True, False),
-            "DEVICE_PROBE_FAILED": (True, None),
-            "SCRIPT_TIMEOUT": (None, None),
-            "DEVICE_DEPLOY_FAILED": (None, None),
-        }
-        inferred_hardware, inferred_mpos = inferred_facts[error_code]
-        hardware_available = (
-            request.hardware_available
-            if request.hardware_available is not None
-            else True
-            if success
-            else inferred_hardware
-        )
-        micropythonos_installed = (
-            request.micropythonos_installed
-            if request.micropythonos_installed is not None
-            else True
-            if success
-            else inferred_mpos
-        )
-        structured_errors = []
-        if not success:
-            structured_errors.append(
-                {
-                    "code": error_code,
-                    "message": request.message or "浏览器设备操作失败",
-                    "stage": "deploy",
-                    "phase": "mpos-deploy-app-web",
-                    "owner": "device",
-                    "retryable": True,
-                    "details": {
-                        "transport": request.transport,
-                        "board": request.board,
-                        "usb_vendor_id": request.usb_vendor_id,
-                        "usb_product_id": request.usb_product_id,
-                        "hardware_available": hardware_available,
-                        "micropythonos_installed": micropythonos_installed,
-                    },
-                    "logs": ["activity_log.jsonl"],
-                }
-            )
-        deploy_result = {
-            "schema_version": "mpos-deploy-app-web-v1",
-            "phase": "mpos-deploy-app-web",
-            "result": "success" if installed else "partial" if success else "failed",
-            "mode": "mpk-install" if installed else request.transport,
-            "hardware_available": hardware_available,
-            "board": request.board,
-            "usb_vendor_id": request.usb_vendor_id,
-            "usb_product_id": request.usb_product_id,
-            "serial_port": (
-                "browser-selected"
-                if request.transport == "webserial" and hardware_available is True
-                else None
-            ),
-            "micropythonos_installed": micropythonos_installed,
-            "app_installed": installed,
-            "app_launched": launched,
-            "client_attested": True,
-            "server_verified": False,
-            "installed_path": request.installed_path,
-            "permissions": [
-                {
-                    "type": "device_write",
-                    "decision": "allow_once",
-                }
-            ],
-            "commands": [
-                {
-                    "transport": request.transport,
-                    "summary": request.result,
-                }
-            ],
-            "logs": [request.log_excerpt[-4000:]] if request.log_excerpt else [],
-            "warnings": (
-                []
-                if launched
-                else ["设备已连接，但尚未记录 App 在真机成功启动。"]
-                if success
-                else ["设备操作失败；硬件与 MicroPythonOS 状态按实际探测结果记录。"]
-            ),
-            "structured_errors": structured_errors,
-            "handoff": {"next_phase": "mpos-publish-app-web"},
-        }
-        self._write_artifact_json(
-            state, "deploy_result", "mpos-deploy-app-web", deploy_result
-        )
-        if success:
-            state["hardware_verified"] = False
-            state["hardware_client_attested"] = launched
-            state["last_device_result"] = request.result
-            if installed:
-                self._checkpoint(
-                    state,
-                    "mpos-deploy-app-web",
-                    "device_deploy_done",
-                    "mpos-publish-app-web",
-                )
-            if launched:
-                publish_path = self._root(session_id) / "artifacts" / "publish_result.json"
-                if publish_path.is_file():
-                    publish_result = _json_load(publish_path)
-                    checks = [
-                        item
-                        for item in publish_result.get("checks", [])
-                        if item.get("name") != "physical_device_launch"
-                    ]
-                    checks.append(
-                        {
-                            "name": "physical_device_launch",
-                            "status": "warning",
-                            "details": {
-                                "client_attested": True,
-                                "server_verified": False,
-                            },
-                        }
-                    )
-                    publish_result["checks"] = checks
-                    publish_result["hardware_validation"] = {
-                        "status": "client_attested",
-                        "client_attested": True,
-                        "server_verified": False,
-                        "board": request.board,
-                        "transport": request.transport,
-                    }
-                    publish_result["warnings"] = list(
-                        dict.fromkeys(
-                            publish_result.get("warnings", [])
-                            + ["真机结果由浏览器客户端声明，尚未经过服务端独立验证。"]
-                        )
-                    )
-                    self._write_artifact_json(
-                        state,
-                        "publish_result",
-                        "mpos-publish-app-web",
-                        publish_result,
-                    )
-                state["status"] = "completed"
-                state["checkpoint_id"] = "completed"
-                state["current_phase"] = "mpos-publish-app-web"
-                state["next_phase"] = None
-                self._apply_final_artifact_gate(
-                    state, completion_requested=True
-                )
-        else:
-            state["hardware_verified"] = False
-            state["last_device_result"] = request.result
-            state["structured_errors"].extend(structured_errors)
-            state["last_error"] = structured_errors[0]
-            self._event(
-                state,
-                "structured_error",
-                "mpos-deploy-app-web",
-                structured_errors[0],
-            )
-        self._write_state(state)
-        self._event(
-            state,
-            "status_update",
-            "mpos-deploy-app-web",
-            {
-                "status": request.result,
-                "message": request.message,
-                "board": request.board,
-                "transport": request.transport,
-                "client_attested": True,
-                "server_verified": False,
-            },
-        )
-        return self.get(session_id)
 
     def upload_screenshot(
         self, session_id: str, request: ScreenshotUploadRequest

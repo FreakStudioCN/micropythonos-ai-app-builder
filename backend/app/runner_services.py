@@ -10,6 +10,21 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from .capabilities import HARDWARE_DOC_PATH, capability_index, capability_versions
+from .device_service import DeviceService, device_service
+
+__all__ = [
+    "DeviceService",
+    "MposSkillAdapter",
+    "ScriptDispatcher",
+    "SkillContract",
+    "SkillContractError",
+    "api_summary_version",
+    "capability_reference",
+    "device_service",
+    "mpos_skill_adapter",
+    "script_dispatcher",
+]
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SKILLS_ROOT = PROJECT_ROOT / "vendor" / "MicroPython_Skills"
@@ -332,31 +347,21 @@ class ScriptDispatcher:
         }
 
 
-class DeviceService:
-    """Read-only capability probe. Device writes remain unavailable by default."""
+def capability_reference() -> dict[str, Any]:
+    """Pinned capability snapshot plus the versions a session must record.
 
-    def __init__(self) -> None:
-        self._locks: dict[str, bool] = {}
-
-    def capabilities(self) -> dict[str, Any]:
-        mpremote = shutil.which("mpremote")
-        return {
-            "serial_port_scan": False,
-            "physical_device": bool(mpremote),
-            "mpremote": bool(mpremote),
-            "firmware_flash": False,
-            "install_url": "https://install.micropythonos.com/",
-        }
-
-    def scan(self) -> dict[str, Any]:
-        # pyserial is intentionally not a mandatory backend dependency. Returning
-        # a truthful empty result is safer than probing arbitrary host devices.
-        return {
-            "ports": [],
-            "supported": False,
-            "message": "当前服务未启用串口扫描；请先使用系统安装器安装 MicroPythonOS。",
-            "install_url": "https://install.micropythonos.com/",
-        }
+    Exposed here so the runner surface reports exactly which Skills/MPOS
+    commits and which capability schema a generation ran against.
+    """
+    index = capability_index()
+    return {
+        "board_capabilities_schema": index.schema_version,
+        "board_capabilities_generated_at": index.generated_at,
+        "capability_names": list(index.names),
+        "selection_policy": dict(index.selection_policy),
+        "hardware_doc_available": HARDWARE_DOC_PATH.is_file(),
+        **capability_versions(),
+    }
 
 
 def api_summary_version() -> dict[str, str]:
@@ -379,4 +384,3 @@ def api_summary_version() -> dict[str, str]:
 
 mpos_skill_adapter = MposSkillAdapter()
 script_dispatcher = ScriptDispatcher()
-device_service = DeviceService()

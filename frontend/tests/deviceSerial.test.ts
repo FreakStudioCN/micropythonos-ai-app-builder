@@ -14,6 +14,18 @@ import {
   stages,
 } from "../src/App";
 
+// The interpreter is named `python3` on macOS/Linux and `python` (or `py`) on
+// Windows, where hardcoding `python3` made this test fail on every run for a
+// reason that had nothing to do with the code under test. Resolve it once, and
+// fail loudly rather than skipping if the machine really has no Python.
+const PYTHON = (() => {
+  for (const candidate of ["python3", "python", "py"]) {
+    const probe = spawnSync(candidate, ["-c", "print(1)"], { encoding: "utf8" });
+    if (probe.status === 0) return candidate;
+  }
+  throw new Error("no working Python interpreter (tried python3, python, py)");
+})();
+
 describe("buildFastPathExtractorLine", () => {
   it("keeps the extractor inside the fast-path receiver try suite", () => {
     const extractorLine = buildFastPathExtractorLine(
@@ -28,7 +40,7 @@ describe("buildFastPathExtractorLine", () => {
       " pass",
     ].join("\n");
     const result = spawnSync(
-      "python3",
+      PYTHON,
       [
         "-c",
         "import sys; compile(sys.stdin.read(), '<fast-path-receiver>', 'exec')",
@@ -123,5 +135,13 @@ describe("onboarding stage mapping", () => {
     expect(stageIndexForError("publish")).toBe(6);
     expect(stageIndexForCheckpoint("package_done")).toBe(5);
     expect(stageIndexForCheckpoint("device_deploy_done")).toBe(6);
+  });
+
+  it("treats a partial web preview as a finished test stage", () => {
+    // An unknown checkpoint falls back to 0, which would drag the progress bar
+    // back to "analysis" after a preview that actually ran.
+    expect(stageIndexForCheckpoint("web_preview_partial")).toBe(
+      stageIndexForCheckpoint("web_preview_done"),
+    );
   });
 });
