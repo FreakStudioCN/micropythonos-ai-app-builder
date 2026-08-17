@@ -43,6 +43,50 @@ class HardwareCapabilityTests(unittest.TestCase):
         self.assertEqual(blocked["error"]["code"], "MPOS_CAPABILITY_API_MISSING")
         self.assertFalse(blocked["error"]["retryable"])
 
+    def test_capability_terms_do_not_match_inside_longer_words(self) -> None:
+        # Substring matching read "mic" out of "dynamic"/"ceramic", "imu" out of
+        # "simulator" and "lora" out of "flora". The last one blocked generation
+        # outright, because LoRa has no portable API.
+        for prompt in (
+            "a dynamic dashboard with live charts",
+            "ceramic tile inventory counter",
+            "a traffic light simulator",
+            "flora encyclopedia browser",
+            "retouch a photo in the browser",
+        ):
+            self.assertEqual(hardware_capability_registry.infer(prompt), [], prompt)
+
+    def test_non_portable_capability_needs_more_than_a_topic_word(self) -> None:
+        # "定位" is widget layout far more often than it is GNSS, and guessing
+        # wrong is not recoverable: the contract resolves to blocked with a
+        # non-retryable MPOS_CAPABILITY_API_MISSING.
+        self.assertEqual(
+            hardware_capability_registry.infer("CSS 定位练习：把方块定位到右下角"), []
+        )
+        self.assertEqual(hardware_capability_registry.infer("用 GPS 记录轨迹"), ["gps"])
+
+    def test_guessed_capability_does_not_demand_a_real_device(self) -> None:
+        # A photo album that displays a QR code image mentions the camera, but
+        # the user never asked to take a picture; requiring hardware validation
+        # for that is a blocker they cannot clear.
+        sources = hardware_capability_registry.classify("显示二维码图片的相册")
+        self.assertEqual(sources, {"camera": "inferred"})
+        guessed = hardware_capability_registry.resolve(["camera"], {}, sources)
+        self.assertFalse(guessed["physical_validation_required"])
+        # Naming the camera outright still demands the device.
+        asked = hardware_capability_registry.classify("用摄像头拍照并保存")
+        self.assertEqual(asked["camera"], "strong")
+        self.assertTrue(hardware_capability_registry.resolve(["camera"], {}, asked)["physical_validation_required"])
+        # And an explicitly declared capability is never treated as a guess.
+        self.assertTrue(hardware_capability_registry.resolve(["camera"], {}, {})["physical_validation_required"])
+
+    def test_wiring_language_counts_as_evidence_for_a_portable_capability(self) -> None:
+        sources = hardware_capability_registry.classify("接在开发板上的 RGB 灯带做呼吸灯")
+        self.assertEqual(sources, {"lights.rgb": "qualified"})
+        self.assertTrue(
+            hardware_capability_registry.resolve(["lights.rgb"], {}, sources)["physical_validation_required"]
+        )
+
     def test_prompt_inference_and_session_checkpoint_preserve_capabilities(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             previous_root = session_module.SESSION_ROOT
