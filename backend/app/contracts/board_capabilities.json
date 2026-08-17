@@ -1,0 +1,101 @@
+{
+  "schema_version": "mpos-board-capabilities-v1",
+  "source": {
+    "name": "MicroPythonOS portable hardware capability contract",
+    "bundled_fallback": true
+  },
+  "feature_contracts": {
+    "camera": {
+      "portable_api": true,
+      "availability_probe": "CameraManager.has_camera()",
+      "preferred_api": "CameraManager/CameraActivity",
+      "allow_direct_driver": false,
+      "web_preview": "unsupported_without_emulation",
+      "physical_validation_required": true
+    },
+    "input.pointer": {
+      "portable_api": true,
+      "availability_probe": "InputManager.has_pointer()",
+      "preferred_api": "LVGL pointer events",
+      "allow_direct_driver": false,
+      "physical_validation_required": true
+    },
+    "input.keypad": {
+      "portable_api": true,
+      "availability_probe": "InputManager.has_keypad()",
+      "preferred_api": "InputManager/LVGL key events",
+      "allow_direct_driver": false,
+      "physical_validation_required": true
+    },
+    "input.encoder": {
+      "portable_api": true,
+      "availability_probe": "InputManager.has_encoder()",
+      "preferred_api": "InputManager/LVGL encoder events",
+      "allow_direct_driver": false,
+      "physical_validation_required": true
+    },
+    "audio.output": {
+      "portable_api": true,
+      "availability_probe": "AudioManager.has_output()",
+      "preferred_api": "AudioManager",
+      "allow_direct_driver": false,
+      "web_preview": "partial",
+      "physical_validation_required": true
+    },
+    "audio.input": {
+      "portable_api": true,
+      "availability_probe": "AudioManager.has_input()",
+      "preferred_api": "AudioManager",
+      "allow_direct_driver": false,
+      "web_preview": "unsupported_without_permission_and_emulation",
+      "physical_validation_required": true
+    },
+    "sensor.imu": {
+      "portable_api": true,
+      "availability_probe": "SensorManager.has_sensor('imu')",
+      "preferred_api": "SensorManager",
+      "allow_direct_driver": false,
+      "physical_validation_required": true
+    },
+    "sensor.environmental": {
+      "portable_api": false,
+      "allow_direct_driver": false,
+      "physical_validation_required": true
+    },
+    "lights.rgb": {
+      "portable_api": true,
+      "availability_probe": "LightManager.has_rgb()",
+      "preferred_api": "LightManager",
+      "allow_direct_driver": false,
+      "physical_validation_required": true
+    },
+    "battery": {
+      "portable_api": true,
+      "availability_probe": "PowerManager.has_battery()",
+      "preferred_api": "PowerManager",
+      "allow_direct_driver": false,
+      "physical_validation_required": true
+    },
+    "storage.sdcard": {
+      "portable_api": true,
+      "contract_status": "partial",
+      "availability_probe": "StorageManager.has_sdcard()",
+      "preferred_api": "StorageManager",
+      "allow_direct_driver": false,
+      "physical_validation_required": true,
+      "limitations": ["Mount support depends on the device port"]
+    },
+    "network": {
+      "portable_api": true,
+      "availability_probe": "NetworkManager.is_available()",
+      "preferred_api": "NetworkManager",
+      "allow_direct_driver": false,
+      "web_preview": "partial",
+      "physical_validation_required": true
+    },
+    "gps": {"portable_api": false, "allow_direct_driver": false, "physical_validation_required": true},
+    "infrared": {"portable_api": false, "allow_direct_driver": false, "physical_validation_required": true},
+    "lora": {"portable_api": false, "allow_direct_driver": false, "physical_validation_required": true},
+    "direct_gpio_bus": {"portable_api": false, "allow_direct_driver": false, "physical_validation_required": true}
+  }
+}

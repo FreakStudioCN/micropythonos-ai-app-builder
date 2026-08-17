@@ -1073,6 +1073,23 @@ export default function App() {
       if (clientTimeoutKind) controller.abort();
     }, 1_000);
     try {
+      const selectedTargets = [
+        desktopTarget ? "desktop-preview" : "",
+        webTarget ? "web-preview" : "",
+        physicalTarget ? "physical-device" : "",
+        packageTarget ? "package-only" : "",
+      ].filter(Boolean);
+      const selectedAccessories = hardwareCapabilityOptions
+        .filter(([name]) => requiredCapabilities.includes(name))
+        .map(([, , accessory]) => accessory);
+      const selectedFallbacks = Object.fromEntries(
+        requiredCapabilities.map((name) => [name, "show unavailable state"]),
+      );
+      const physicalValidationRequired = requiredCapabilities.length > 0;
+      const normalizeList = (values: string[] | undefined) => JSON.stringify([...(values ?? [])].sort());
+      const normalizeRecord = (value: Record<string, string> | undefined) => JSON.stringify(
+        Object.entries(value ?? {}).sort(([left], [right]) => left.localeCompare(right)),
+      );
       const canReusePendingSession = Boolean(
         sessionState
         && ["blocked", "created"].includes(sessionState.status)
@@ -1081,17 +1098,16 @@ export default function App() {
         && sessionState.input.display_name === displayName
         && sessionState.input.publisher === publisher
         && sessionState.input.version === version
+        && normalizeList(sessionState.input.targets) === normalizeList(selectedTargets)
+        && normalizeList(sessionState.required_capabilities) === normalizeList(requiredCapabilities)
+        && normalizeList(sessionState.required_accessories) === normalizeList(selectedAccessories)
+        && normalizeRecord(sessionState.runtime_fallbacks) === normalizeRecord(selectedFallbacks)
+        && Boolean(sessionState.physical_validation_required) === physicalValidationRequired
       );
       let sessionId = repair || continuing || canReusePendingSession
         ? localStorage.getItem("mpos-session-id")
         : null;
       if (!sessionId) {
-        const selectedTargets = [
-          desktopTarget ? "desktop-preview" : "",
-          webTarget ? "web-preview" : "",
-          physicalTarget ? "physical-device" : "",
-          packageTarget ? "package-only" : "",
-        ].filter(Boolean);
         const createResponse = await apiFetch(`${apiUrl}/api/sessions`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -1107,11 +1123,9 @@ export default function App() {
             version,
             targets: selectedTargets,
             required_capabilities: requiredCapabilities,
-            required_accessories: hardwareCapabilityOptions
-              .filter(([name]) => requiredCapabilities.includes(name))
-              .map(([, , accessory]) => accessory),
-            runtime_fallbacks: Object.fromEntries(requiredCapabilities.map((name) => [name, "show unavailable state"])),
-            physical_validation_required: requiredCapabilities.length > 0,
+            required_accessories: selectedAccessories,
+            runtime_fallbacks: selectedFallbacks,
+            physical_validation_required: physicalValidationRequired,
             capabilities: {
               file_operation: true,
               script_run: true,
@@ -1162,11 +1176,9 @@ export default function App() {
             prompt,
             prompt_language: isZh ? "zh-CN" : "en-US",
             required_capabilities: requiredCapabilities,
-            required_accessories: hardwareCapabilityOptions
-              .filter(([name]) => requiredCapabilities.includes(name))
-              .map(([, , accessory]) => accessory),
-            runtime_fallbacks: Object.fromEntries(requiredCapabilities.map((name) => [name, "show unavailable state"])),
-            physical_validation_required: requiredCapabilities.length > 0,
+            required_accessories: selectedAccessories,
+            runtime_fallbacks: selectedFallbacks,
+            physical_validation_required: physicalValidationRequired,
           }),
           signal: controller.signal,
         });
