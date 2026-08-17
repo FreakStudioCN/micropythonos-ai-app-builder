@@ -88,7 +88,6 @@ class FeatureContract:
     contract_status: str = "full"
     availability_probe: str = ""
     preferred_api: str = ""
-    allow_direct_driver: bool = False
     web_preview: str = ""
     physical_validation_required: bool = False
     limitations: tuple[str, ...] = ()
@@ -185,7 +184,6 @@ class BoardCapabilityIndex:
                 contract_status=str(entry.get("contract_status") or "full"),
                 availability_probe=str(entry.get("availability_probe") or ""),
                 preferred_api=str(entry.get("preferred_api") or ""),
-                allow_direct_driver=bool(entry.get("allow_direct_driver")),
                 web_preview=str(entry.get("web_preview") or ""),
                 physical_validation_required=bool(
                     entry.get("physical_validation_required")
@@ -345,15 +343,6 @@ def capability_versions() -> dict[str, str]:
             index.source.get("snapshot_commit") or "unknown"
         ),
     }
-
-
-def hardware_capability_doc() -> str:
-    """Hardware capability guidance shipped with the pinned Skills submodule."""
-    if not HARDWARE_DOC_PATH.is_file():
-        raise CapabilityContractError(
-            f"MPOS_CAPABILITY_SNAPSHOT_MISSING: {HARDWARE_DOC_PATH} is absent"
-        )
-    return HARDWARE_DOC_PATH.read_text(encoding="utf-8")
 
 
 def capability_error(

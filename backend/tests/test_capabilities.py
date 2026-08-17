@@ -335,6 +335,21 @@ class DeviceProbeTests(unittest.TestCase):
         self.assertEqual(verdict["errors"], [])
         self.assertTrue(any("brand-new-board-2027" in w for w in verdict["warnings"]))
 
+    def test_listed_board_probing_fine_produces_no_drift_noise(self) -> None:
+        # boards[].os_registrations is a coarser, differently-named list than
+        # feature_contracts: no board registers "network" at all. Comparing
+        # membership across the two namespaces warned on every correct device.
+        verdict = device_service.evaluate_probe_results(
+            required_capabilities=["network", "input.keypad"],
+            results=[
+                CapabilityProbeResult(capability="network", available=True),
+                CapabilityProbeResult(capability="input.keypad", available=True),
+            ],
+            hardware_id="m5stack_core2",
+        )
+        self.assertEqual(verdict["errors"], [])
+        self.assertEqual(verdict["warnings"], [])
+
     def test_static_metadata_is_only_advisory(self) -> None:
         verdict = device_service.evaluate_probe_results(
             required_capabilities=[],

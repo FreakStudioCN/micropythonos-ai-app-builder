@@ -57,8 +57,8 @@ class DeviceService:
         """Judge runtime evidence from a connected device.
 
         Returns the evidence to persist, blocking structured errors for
-        capabilities the device lacks, and advisory notes where the static
-        snapshot disagrees with what the device actually reported.
+        capabilities the device lacks, and advisory notes for what could not be
+        measured or for a board the static snapshot has never heard of.
         """
         index = capability_index()
         required = list(required_capabilities)
@@ -121,17 +121,13 @@ class DeviceService:
                         details={"hardware_id": hardware_id},
                     )
                 )
-                continue
-            # Runtime probe succeeded. If the static table disagreed, the table
-            # is the thing that is out of date.
-            if board is not None:
-                # The snapshot key is os_registrations; "capabilities" never
-                # existed, so this drift warning could never fire.
-                listed = board.get("os_registrations")
-                if isinstance(listed, (list, tuple)) and name not in listed:
-                    warnings.append(
-                        f"设备实测支持 {name}，但静态板卡表未收录；以运行时探测为准"
-                    )
+            # A successful probe deliberately produces no per-capability drift
+            # note. boards[].os_registrations is a coarser, differently-named
+            # list than feature_contracts: "network" appears in no board at all,
+            # infrared/lora/gps are spelled "<name>.board_private", and keypad
+            # boards may register only "input". Comparing membership across the
+            # two namespaces warns on correct devices far more often than on
+            # stale ones, and the table is advisory by design anyway.
 
         if hardware_id and board is None:
             warnings.append(
