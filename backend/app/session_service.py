@@ -190,6 +190,22 @@ def _redact_value(value: Any) -> Any:
     return value
 
 
+def _normalize_hardware_policy_result(result: dict[str, Any]) -> dict[str, Any]:
+    """Treat a missing optional policy tool as a warning, not a violation."""
+    error = result.get("error")
+    if (
+        not result.get("ok")
+        and isinstance(error, dict)
+        and error.get("code") == "TOOLCHAIN_MISSING"
+    ):
+        normalized = dict(result)
+        normalized["ok"] = True
+        normalized["skipped"] = True
+        normalized["warning"] = normalized.pop("error")
+        return normalized
+    return result
+
+
 class SessionNotFound(KeyError):
     pass
 
@@ -1588,8 +1604,11 @@ class GeneratedApp(Activity):
                     syntax_result = script_dispatcher.run(
                         "python_syntax", app_root / "assets" / "main.py"
                     )
-                    hardware_policy = script_dispatcher.run_hardware_policy(
-                        self._root(session_id) / "project", generation["package_name"]
+                    hardware_policy = _normalize_hardware_policy_result(
+                        script_dispatcher.run_hardware_policy(
+                            self._root(session_id) / "project",
+                            generation["package_name"],
+                        )
                     )
                     if not hardware_policy.get("ok"):
                         raise GenerationError(
@@ -2212,8 +2231,10 @@ class GeneratedApp(Activity):
                 syntax_result = script_dispatcher.run(
                     "python_syntax", app_root / "assets" / "main.py"
                 )
-                hardware_policy = script_dispatcher.run_hardware_policy(
-                    self._root(session_id) / "project", generated.package_name
+                hardware_policy = _normalize_hardware_policy_result(
+                    script_dispatcher.run_hardware_policy(
+                        self._root(session_id) / "project", generated.package_name
+                    )
                 )
                 if not hardware_policy.get("ok"):
                     raise GenerationError(
@@ -2535,7 +2556,14 @@ class GeneratedApp(Activity):
                     state["current_phase"],
                     {"result": "cancelled", "checkpoint_id": "cancelled"},
                 )
-            except (GenerationError, OSError, ValueError) as exc:
+            # A generation job runs in a detached asyncio task.  Restricting this
+            # handler to the expected provider/filesystem errors lets an
+            # unexpected contract or serialization error escape the task.  The
+            # session then has no structured failure and the UI can only show
+            # the misleading generic "Generation failed" message.  Persist every
+            # ordinary exception here; CancelledError is handled separately just
+            # above and still retains its cancellation semantics.
+            except Exception as exc:
                 state = self._read(session_id)
                 message = str(exc)
                 code = getattr(
@@ -2560,6 +2588,7 @@ class GeneratedApp(Activity):
                     "details": {
                         "attempt": state["attempts"].get("mpos-gen-app-web", 1),
                         "resume_checkpoint_id": resume_checkpoint_id,
+                        "exception_type": type(exc).__name__,
                         **getattr(exc, "details", {}),
                     },
                     "logs": ["activity_log.jsonl"],
