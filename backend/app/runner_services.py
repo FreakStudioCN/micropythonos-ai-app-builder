@@ -37,6 +37,9 @@ STAGE_CHECKPOINTS = {
 BOARD_CAPABILITIES_PATH = (
     SKILLS_ROOT / "mpos-dev-web" / "reference" / "board_capabilities.json"
 )
+BUNDLED_BOARD_CAPABILITIES_PATH = (
+    Path(__file__).resolve().parent / "contracts" / "board_capabilities.json"
+)
 HARDWARE_CAPABILITIES_DOC = (
     SKILLS_ROOT / "mpos-dev" / "reference" / "docs-hardware-capabilities.md"
 )
@@ -52,21 +55,31 @@ class HardwareCapabilityRegistry:
     def __init__(self, path: Path = BOARD_CAPABILITIES_PATH) -> None:
         self.path = path
 
+    def _active_path(self) -> Path:
+        if self.path.is_file():
+            return self.path
+        # The skills repository is a separately-versioned submodule.  A fresh
+        # checkout can legitimately lack a newly-added reference file, so keep
+        # the runtime contract bundled with the backend as a safe fallback.
+        if self.path == BOARD_CAPABILITIES_PATH and BUNDLED_BOARD_CAPABILITIES_PATH.is_file():
+            return BUNDLED_BOARD_CAPABILITIES_PATH
+        raise SkillContractError("MPOS_CAPABILITY_CONTRACT_MISSING")
+
     def load(self) -> dict[str, Any]:
-        if not self.path.is_file():
-            raise SkillContractError("MPOS_CAPABILITY_CONTRACT_MISSING")
-        payload = json.loads(self.path.read_text(encoding="utf-8"))
+        path = self._active_path()
+        payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload.get("feature_contracts"), dict):
             raise SkillContractError("MPOS_CAPABILITY_CONTRACT_INVALID")
         return payload
 
     def describe(self) -> dict[str, Any]:
+        path = self._active_path()
         payload = self.load()
-        raw = self.path.read_bytes()
+        raw = path.read_bytes()
         return {
             "schema_version": payload.get("schema_version"),
             "sha256": hashlib.sha256(raw).hexdigest(),
-            "path": str(self.path.relative_to(PROJECT_ROOT)).replace("\\", "/"),
+            "path": str(path.relative_to(PROJECT_ROOT)).replace("\\", "/"),
             "documentation": str(HARDWARE_CAPABILITIES_DOC.relative_to(PROJECT_ROOT)).replace("\\", "/"),
         }
 
