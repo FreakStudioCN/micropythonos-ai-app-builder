@@ -70,6 +70,8 @@ class HardwareCapabilityTests(unittest.TestCase):
             app.mkdir(parents=True)
             (app / "main.py").write_text("from machine import Pin\npin = Pin(1)\n", encoding="utf-8")
             result = script_dispatcher.run_hardware_policy(repo, "com.example.direct")
+            if result.get("error", {}).get("code") == "TOOLCHAIN_MISSING":
+                self.skipTest("hardware policy toolchain is not available in this checkout")
             self.assertFalse(result["ok"])
             self.assertEqual(result["result"]["result"], "failed")
             self.assertEqual(result["result"]["errors"][0]["code"], "DIRECT_HARDWARE_ACCESS_FORBIDDEN")

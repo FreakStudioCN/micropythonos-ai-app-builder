@@ -219,13 +219,33 @@ class MposSkillAdapter:
         )
 
     def describe(self, stage: str) -> dict[str, str]:
-        contract = self.contract(stage)
+        try:
+            contract = self.contract(stage)
+        except SkillContractError as exc:
+            name = STAGE_SKILLS.get(stage)
+            if not name:
+                raise
+            # Skill metadata is diagnostic context, not a prerequisite for
+            # accepting a generation request. Production images can briefly
+            # start without the optional/private submodule (or with it still
+            # being mounted). Keep the pipeline usable and expose the missing
+            # contract as structured metadata instead of failing analysis.
+            return {
+                "stage": stage,
+                "skill": name,
+                "skill_version": "unavailable",
+                "skill_sha256": "",
+                "skill_path": f"vendor/MicroPython_Skills/{name}/SKILL.md",
+                "skill_contract_status": "unavailable",
+                "skill_contract_warning": str(exc),
+            }
         return {
             "stage": contract.stage,
             "skill": contract.name,
             "skill_version": contract.version,
             "skill_sha256": contract.sha256,
             "skill_path": contract.path,
+            "skill_contract_status": "available",
         }
 
 

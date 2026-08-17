@@ -799,6 +799,51 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             "ai_provider", self.service.get(state["session_id"])["input"]
         )
 
+    async def test_unexpected_camera_generation_error_is_persisted(self) -> None:
+        state = self.service.create(
+            SessionCreateRequest(
+                idempotency_key="camera-error-create-0001",
+                prompt="做一个识别红绿色的app",
+                package_name="com.example.camera_color",
+                targets=["web-preview", "package-only"],
+                required_capabilities=["camera"],
+                runtime_fallbacks={"camera": "show unavailable state"},
+                physical_validation_required=True,
+            )
+        )
+        for permission in state["permissions"]:
+            if permission["required"]:
+                state = self.service.decide_permission(
+                    permission["permission_id"],
+                    PermissionDecisionRequest(
+                        idempotency_key=f"allow-camera-{permission['permission_id']}",
+                        decision="allow_once",
+                    ),
+                )
+
+        generate_mock = AsyncMock(
+            side_effect=RuntimeError("camera contract regression")
+        )
+        with patch.object(session_module, "generate_app", new=generate_mock):
+            self.service.start_generation(
+                state["session_id"],
+                SessionActionRequest(
+                    idempotency_key="camera-error-run-0001"
+                ),
+            )
+            await self.service._tasks[state["session_id"]]
+
+        failed = self.service.get(state["session_id"])
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(
+            failed["last_error"]["details"]["exception_type"],
+            "RuntimeError",
+        )
+        self.assertIn(
+            "camera contract regression",
+            failed["last_error"]["message"],
+        )
+
     async def test_revision_and_action_cannot_override_automatic_routing(self) -> None:
         async def run_case(
             *,
@@ -978,7 +1023,11 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
             )
             await self.service._tasks[state["session_id"]]
         completed = self.service.get(state["session_id"])
-        self.assertEqual(completed["status"], "blocked")
+        self.assertEqual(
+            completed["status"],
+            "blocked",
+            msg=completed.get("last_error"),
+        )
         self.assertTrue(
             any(
                 error.get("details", {}).get("artifact_role")
