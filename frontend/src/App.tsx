@@ -321,17 +321,27 @@ const hardwareSponsors = [
 ] as const;
 const quickStartGuideUrl = "https://f1829ryac0m.feishu.cn/wiki/Kskcw9lZCiBHSgkswx7ctvGynPh";
 const hardwareCapabilityOptions = [
-  ["camera", "Camera / 摄像头", "camera module"],
-  ["audio.input", "Microphone / 麦克风", "microphone"],
-  ["audio.output", "Speaker / 音频输出", "speaker"],
-  ["sensor.imu", "IMU / 姿态传感器", "IMU sensor"],
-  ["lights.rgb", "RGB light / 彩灯", "RGB light"],
-  ["battery", "Battery / 电池", "battery"],
-  ["storage.sdcard", "SD card / 存储卡", "SD card"],
-  ["network", "Network / 网络", "network access"],
-  ["input.encoder", "Encoder / 旋钮", "rotary encoder"],
-  ["input.keypad", "Keypad / 键盘", "keypad"],
+  ["camera", "Camera / 摄像头"],
+  ["audio.input", "Microphone / 麦克风"],
+  ["audio.output", "Speaker / 音频输出"],
+  ["sensor.imu", "IMU / 姿态传感器"],
+  ["lights.rgb", "RGB light / 彩灯"],
+  ["battery", "Battery / 电池"],
+  ["storage.sdcard", "SD card / 存储卡"],
+  ["network", "Network / 网络"],
+  ["input.encoder", "Encoder / 旋钮"],
+  ["input.keypad", "Keypad / 键盘"],
 ] as const;
+
+export const buildHardwareRequirements = (requiredCapabilities: string[]) => ({
+  // A portable capability can be built into the board. Selecting it must not
+  // invent an external accessory or force a separate wiring confirmation.
+  requiredAccessories: [] as string[],
+  runtimeFallbacks: Object.fromEntries(
+    requiredCapabilities.map((name) => [name, "show unavailable state"]),
+  ),
+  physicalValidationRequired: requiredCapabilities.length > 0,
+});
 export default function App() {
   const [language, setLanguage] = useState<Language>(() => localStorage.getItem("mpos-language") === "en" ? "en" : "zh");
   const isZh = language === "zh";
@@ -1090,13 +1100,11 @@ export default function App() {
         physicalTarget ? "physical-device" : "",
         packageTarget ? "package-only" : "",
       ].filter(Boolean);
-      const selectedAccessories = hardwareCapabilityOptions
-        .filter(([name]) => requiredCapabilities.includes(name))
-        .map(([, , accessory]) => accessory);
-      const selectedFallbacks = Object.fromEntries(
-        requiredCapabilities.map((name) => [name, "show unavailable state"]),
-      );
-      const physicalValidationRequired = requiredCapabilities.length > 0;
+      const {
+        requiredAccessories: selectedAccessories,
+        runtimeFallbacks: selectedFallbacks,
+        physicalValidationRequired,
+      } = buildHardwareRequirements(requiredCapabilities);
       const normalizeList = (values: string[] | undefined) => JSON.stringify([...(values ?? [])].sort());
       const normalizeRecord = (value: Record<string, string> | undefined) => JSON.stringify(
         Object.entries(value ?? {}).sort(([left], [right]) => left.localeCompare(right)),
@@ -2263,7 +2271,9 @@ export default function App() {
               <ol className="timeline">
                 {stages.map(([english, chinese], index) => {
                   const stageStatus = ["failed", "timeout", "cancelled"].includes(status) && index === currentStage ? "error" : index < currentStage || (status === "completed" && index === currentStage) ? "done" : index === currentStage ? "active" : "waiting";
-                  return <li className={stageStatus} key={english}><i>{stageStatus === "done" ? "✓" : stageStatus === "error" ? "!" : index + 1}</i><div><strong>{isZh ? chinese : english}</strong>{isZh && <small>{english}</small>}</div><span>{stageStatus === "done" ? tr("成功", "Done") : stageStatus === "active" ? tr("进行中", "Running") : stageStatus === "error" ? tr("失败", "Failed") : tr("等待", "Waiting")}</span></li>;
+                  const waitingForPermission = status === "blocked" && index === currentStage
+                    && Boolean(sessionState?.permissions.some((item) => item.required && item.decision === "pending"));
+                  return <li className={stageStatus} key={english}><i>{stageStatus === "done" ? "✓" : stageStatus === "error" ? "!" : index + 1}</i><div><strong>{isZh ? chinese : english}</strong>{isZh && <small>{english}</small>}</div><span>{waitingForPermission ? tr("等待授权", "Permission required") : stageStatus === "done" ? tr("成功", "Done") : stageStatus === "active" ? tr("进行中", "Running") : stageStatus === "error" ? tr("失败", "Failed") : tr("等待", "Waiting")}</span></li>;
                 })}
               </ol>
             )}
@@ -2285,7 +2295,9 @@ export default function App() {
               <div>
                 {status === "blocked" && sessionState?.permissions.some((item) => item.required && item.decision === "pending") && <button onClick={() => setPermissionOpen(true)}>{tr("处理权限", "Review permissions")}</button>}
                 {status === "timeout" && ["created", "running"].includes(sessionState?.status || "") && <button onClick={() => void continueWaiting()}>{tr("继续等待后台结果", "Keep waiting for backend")}</button>}
-                {(status !== "timeout" || !["created", "running"].includes(sessionState?.status || "")) && <button onClick={retry}>{tr("从失败检查点重试", "Retry from checkpoint")}</button>}
+                {!(status === "blocked" && sessionState?.permissions.some((item) => item.required && item.decision === "pending"))
+                  && (status !== "timeout" || !["created", "running"].includes(sessionState?.status || ""))
+                  && <button onClick={retry}>{tr("从失败检查点重试", "Retry from checkpoint")}</button>}
               </div>
             </div>}
             {sessionState?.warnings.length ? <div className="warning-box"><strong>{tr("警告（不等于失败）", "Warnings (not failures)")}</strong>{sessionState.warnings.map((warning) => <span key={warning}>⚠ {warning}</span>)}</div> : null}
