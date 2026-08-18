@@ -1,5 +1,13 @@
 # MicroPythonOS AI App Builder 跨设备能力接入说明
 
+> **状态说明：本文是这套能力接入方案的设计记录，不是待办清单。**
+> 其中的字段契约与错误码已经落在 `main` 上——`required_capabilities`、`required_accessories`、
+> `runtime_fallbacks`、`physical_validation_required` 见 `backend/app/models.py` 及 session/checkpoint 流程；
+> `WEB_PREVIEW_UNSUPPORTED` / `HARDWARE_CAPABILITY_UNAVAILABLE` / `MPOS_CAPABILITY_API_MISSING` /
+> `DIRECT_HARDWARE_ACCESS_FORBIDDEN` 与 `mpos-board-capabilities-v1` 均已实现，`target_board` 未被引入。
+> 下文第 3、7、9 节保留祈使语气的原文作为设计依据，读到「需要增加」时按「设计要求」理解，
+> 具体实现状态以代码为准。
+
 ## 1. 核心决策
 
 App 生成流程不得增加板卡选择器。MicroPythonOS 已负责检测板卡，并通过系统 Manager 暴露硬件能力。浏览器用户只需要描述希望实现的功能；生成的 App 将需求表达为 `camera`、`audio.output`、`sensor.imu`、`input.keypad` 等抽象能力，再由运行中的 MicroPythonOS 进行探测。
