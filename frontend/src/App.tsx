@@ -297,7 +297,7 @@ const verifiedBoards = [
   ["Makerfabs", "MaTouch ESP32-S3 SPI IPS 2.8\" + OV3660", "ESP32-S3", "2.8\" 触摸屏", "视觉项目"],
   ["Hardkernel", "ODROID-GO", "ESP32", "游戏屏幕", "掌机应用"],
   ["SQUiXL", "SQUiXL", "ESP32-S3", "触摸屏", "桌面信息"],
-  ["DFRobot", "UniHiker K10", "ESP32-S3", "彩色屏", "STEM 课堂"],
+  ["DFRobot", "UNIHIKER K10", "ESP32-S3", "彩色屏", "STEM 课堂"],
   ["unPhone", "unPhone 9", "ESP32-S3", "触摸屏", "移动创作"],
   ["Waveshare", "ESP32-S3-Touch-LCD-2", "ESP32-S3", "2\" 触摸屏", "新手与展示"],
 ] as const;
