@@ -233,11 +233,23 @@ jobs:
           STACK_DIR: ${{ vars.MPOS_STACK_DIR || '/srv/upypi' }}
         run: |
           set -euo pipefail
-          bundle="${IMAGE_BUNDLE_DIR}/mpos-production-image.tar.gz"
+          # download-artifact can preserve an extra artifact-name directory on
+          # self-hosted runners. Locate the payload below the controlled temp
+          # root instead of assuming one exact extraction depth.
+          mapfile -t bundles < <(
+            find "${IMAGE_BUNDLE_DIR}" -type f \
+              -name 'mpos-production-image.tar.gz' -print
+          )
+          if [ "${#bundles[@]}" -ne 1 ]; then
+            echo "expected exactly one production image bundle, found ${#bundles[@]}" >&2
+            find "${IMAGE_BUNDLE_DIR}" -maxdepth 3 -type f -printf '%P\n' >&2
+            exit 1
+          fi
+          bundle="${bundles[0]}"
           checksum="${bundle}.sha256"
           test -s "${bundle}"
           test -s "${checksum}"
-          cd "${IMAGE_BUNDLE_DIR}"
+          cd "$(dirname "${bundle}")"
           sha256sum -c "$(basename "${checksum}")"
           timeout 420 sh -c 'gzip -dc "$1" | docker load' sh "${bundle}"
 
