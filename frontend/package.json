@@ -11,12 +11,14 @@
   },
   "dependencies": {
     "@vitejs/plugin-react": "^4.3.4",
+    "qrcode": "^1.5.4",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "typescript": "~5.7.2",
     "vite": "^6.0.5"
   },
   "devDependencies": {
+    "@types/qrcode": "^1.5.6",
     "@types/react": "^18.3.18",
     "@types/react-dom": "^18.3.5",
     "vitest": "^3.2.4"

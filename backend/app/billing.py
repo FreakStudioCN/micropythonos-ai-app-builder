@@ -21,6 +21,7 @@ from sqlalchemy import (
     update,
 )
 from sqlalchemy.engine import Connection, Engine
+from sqlalchemy.exc import IntegrityError
 
 from .database import create_database_engine, database_engine
 
@@ -140,6 +141,49 @@ class BillingService:
             if not unlimited and account["credits"] < GENERATION_COST:
                 raise InsufficientCredits(account["credits"], GENERATION_COST)
             return self._public(account, unlimited=unlimited)
+
+    def add_credits(
+        self,
+        user_id: str,
+        amount: int,
+        idempotency_key: str,
+        *,
+        entry_type: str = "payment",
+        unlimited: bool = False,
+    ) -> dict[str, Any]:
+        """Add purchased credits exactly once for a user and payment."""
+        if amount <= 0:
+            raise ValueError("amount must be positive")
+        with self._lock, self.engine.begin() as connection:
+            account = self._load_or_create(connection, user_id, for_update=True)
+            updated_at = _now()
+            try:
+                with connection.begin_nested():
+                    self._append_ledger(
+                        connection,
+                        user_id=user_id,
+                        idempotency_key=idempotency_key,
+                        entry_type=entry_type,
+                        amount=amount,
+                        created_at=updated_at,
+                    )
+            except IntegrityError:
+                current = connection.execute(
+                    select(billing_accounts).where(billing_accounts.c.user_id == user_id)
+                ).mappings().one()
+                return self._public(current, unlimited=unlimited)
+            connection.execute(
+                update(billing_accounts)
+                .where(billing_accounts.c.user_id == user_id)
+                .values(
+                    credits=billing_accounts.c.credits + amount,
+                    updated_at=updated_at,
+                )
+            )
+            current = connection.execute(
+                select(billing_accounts).where(billing_accounts.c.user_id == user_id)
+            ).mappings().one()
+            return self._public(current, unlimited=unlimited)
 
     def _load_or_create(
         self,

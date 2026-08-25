@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import QRCode from "qrcode";
 import { apiErrorMessage, apiFetch } from "./apiFetch";
 import {
   API_BASE_URL,
@@ -119,6 +120,18 @@ interface BillingAccount {
   generation_cost: number;
   initial_credits: number;
 }
+type PaymentProvider = "paypal" | "wechat" | "alipay";
+interface PaymentOrder {
+  id: string;
+  provider: PaymentProvider;
+  plan_id: string;
+  amount_minor: number;
+  currency: string;
+  credits: number;
+  status: "creating" | "pending" | "paid" | "failed";
+  checkout_url?: string;
+  paid_at?: string;
+}
 interface RequirementMessage {
   role: "user" | "assistant";
   content: string;
@@ -165,8 +178,8 @@ const subscriptionPlans = [
     credits: 100,
     generations: 10,
     featured: false,
-    benefitsZh: ["每月 100 点", "最多生成 10 次", "Web 预览与 MPK 打包"],
-    benefitsEn: ["100 credits/month", "Up to 10 generations", "Web preview and MPK packaging"],
+    benefitsZh: ["100 点一次到账", "最多生成 10 次", "Web 预览与 MPK 打包"],
+    benefitsEn: ["100 credits added once", "Up to 10 generations", "Web preview and MPK packaging"],
   },
   {
     id: "plus",
@@ -175,8 +188,8 @@ const subscriptionPlans = [
     credits: 300,
     generations: 30,
     featured: true,
-    benefitsZh: ["每月 300 点", "最多生成 30 次", "优先生成与连续修改", "ESP32 真机部署"],
-    benefitsEn: ["300 credits/month", "Up to 30 generations", "Priority generation and revisions", "ESP32 deployment"],
+    benefitsZh: ["300 点一次到账", "最多生成 30 次", "优先生成与连续修改", "ESP32 真机部署"],
+    benefitsEn: ["300 credits added once", "Up to 30 generations", "Priority generation and revisions", "ESP32 deployment"],
   },
   {
     id: "pro",
@@ -185,8 +198,8 @@ const subscriptionPlans = [
     credits: 1000,
     generations: 100,
     featured: false,
-    benefitsZh: ["每月 1000 点", "最多生成 100 次", "最高优先级", "真机部署与发布检查"],
-    benefitsEn: ["1,000 credits/month", "Up to 100 generations", "Highest priority", "Device deployment and publish checks"],
+    benefitsZh: ["1000 点一次到账", "最多生成 100 次", "最高优先级", "真机部署与发布检查"],
+    benefitsEn: ["1,000 credits added once", "Up to 100 generations", "Highest priority", "Device deployment and publish checks"],
   },
 ] as const;
 type SubscriptionPlan = (typeof subscriptionPlans)[number];
@@ -412,6 +425,13 @@ export default function App() {
   const [billingAccount, setBillingAccount] = useState<BillingAccount | null>(null);
   const [subscriptionOpen, setSubscriptionOpen] = useState(false);
   const [selectedPlan, setSelectedPlan] = useState<SubscriptionPlan | null>(null);
+  const [paymentProviders, setPaymentProviders] = useState<Record<PaymentProvider, boolean>>({ paypal: false, wechat: false, alipay: false });
+  const [paymentOrder, setPaymentOrder] = useState<PaymentOrder | null>(null);
+  const [paymentQr, setPaymentQr] = useState("");
+  const [manualPaymentProvider, setManualPaymentProvider] = useState<"wechat" | "alipay" | null>(null);
+  const [paymentBusy, setPaymentBusy] = useState<PaymentProvider | "">("");
+  const [paymentError, setPaymentError] = useState("");
+  const paymentReturnHandled = useRef(false);
   const [authStatus, setAuthStatus] = useState<AuthStatus>("loading");
   const [authMode, setAuthMode] = useState<"login" | "register">("login");
   const [authUsername, setAuthUsername] = useState("");
@@ -610,6 +630,51 @@ export default function App() {
     setBillingAccount(account);
     return account;
   };
+  const refreshPaymentOrder = async (orderId: string) => {
+    const response = await apiFetch(`${apiUrl}/api/payments/orders/${orderId}`);
+    if (!response.ok) throw new Error(await apiErrorMessage(response, tr("无法查询支付订单", "Unable to check payment order")));
+    const order = await response.json() as PaymentOrder;
+    setPaymentOrder(order);
+    if (order.status === "paid") {
+      await refreshBilling();
+      setToast(tr(`${order.credits} 点已到账`, `${order.credits} credits added`));
+    }
+    return order;
+  };
+  const startPayment = async (provider: PaymentProvider) => {
+    if (!selectedPlan || paymentBusy) return;
+    if ((provider === "wechat" || provider === "alipay") && !paymentProviders[provider]) {
+      setPaymentOrder(null);
+      setPaymentError("");
+      setManualPaymentProvider(provider);
+      setPaymentQr(`/payment/${provider === "wechat" ? "wechat-pay.png" : "alipay-pay.png"}`);
+      return;
+    }
+    setPaymentBusy(provider);
+    setPaymentError("");
+    setPaymentQr("");
+    setManualPaymentProvider(null);
+    try {
+      const response = await apiFetch(`${apiUrl}/api/payments/orders`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ provider, plan_id: selectedPlan.id }),
+      });
+      if (!response.ok) throw new Error(await apiErrorMessage(response, tr("创建支付订单失败", "Unable to create payment order")));
+      const order = await response.json() as PaymentOrder;
+      setPaymentOrder(order);
+      if (!order.checkout_url) throw new Error(tr("支付平台未返回付款地址", "The provider did not return a checkout URL"));
+      if (provider === "wechat") {
+        setPaymentQr(await QRCode.toDataURL(order.checkout_url, { width: 320, margin: 2 }));
+      } else {
+        window.location.assign(order.checkout_url);
+      }
+    } catch (error) {
+      setPaymentError(error instanceof Error ? error.message : tr("创建支付订单失败", "Unable to create payment order"));
+    } finally {
+      setPaymentBusy("");
+    }
+  };
   const refreshCapabilities = async () => {
     const response = await apiFetch(`${apiUrl}/api/capabilities`);
     const payload = response.ok ? await response.json() : null;
@@ -640,6 +705,53 @@ export default function App() {
     };
     void initialize();
   }, []);
+  useEffect(() => {
+    if (!subscriptionOpen || authStatus !== "signed_in") return;
+    void apiFetch(`${apiUrl}/api/payments/catalog`)
+      .then(async (response) => {
+        if (!response.ok) throw new Error("catalog unavailable");
+        const catalog = await response.json() as { providers: Record<PaymentProvider, boolean> };
+        setPaymentProviders(catalog.providers);
+      })
+      .catch(() => setPaymentError(tr("支付方式暂时不可用", "Payment methods are temporarily unavailable")));
+  }, [subscriptionOpen, authStatus]);
+  useEffect(() => {
+    if (authStatus !== "signed_in" || paymentReturnHandled.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const provider = params.get("payment");
+    const orderId = params.get("order_id");
+    if (!orderId || !["paypal", "alipay", "cancelled"].includes(provider || "")) return;
+    paymentReturnHandled.current = true;
+    setSubscriptionOpen(true);
+    setPaymentError("");
+    const finishReturn = async () => {
+      try {
+        let order: PaymentOrder;
+        if (provider === "paypal") {
+          const response = await apiFetch(`${apiUrl}/api/payments/orders/${orderId}/paypal/capture`, { method: "POST" });
+          if (!response.ok) throw new Error(await apiErrorMessage(response, tr("PayPal 收款确认失败", "Unable to confirm PayPal payment")));
+          order = await response.json() as PaymentOrder;
+          setPaymentOrder(order);
+          await refreshBilling();
+          setToast(tr(`${order.credits} 点已到账`, `${order.credits} credits added`));
+        } else {
+          order = await refreshPaymentOrder(orderId);
+          if (provider === "cancelled") setPaymentError(tr("付款已取消，你可以重新选择支付方式", "Payment was cancelled. You can choose another method."));
+        }
+        setSelectedPlan(subscriptionPlans.find((plan) => plan.id === order.plan_id) || null);
+      } catch (error) {
+        setPaymentError(error instanceof Error ? error.message : tr("支付确认失败", "Unable to confirm payment"));
+      } finally {
+        window.history.replaceState({}, "", `${window.location.pathname}${window.location.hash}`);
+      }
+    };
+    void finishReturn();
+  }, [authStatus]);
+  useEffect(() => {
+    if (!subscriptionOpen || paymentOrder?.status !== "pending") return;
+    const timer = window.setInterval(() => void refreshPaymentOrder(paymentOrder.id).catch(() => undefined), 2000);
+    return () => window.clearInterval(timer);
+  }, [subscriptionOpen, paymentOrder?.id, paymentOrder?.status]);
 
   const submitAuth = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -2093,7 +2205,7 @@ export default function App() {
           <button className="subscription-button" onClick={() => {
             setSelectedPlan(null);
             setSubscriptionOpen(true);
-          }}>{tr("订阅", "Subscribe")}</button>
+          }}>{tr("购买点数", "Buy credits")}</button>
           <button className="language-button" onClick={() => setLanguage(isZh ? "en" : "zh")} aria-label={tr("切换为英文", "Switch to Chinese")}>
             {isZh ? "English" : "中文"}
           </button>
@@ -2565,85 +2677,103 @@ export default function App() {
         >×</button>
         {!selectedPlan
           ? <>
-              <h2>{tr("选择订阅套餐", "Choose a subscription")}</h2>
+              <h2>{tr("选择点数套餐", "Choose a credit pack")}</h2>
               <p>{tr(
-                "每次成功生成消耗 10 点。选择套餐后，扫码进群联系群主人工开通。",
-                "Each successful generation costs 10 credits. Choose a plan, then join the group and contact the owner for manual activation.",
+                "每次成功生成消耗 10 点。当前支持微信支付和支付宝扫码付款，PayPal 暂未支持。",
+                "Each successful generation costs 10 credits. WeChat Pay and Alipay QR payments are available; PayPal is not supported yet.",
               )}</p>
               <div className="plan-grid">
                 {subscriptionPlans.map((plan) => (
                   <article className={`plan-card ${plan.featured ? "featured" : ""}`} key={plan.id}>
                     {plan.featured && <span className="popular-badge">{tr("推荐", "Popular")}</span>}
                     <h3>{plan.name}</h3>
-                    <div className="plan-price"><strong>¥{plan.price}</strong><span>{tr("/ 月", "/ month")}</span></div>
+                    <div className="plan-price"><strong>¥{plan.price}</strong><span>{tr("/ 次", " one-time")}</span></div>
                     <div className="plan-credits">{plan.credits} {tr("点", "credits")} · {plan.generations} {tr("次生成", "generations")}</div>
                     <ul>{(isZh ? plan.benefitsZh : plan.benefitsEn).map((benefit) => <li key={benefit}>✓ {benefit}</li>)}</ul>
-                    <button className={plan.featured ? "main-button" : "secondary-button"} onClick={() => setSelectedPlan(plan)}>
+                    <button className={plan.featured ? "main-button" : "secondary-button"} onClick={() => {
+                      setSelectedPlan(plan);
+                      setPaymentOrder(null);
+                      setPaymentQr("");
+                      setManualPaymentProvider(null);
+                      setPaymentError("");
+                    }}>
                       {tr(`选择 ${plan.name}`, `Choose ${plan.name}`)}
                     </button>
                   </article>
                 ))}
               </div>
               <small>{tr(
-                "当前采用人工收款和人工开通。用户付款后不会自动到账，必须由群主确认。",
-                "Payments and activation are handled manually. Credits are added only after the group owner confirms payment.",
+                "扫码付款后请保留支付凭证，管理员核对后增加点数。",
+                "Keep the receipt after scanning to pay. Credits are added after administrator verification.",
               )}</small>
             </>
           : <div className="manual-checkout">
               <div className="checkout-heading">
                 <button className="secondary-button" onClick={() => setSelectedPlan(null)}>← {tr("返回套餐", "Back to plans")}</button>
-                <div><span>{tr("当前选择", "Selected plan")}</span><strong>{selectedPlan.name} · ¥{selectedPlan.price}{tr("/月", "/month")}</strong></div>
+                <div><span>{tr("当前选择", "Selected plan")}</span><strong>{selectedPlan.name} · ¥{selectedPlan.price}</strong></div>
               </div>
-              <div className="checkout-layout">
-                <div className="group-qr">
-                  <img src="/subscription/blockless-ai-group.webp" alt={tr("Blockless AI 硬件交流群二维码", "Blockless AI hardware group QR code")} />
-                  <strong>{tr("微信扫码加入 Blockless AI 硬件交流群", "Scan with WeChat to join the Blockless AI hardware group")}</strong>
-                  <small>{tr("群二维码会定期更新；如已失效，请联系工作人员获取新二维码。", "The group QR code is updated periodically. Contact the team if it has expired.")}</small>
-                </div>
-                <div className="checkout-instructions">
-                  <h3>{tr("人工开通步骤", "Manual activation steps")}</h3>
-                  <ol>
-                    <li>{tr("使用微信扫描左侧二维码并加入群聊。", "Scan the QR code with WeChat and join the group.")}</li>
-                    <li>{tr(`向群主说明购买 ${selectedPlan.name} 套餐，并支付 ¥${selectedPlan.price}。`, `Tell the group owner you want the ${selectedPlan.name} plan and pay ¥${selectedPlan.price}.`)}</li>
-                    <li>{tr("把你的用户名和账户标识连同付款信息发送给群主。", "Send your username and account ID together with the payment information.")}</li>
-                    <li>{tr("群主确认收款后人工开通服务并增加点数。", "The group owner confirms payment, activates the plan, and adds credits.")}</li>
-                  </ol>
-                  <label>{tr("你的用户名", "Your username")}</label>
-                  <div className="account-id-row single"><code>{billingAccount?.username || "—"}</code></div>
-                  <label>{tr("你的账户标识", "Your account ID")}</label>
-                  <div className="account-id-row">
-                    <code>{billingAccount?.user_id || "—"}</code>
-                    <button
-                      className="secondary-button"
-                      onClick={() => {
-                        const username = billingAccount?.username || "";
-                        const accountId = billingAccount?.user_id || "";
-                        const paymentMessage = tr(
-                          `订阅套餐：${selectedPlan.name}\n支付金额：¥${selectedPlan.price}\n用户名：${username}\n账户标识：${accountId}`,
-                          `Plan: ${selectedPlan.name}\nAmount: ¥${selectedPlan.price}\nUsername: ${username}\nAccount ID: ${accountId}`,
-                        );
-                        void navigator.clipboard.writeText(paymentMessage).then(
-                          () => setToast(tr("付款信息已复制，请发送给群主", "Payment information copied. Send it to the group owner.")),
-                          () => setToast(tr("复制失败，请手动发送用户名和账户标识", "Copy failed. Send the username and account ID manually.")),
-                        );
-                      }}
-                    >{tr("复制付款信息", "Copy payment info")}</button>
+              <section className="online-checkout">
+                {paymentOrder?.status === "paid" ? (
+                  <div className="payment-success">
+                    <strong>✓ {tr("支付成功，点数已到账", "Payment complete — credits added")}</strong>
+                    <span>{paymentOrder.credits} {tr("点", "credits")}</span>
                   </div>
-                  <div className="payment-warning">
-                    <strong>{tr("请注意", "Important")}</strong>
-                    <span>{tr(
-                      "付款不会自动增加点数。必须由群主确认收款后人工开通；退款、付款异常或二维码失效请在群内联系群主处理。",
-                      "Payment does not add credits automatically. Activation happens only after owner confirmation. Contact the owner for refunds, payment issues, or an expired QR code.",
-                    )}</span>
-                  </div>
-                </div>
-              </div>
-              <div className="checkout-actions">
-                <button className="main-button" onClick={() => {
-                  setSubscriptionOpen(false);
-                  setSelectedPlan(null);
-                }}>{tr("我已了解", "Got it")}</button>
-              </div>
+                ) : (
+                  <>
+                    <h3>{tr("选择支付方式", "Choose a payment method")}</h3>
+                    <div className="payment-methods">
+                      {([
+                        ["alipay", tr("支付宝", "Alipay")],
+                        ["wechat", tr("微信支付", "WeChat Pay")],
+                        ["paypal", "PayPal"],
+                      ] as const).map(([provider, label]) => (
+                        <button
+                          key={provider}
+                          className={`payment-method payment-${provider}`}
+                          disabled={(provider === "paypal" && !paymentProviders.paypal) || Boolean(paymentBusy)}
+                          onClick={() => void startPayment(provider)}
+                        >
+                          <strong>{label}</strong>
+                          <small>{paymentProviders[provider]
+                            ? (paymentBusy === provider ? tr("正在创建订单…", "Creating order…") : tr("在线支付 · 自动到账", "Online payment · automatic credit"))
+                            : provider === "paypal"
+                              ? tr("暂未支持", "Not supported yet")
+                              : tr("扫码支付 · 人工核对", "Scan to pay · manual review")}</small>
+                        </button>
+                      ))}
+                    </div>
+                    {paymentQr && (paymentOrder?.provider === "wechat" || manualPaymentProvider) && (
+                      <div className={`payment-qr ${manualPaymentProvider ? "manual-payment-qr" : ""}`}>
+                        <img src={paymentQr} alt={manualPaymentProvider === "alipay" ? tr("支付宝收款码", "Alipay payment QR code") : tr("微信支付二维码", "WeChat Pay QR code")} />
+                        <strong>{manualPaymentProvider
+                          ? tr(`请支付 ¥${selectedPlan.price}，备注用户名：${billingAccount?.username || ""}`, `Pay ¥${selectedPlan.price} and include username: ${billingAccount?.username || ""}`)
+                          : tr("请使用微信扫码支付", "Scan with WeChat to pay")}</strong>
+                        <small>{manualPaymentProvider
+                          ? tr("个人收款码无法自动回调。付款后请把支付截图、用户名和所选套餐发给管理员，确认后人工加点。", "Static personal QR codes cannot confirm automatically. Send the receipt, username, and selected plan to the administrator for manual crediting.")
+                          : tr("支付完成后此页面会自动更新，请勿重复付款。", "This page updates automatically after payment. Do not pay twice.")}</small>
+                        {manualPaymentProvider && <button className="secondary-button" onClick={() => {
+                          const note = `${billingAccount?.username || ""} · ${selectedPlan.name} · ¥${selectedPlan.price}`;
+                          void navigator.clipboard.writeText(note).then(
+                            () => setToast(tr("付款备注已复制", "Payment note copied")),
+                            () => setToast(tr("复制失败，请手动记录用户名", "Copy failed. Record the username manually.")),
+                          );
+                        }}>{tr("复制付款备注", "Copy payment note")}</button>}
+                      </div>
+                    )}
+                    {paymentOrder?.status === "pending" && !paymentQr && (
+                      <div className="payment-pending">{tr("正在等待支付平台确认…", "Waiting for payment confirmation…")}</div>
+                    )}
+                    {paymentError && <div className="auth-error payment-error">{paymentError}</div>}
+                    <p className="payment-security">{manualPaymentProvider ? tr(
+                      "当前使用静态个人收款码，付款不会自动增加点数，需管理员人工确认。",
+                      "This is a static personal payment code. Credits require manual administrator confirmation.",
+                    ) : tr(
+                      "在线订单金额由服务器校验；支付平台确认成功后，点数会自动且仅到账一次。",
+                      "The server validates online orders. Credits are added automatically and exactly once after provider confirmation.",
+                    )}</p>
+                  </>
+                )}
+              </section>
             </div>}
       </div></div>}
 
