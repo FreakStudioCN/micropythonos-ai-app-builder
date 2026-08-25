@@ -5,6 +5,7 @@ import os
 import re
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qsl, urlparse
 
 from dotenv import load_dotenv
 
@@ -39,6 +40,7 @@ from .models import (
     DeviceResultRequest,
     PermissionBatchDecisionRequest,
     PermissionDecisionRequest,
+    PaymentOrderRequest,
     PreviewResultRequest,
     PublicGenerateRequest,
     PublicGenerateResponse,
@@ -50,6 +52,12 @@ from .models import (
     SessionActionRequest,
     SessionCreateRequest,
     SystemStatusResponse,
+)
+from .payments import (
+    PaymentError,
+    PaymentNotConfigured,
+    PaymentNotFound,
+    payment_service,
 )
 from .runtime_flags import _enabled, _maintenance_blocks, _system_status_payload
 from .session_service import SessionNotFound, session_service
@@ -109,6 +117,15 @@ def _cookie_is_secure(request: Request) -> bool:
 def _cookie_same_site() -> str:
     same_site = os.getenv("MPOS_COOKIE_SAMESITE", "lax").strip().lower()
     return same_site if same_site in {"lax", "strict", "none"} else "lax"
+
+
+def _public_url(request: Request) -> str:
+    configured = os.getenv("MPOS_PUBLIC_URL", "").strip().rstrip("/")
+    value = configured or str(request.base_url).rstrip("/")
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise HTTPException(status_code=500, detail="MPOS_PUBLIC_URL 配置无效")
+    return value
 
 
 def _set_login_cookie(response: Response, request: Request, token: str) -> None:
@@ -188,7 +205,8 @@ class AuthenticatedUserMiddleware:
             "/api/auth/register",
             "/api/auth/login",
         }
-        if scope["method"] == "OPTIONS" or scope["path"] in public_paths:
+        is_payment_webhook = scope["path"].startswith("/api/payments/webhooks/")
+        if scope["method"] == "OPTIONS" or scope["path"] in public_paths or is_payment_webhook:
             await self.app(scope, receive, send)
             return
 
@@ -513,6 +531,79 @@ def current_user(request: Request) -> dict:
 @app.get("/api/billing/account")
 def billing_account(request: Request) -> dict:
     return _account_payload(_current_user(request))
+
+
+@app.get("/api/payments/catalog")
+def payment_catalog(request: Request) -> dict:
+    _current_user(request)
+    return payment_service.catalog()
+
+
+@app.get("/api/payments/orders")
+def payment_orders(request: Request) -> list[dict]:
+    return payment_service.list_orders(_current_user_id(request))
+
+
+@app.post("/api/payments/orders", status_code=201)
+async def create_payment_order(payload: PaymentOrderRequest, request: Request) -> dict:
+    try:
+        return await payment_service.create_order(
+            _current_user_id(request),
+            payload.provider,
+            payload.plan_id,
+            _public_url(request),
+        )
+    except PaymentNotConfigured as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except PaymentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/api/payments/orders/{order_id}")
+def payment_order(order_id: str, request: Request) -> dict:
+    try:
+        return payment_service.get_order(order_id, user_id=_current_user_id(request))
+    except PaymentNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/payments/orders/{order_id}/paypal/capture")
+async def capture_paypal_order(order_id: str, request: Request) -> dict:
+    try:
+        return await payment_service.capture_paypal(order_id, _current_user_id(request))
+    except PaymentNotFound as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except PaymentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/payments/webhooks/paypal")
+async def paypal_webhook(request: Request) -> dict:
+    try:
+        await payment_service.handle_paypal_webhook(request.headers, await request.json())
+        return {"status": "ok"}
+    except PaymentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/payments/webhooks/wechat")
+async def wechat_webhook(request: Request) -> dict:
+    try:
+        payment_service.handle_wechat_webhook(request.headers, await request.body())
+        return {"code": "SUCCESS", "message": "成功"}
+    except PaymentError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/api/payments/webhooks/alipay")
+async def alipay_webhook(request: Request) -> Response:
+    try:
+        body = (await request.body()).decode()
+        form = dict(parse_qsl(body, keep_blank_values=True))
+        payment_service.handle_alipay_webhook(form)
+        return Response(content="success", media_type="text/plain")
+    except PaymentError as exc:
+        return Response(content=f"failure: {exc}", status_code=400, media_type="text/plain")
 
 
 @app.get("/api/admin/users")

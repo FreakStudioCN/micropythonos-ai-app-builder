@@ -196,6 +196,11 @@ class AuthCredentials(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 
+class PaymentOrderRequest(BaseModel):
+    provider: Literal["paypal", "wechat", "alipay"]
+    plan_id: Literal["go", "plus", "pro"]
+
+
 class DemoSessionRequest(BaseModel):
     idempotency_key: str = Field(min_length=8, max_length=200)
     seed: Literal["countdown", "calendar", "device-dashboard"] = "countdown"
