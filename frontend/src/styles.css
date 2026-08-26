@@ -378,6 +378,9 @@ summary { cursor: pointer; font-weight: 700; font-size: 14px; }
 .manual-payment-qr { padding: 16px; background: white; border: 1px solid #dbe3ee; border-radius: 12px; }
 .manual-payment-qr img { width: min(340px, 100%); border: 1px solid #eef0f4; }
 .manual-payment-qr button { margin-top: 4px; }
+.payment-admin-contact { display: flex; align-items: center; justify-content: center; flex-wrap: wrap; gap: 8px; margin-top: 5px; padding: 9px 11px; color: #334155; background: #f8fafc; border-radius: 8px; font-size: 12px; }
+.payment-admin-contact strong { color: #0f172a; user-select: all; }
+.payment-admin-contact button { padding: 6px 10px; }
 .payment-qr small, .payment-security { color: #64748b; font-size: 10px; }
 .payment-pending { margin-top: 15px; padding: 11px; color: #1d4ed8; background: #eff6ff; border-radius: 8px; font-size: 12px; }
 .payment-error { margin: 15px 0 0; }
