@@ -372,7 +372,7 @@ summary { cursor: pointer; font-weight: 700; font-size: 14px; }
 .payment-method small { color: #64748b; font-size: 10px; }
 .payment-alipay { color: #1677ff; border-color: #b9d7ff; }
 .payment-wechat { color: #07c160; border-color: #a7e5c3; }
-.payment-paypal { color: #003087; border-color: #b9c9e8; }
+.payment-international { color: #6d28d9; border-color: #d8c6ff; }
 .payment-qr { display: flex; flex-direction: column; align-items: center; gap: 7px; margin-top: 18px; text-align: center; }
 .payment-qr img { width: min(280px, 100%); border-radius: 10px; }
 .manual-payment-qr { padding: 16px; background: white; border: 1px solid #dbe3ee; border-radius: 12px; }
