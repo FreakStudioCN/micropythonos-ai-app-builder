@@ -51,6 +51,44 @@
         },
         "physical_validation_required": { "type": "boolean" },
         "capability_contract": { "type": "object", "additionalProperties": true },
+        "visual_asset_plan": {
+          "type": "object",
+          "additionalProperties": true
+        },
+        "visual_assets": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "runtime_path",
+              "runtime_format",
+              "runtime_bytes",
+              "runtime_sha256",
+              "generation_mode",
+              "fallback"
+            ],
+            "properties": {
+              "id": { "type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$" },
+              "purpose": { "type": "string" },
+              "runtime_path": {
+                "type": "string",
+                "pattern": "^assets/images/[a-z][a-z0-9_]{0,63}\\.bin$"
+              },
+              "runtime_format": { "enum": ["RGB565", "RGB565A8", "A8"] },
+              "width": { "type": "integer", "minimum": 1 },
+              "height": { "type": "integer", "minimum": 1 },
+              "runtime_bytes": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+              "runtime_sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+              "fallback": { "type": "string", "minLength": 1 },
+              "generation_mode": { "enum": ["procedural", "web", "external"] },
+              "source_page_url": { "type": "string" },
+              "license": { "type": "string" },
+              "attribution": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
         "skill_commit": { "type": ["string", "null"] },
         "mpos_commit": { "type": ["string", "null"] },
         "board_capabilities_schema": { "type": "object", "additionalProperties": true },
