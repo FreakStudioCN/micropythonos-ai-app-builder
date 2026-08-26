@@ -2679,8 +2679,8 @@ export default function App() {
           ? <>
               <h2>{tr("选择点数套餐", "Choose a credit pack")}</h2>
               <p>{tr(
-                "每次成功生成消耗 10 点。当前支持微信支付和支付宝扫码付款，PayPal 暂未支持。",
-                "Each successful generation costs 10 credits. WeChat Pay and Alipay QR payments are available; PayPal is not supported yet.",
+                "每次成功生成消耗 10 点。当前支持微信支付和支付宝扫码付款；国际支付请通过邮件联系。",
+                "Each successful generation costs 10 credits. WeChat Pay and Alipay QR payments are available; contact us by email for international payments.",
               )}</p>
               <div className="plan-grid">
                 {subscriptionPlans.map((plan) => (
@@ -2725,22 +2725,34 @@ export default function App() {
                       {([
                         ["alipay", tr("支付宝", "Alipay")],
                         ["wechat", tr("微信支付", "WeChat Pay")],
-                        ["paypal", "PayPal"],
                       ] as const).map(([provider, label]) => (
                         <button
                           key={provider}
                           className={`payment-method payment-${provider}`}
-                          disabled={(provider === "paypal" && !paymentProviders.paypal) || Boolean(paymentBusy)}
+                          disabled={Boolean(paymentBusy)}
                           onClick={() => void startPayment(provider)}
                         >
                           <strong>{label}</strong>
                           <small>{paymentProviders[provider]
                             ? (paymentBusy === provider ? tr("正在创建订单…", "Creating order…") : tr("在线支付 · 自动到账", "Online payment · automatic credit"))
-                            : provider === "paypal"
-                              ? tr("暂未支持", "Not supported yet")
-                              : tr("扫码支付 · 人工核对", "Scan to pay · manual review")}</small>
+                            : tr("扫码支付 · 人工核对", "Scan to pay · manual review")}</small>
                         </button>
                       ))}
+                      <button
+                        className="payment-method payment-international"
+                        disabled={Boolean(paymentBusy)}
+                        onClick={() => {
+                          const subject = tr(`国际支付咨询：${selectedPlan.name}`, `International payment inquiry: ${selectedPlan.name}`);
+                          const body = tr(
+                            `您好，我想使用国际支付购买 ${selectedPlan.name}（¥${selectedPlan.price}）。\n用户名：${billingAccount?.username || ""}`,
+                            `Hello, I would like to purchase ${selectedPlan.name} (CNY ¥${selectedPlan.price}) using an international payment method.\nUsername: ${billingAccount?.username || ""}`,
+                          );
+                          window.location.href = `mailto:1069653183@qq.com?subject=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`;
+                        }}
+                      >
+                        <strong>{tr("国际支付", "International payment")}</strong>
+                        <small>{tr("邮件联系 · 1069653183@qq.com", "Email · 1069653183@qq.com")}</small>
+                      </button>
                     </div>
                     {paymentQr && (paymentOrder?.provider === "wechat" || manualPaymentProvider) && (
                       <div className={`payment-qr ${manualPaymentProvider ? "manual-payment-qr" : ""}`}>
