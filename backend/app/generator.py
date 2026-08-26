@@ -1,6 +1,7 @@
 import asyncio
 import ast
 import base64
+import hashlib
 import io
 import json
 import os
@@ -434,6 +435,31 @@ def _build_user_prompt(request: GenerateRequest, correction: str = "") -> str:
             "禁止 mpos.board、machine.Pin/I2C/SPI/UART/I2S/ADC、NeoPixel、GPIO/总线映射和设备 ID。\n"
             + json.dumps(contract, ensure_ascii=False)
             + "\n</HARDWARE_CAPABILITY_CONTRACT>"
+        )
+    if request.visual_asset_plan:
+        public_assets = [
+            {
+                key: value
+                for key, value in asset.items()
+                if key not in {"content_base64", "preview_path", "metadata_path"}
+            }
+            for asset in request.visual_assets
+        ]
+        user_prompt += (
+            "\n\n<VISUAL_ASSET_CONTRACT>\n"
+            "视觉资源已经由后端构建并验证。只能引用下面列出的真实 runtime_path；"
+            "使用 lv.image(parent).set_src('M:apps/<fullname>/<runtime_path>')。"
+            "图片仅用于静态装饰，按钮、文字、焦点和实时数据必须保持原生 LVGL。"
+            "每个图片加载路径必须有清晰的原生 LVGL fallback；不得生成下载代码、"
+            "不得嵌入图片字节、不得猜测其他文件路径。\n"
+            + json.dumps(
+                {
+                    "plan": request.visual_asset_plan,
+                    "assets": public_assets,
+                },
+                ensure_ascii=False,
+            )
+            + "\n</VISUAL_ASSET_CONTRACT>"
         )
     if _is_shooter_prompt(request.prompt):
         user_prompt += (
@@ -1621,6 +1647,52 @@ def _validate_visual_contract(code: str, prompt: str = "") -> list[str]:
     ]
 
 
+def _validate_visual_asset_usage(
+    code: str,
+    package_name: str,
+    assets: list[dict[str, Any]],
+) -> list[str]:
+    """Ensure every built image is used from its exact path with a fallback."""
+    if not assets:
+        return []
+    tree = ast.parse(code)
+    warnings: list[str] = []
+    for asset in assets:
+        runtime_path = str(asset.get("runtime_path") or "").replace("\\", "/")
+        expected = f"M:apps/{package_name}/{runtime_path}"
+        matching_try: ast.Try | None = None
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Try):
+                continue
+            body_values = {
+                value.value
+                for statement in node.body
+                for value in ast.walk(statement)
+                if isinstance(value, ast.Constant) and isinstance(value.value, str)
+            }
+            if expected in body_values:
+                matching_try = node
+                break
+        if matching_try is None:
+            raise GenerationError(
+                f"Image resource {runtime_path} must be loaded from the exact path {expected} inside try/except",
+                code="VISUAL_ASSET_RUNTIME_PATH_MISSING",
+            )
+        fallback_calls = [
+            call
+            for handler in matching_try.handlers
+            for call in ast.walk(handler)
+            if isinstance(call, ast.Call)
+        ]
+        if not fallback_calls:
+            raise GenerationError(
+                f"Image resource {runtime_path} is missing a native LVGL fallback",
+                code="VISUAL_ASSET_FALLBACK_MISSING",
+            )
+        warnings.append(f"Image resource path and fallback validated: {runtime_path}")
+    return warnings
+
+
 @lru_cache(maxsize=1)
 def _api_indexes() -> dict[str, Any]:
     repo_root = Path(__file__).resolve().parents[2]
@@ -2281,7 +2353,40 @@ def _default_icon_png(package_name: str) -> bytes:
     )
 
 
-def _build_mpk(package_name: str, manifest: dict[str, Any], app_code: str) -> str:
+def _validated_runtime_assets(assets: list[dict[str, Any]]) -> list[tuple[str, bytes]]:
+    validated: list[tuple[str, bytes]] = []
+    total = 0
+    for asset in assets:
+        path = str(asset.get("runtime_path") or asset.get("path") or "").replace("\\", "/")
+        parts = path.split("/")
+        if (
+            len(parts) < 3
+            or parts[:2] != ["assets", "images"]
+            or any(part in {"", ".", ".."} for part in parts)
+            or not path.endswith(".bin")
+        ):
+            raise GenerationError("VISUAL_ASSET_SPEC_INVALID: invalid runtime image path")
+        try:
+            content = base64.b64decode(str(asset.get("content_base64") or ""), validate=True)
+        except (ValueError, TypeError) as exc:
+            raise GenerationError("VISUAL_ASSET_SPEC_INVALID: invalid runtime image payload") from exc
+        digest = hashlib.sha256(content).hexdigest()
+        expected = str(asset.get("runtime_sha256") or asset.get("sha256") or "")
+        if not content or digest != expected:
+            raise GenerationError("VISUAL_ASSET_SPEC_INVALID: runtime image hash mismatch")
+        total += len(content)
+        if total > 1_048_576:
+            raise GenerationError("VISUAL_ASSET_BUDGET_EXCEEDED: runtime image bundle is too large")
+        validated.append((path, content))
+    return validated
+
+
+def _build_mpk(
+    package_name: str,
+    manifest: dict[str, Any],
+    app_code: str,
+    runtime_assets: list[dict[str, Any]] | None = None,
+) -> str:
     stream = io.BytesIO()
     manifest_bytes = json.dumps(
         manifest,
@@ -2303,6 +2408,8 @@ def _build_mpk(package_name: str, manifest: dict[str, Any], app_code: str) -> st
             icon_bytes,
         )
         archive.writestr(f"{package_name}/assets/main.py", app_code)
+        for path, content in _validated_runtime_assets(runtime_assets or []):
+            archive.writestr(f"{package_name}/{path}", content)
     return base64.b64encode(stream.getvalue()).decode("ascii")
 
 
@@ -3376,6 +3483,11 @@ async def generate_app(
             )
             product_warnings = _validate_product_contract(candidate, request.prompt)
             visual_warnings = _validate_visual_contract(candidate, request.prompt)
+            visual_asset_warnings = _validate_visual_asset_usage(
+                candidate,
+                request.package_name,
+                request.visual_assets,
+            )
             api_warnings, api_usage = _validate_api_summaries(candidate)
             warnings = (
                 compatibility_warnings
@@ -3383,6 +3495,7 @@ async def generate_app(
                 + interaction_warnings
                 + product_warnings
                 + visual_warnings
+                + visual_asset_warnings
                 + api_warnings
             )
             code = candidate
@@ -3452,7 +3565,7 @@ async def generate_app(
             "category": store_metadata["category"],
         }
     )
-    mpk = _build_mpk(request.package_name, manifest, code)
+    mpk = _build_mpk(request.package_name, manifest, code, request.visual_assets)
     mpk_filename = f"{request.package_name}_r{request.revision}.mpk"
     generation_result = {
         "schema_version": "mpos-gen-app-web-v1",
@@ -3479,7 +3592,12 @@ async def generate_app(
             "version": request.version,
             "name": request.display_name,
         },
-        "files_written": ["MANIFEST.JSON", "icon_64x64.png", "assets/main.py"],
+        "files_written": [
+            "MANIFEST.JSON",
+            "icon_64x64.png",
+            "assets/main.py",
+            *[str(asset.get("runtime_path") or "") for asset in request.visual_assets],
+        ],
         "api_usage": api_usage,
         "required_capabilities": request.required_capabilities,
         "required_accessories": request.required_accessories,
@@ -3489,6 +3607,11 @@ async def generate_app(
             or capability_contract.get("physical_validation_required", False)
         ),
         "capability_contract": capability_contract,
+        "visual_asset_plan": request.visual_asset_plan,
+        "visual_assets": [
+            {key: value for key, value in asset.items() if key != "content_base64"}
+            for asset in request.visual_assets
+        ],
         "validation": {"gates": warnings},
         "requirement_coverage": requirement_coverage,
         "acceptance_tests": acceptance_tests,
@@ -3504,11 +3627,26 @@ async def generate_app(
             GeneratedFile(
                 path="MANIFEST.JSON",
                 content=json.dumps(manifest, ensure_ascii=False, indent=2),
+                mime="application/json",
+                role="app_manifest",
             ),
-            GeneratedFile(path="assets/main.py", content=code),
+            GeneratedFile(path="assets/main.py", content=code, mime="text/x-python", role="app_source"),
+            *[
+                GeneratedFile(
+                    path=str(asset["runtime_path"]),
+                    encoding="base64",
+                    content_base64=str(asset["content_base64"]),
+                    mime="application/octet-stream",
+                    role="app_runtime_image",
+                    sha256=str(asset["runtime_sha256"]),
+                )
+                for asset in request.visual_assets
+            ],
             GeneratedFile(
                 path="generation_result.json",
                 content=json.dumps(generation_result, ensure_ascii=False, indent=2),
+                mime="application/json",
+                role="generation_result",
             ),
         ],
         mpk_base64=mpk,
@@ -3535,4 +3673,9 @@ async def generate_app(
             or capability_contract.get("physical_validation_required", False)
         ),
         capability_contract=capability_contract,
+        visual_asset_plan=request.visual_asset_plan,
+        visual_assets=[
+            {key: value for key, value in asset.items() if key != "content_base64"}
+            for asset in request.visual_assets
+        ],
     )

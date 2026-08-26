@@ -463,6 +463,154 @@ class ScriptDispatcher:
             "stderr": result.stderr[-4000:],
         }
 
+    @staticmethod
+    def _confined(root: Path, path: Path) -> Path:
+        resolved_root = root.resolve(strict=True)
+        resolved = path.resolve(strict=False)
+        if resolved != resolved_root and resolved_root not in resolved.parents:
+            raise ValueError("visual asset path must stay inside the session root")
+        return resolved
+
+    def _run_visual_script(
+        self,
+        script: Path,
+        args: list[str],
+        *,
+        cwd: Path,
+        timeout: int,
+        missing_code: str = "VISUAL_ASSET_TOOLCHAIN_MISSING",
+        failure_code: str = "VISUAL_ASSET_BUILD_FAILED",
+    ) -> dict[str, Any]:
+        executable = self._resolve_interpreter("python")
+        if not executable or not script.is_file():
+            return {
+                "ok": False,
+                "error": {
+                    "code": missing_code,
+                    "message": "The fixed visual asset toolchain is unavailable",
+                    "owner": "toolchain",
+                    "retryable": True,
+                },
+            }
+        try:
+            result = subprocess.run(
+                [executable, str(script), *args],
+                cwd=cwd,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "ok": False,
+                "error": {
+                    "code": "SCRIPT_TIMEOUT",
+                    "message": "The fixed visual asset tool timed out",
+                    "owner": "toolchain",
+                    "retryable": True,
+                    "details": {"timeout": timeout},
+                },
+            }
+        output = (result.stdout or "").strip()
+        try:
+            payload = json.loads(output) if output else {}
+        except json.JSONDecodeError:
+            payload = {}
+        response = {
+            "ok": result.returncode == 0,
+            "returncode": result.returncode,
+            "result": payload,
+            "stdout": output[-8000:],
+            "stderr": (result.stderr or "")[-8000:],
+        }
+        if result.returncode != 0:
+            response["error"] = {
+                "code": failure_code,
+                "message": str(payload.get("error") or response["stderr"] or "Visual asset tool failed")[:1000],
+                "owner": "skill",
+                "retryable": True,
+            }
+        return response
+
+    def validate_visual_asset_plan(
+        self,
+        session_root: Path,
+        plan_path: Path,
+        *,
+        allow_web: bool,
+        allow_external: bool = False,
+        timeout: int = 15,
+    ) -> dict[str, Any]:
+        session_root = session_root.resolve(strict=True)
+        plan_path = self._confined(session_root, plan_path)
+        script = SKILLS_ROOT / "mpos-analyze-app-web" / "scripts" / "validate_visual_asset_plan.py"
+        args = ["--input", str(plan_path)]
+        if allow_web:
+            args.append("--allow-web")
+        if allow_external:
+            args.append("--allow-external")
+        return self._run_visual_script(
+            script,
+            args,
+            cwd=session_root,
+            timeout=timeout,
+            failure_code="VISUAL_ASSET_SPEC_INVALID",
+        )
+
+    def build_visual_asset(
+        self,
+        session_root: Path,
+        *,
+        spec_path: Path,
+        preview_path: Path,
+        runtime_path: Path,
+        metadata_path: Path,
+        max_runtime_bytes: int,
+        timeout: int = 30,
+    ) -> dict[str, Any]:
+        session_root = session_root.resolve(strict=True)
+        confined = [
+            self._confined(session_root, path)
+            for path in (spec_path, preview_path, runtime_path, metadata_path)
+        ]
+        script = SKILLS_ROOT / "mpos-gen-app-web" / "scripts" / "build_visual_asset.py"
+        return self._run_visual_script(
+            script,
+            [
+                "--allowed-root", str(session_root),
+                "--spec", str(confined[0]),
+                "--preview-output", str(confined[1]),
+                "--runtime-output", str(confined[2]),
+                "--metadata-output", str(confined[3]),
+                "--format", "auto",
+                "--max-runtime-bytes", str(max_runtime_bytes),
+            ],
+            cwd=session_root,
+            timeout=timeout,
+        )
+
+    def validate_visual_asset_bundle(
+        self,
+        session_root: Path,
+        manifest_path: Path,
+        *,
+        timeout: int = 15,
+    ) -> dict[str, Any]:
+        session_root = session_root.resolve(strict=True)
+        manifest_path = self._confined(session_root, manifest_path)
+        script = SKILLS_ROOT / "mpos-gen-app-web" / "scripts" / "validate_visual_asset_bundle.py"
+        return self._run_visual_script(
+            script,
+            [
+                "--allowed-root", str(session_root),
+                "--input", str(manifest_path),
+            ],
+            cwd=session_root,
+            timeout=timeout,
+            failure_code="VISUAL_ASSET_BUDGET_EXCEEDED",
+        )
+
     def run_hardware_policy(
         self, repo: Path, app_fullname: str, timeout: int = 30
     ) -> dict[str, Any]:

@@ -1,6 +1,6 @@
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 PROTOCOL_VERSION = "mpos-ai-app/v1"
 # Provider identifiers are an internal routing detail. Keeping the public schema as
@@ -42,11 +42,26 @@ class GenerateRequest(PublicGenerateRequest):
     """Internal generation request; provider routing is never client-controlled."""
 
     ai_provider: AIProviderId = "auto"
+    visual_asset_plan: dict[str, Any] = Field(default_factory=dict)
+    visual_assets: list[dict[str, Any]] = Field(default_factory=list, max_length=64)
 
 
 class GeneratedFile(BaseModel):
     path: str
-    content: str
+    encoding: Literal["utf-8", "base64"] = "utf-8"
+    content: str = ""
+    content_base64: str = ""
+    mime: str = "text/plain"
+    role: str = "app_source"
+    sha256: str = ""
+
+    @model_validator(mode="after")
+    def validate_payload(self) -> "GeneratedFile":
+        if self.encoding == "base64" and not self.content_base64:
+            raise ValueError("base64 files require content_base64")
+        if self.encoding == "utf-8" and self.content_base64:
+            raise ValueError("text files cannot include content_base64")
+        return self
 
 
 class GenerateResponse(BaseModel):
@@ -75,6 +90,8 @@ class GenerateResponse(BaseModel):
     runtime_fallbacks: dict[str, str] = Field(default_factory=dict)
     physical_validation_required: bool = False
     capability_contract: dict[str, Any] = Field(default_factory=dict)
+    visual_asset_plan: dict[str, Any] = Field(default_factory=dict)
+    visual_assets: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class PublicGenerateResponse(BaseModel):
@@ -96,6 +113,8 @@ class PublicGenerateResponse(BaseModel):
     runtime_fallbacks: dict[str, str] = Field(default_factory=dict)
     physical_validation_required: bool = False
     capability_contract: dict[str, Any] = Field(default_factory=dict)
+    visual_asset_plan: dict[str, Any] = Field(default_factory=dict)
+    visual_assets: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class RequirementMessage(BaseModel):
@@ -129,6 +148,11 @@ class Capabilities(BaseModel):
     timeout: bool = True
     desktop_preview: bool = False
     web_preview: bool = True
+    visual_asset_render: bool = True
+    lvgl_image_convert: bool = True
+    web_image_search: bool = True
+    remote_image_fetch: bool = True
+    external_image_generation: bool = False
     physical_device: bool = False
     browser_webserial: bool = False
     serial_port_scan: bool = False

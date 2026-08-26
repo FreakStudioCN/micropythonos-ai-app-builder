@@ -29,7 +29,12 @@ type AuthStatus = "loading" | "signed_out" | "signed_in";
 type AccountRole = "user" | "superadmin";
 interface GeneratedFile {
   path: string;
-  content: string;
+  encoding?: "utf-8" | "base64";
+  content?: string;
+  content_base64?: string;
+  mime?: string;
+  role?: string;
+  sha256?: string;
 }
 interface GenerationResult {
   package_name: string;
@@ -49,6 +54,23 @@ interface GenerationResult {
   runtime_fallbacks?: Record<string, string>;
   physical_validation_required?: boolean;
   capability_contract?: Record<string, unknown>;
+  visual_asset_plan?: {
+    render_strategy?: string;
+    assets?: Array<Record<string, unknown>>;
+  };
+  visual_assets?: Array<{
+    id: string;
+    purpose: string;
+    runtime_path: string;
+    width: number;
+    height: number;
+    runtime_bytes: number;
+    generation_mode: string;
+    source_page_url?: string;
+    license?: string;
+    attribution?: string;
+    fallback?: string;
+  }>;
 }
 interface Artifact {
   id: string;
@@ -1138,11 +1160,10 @@ export default function App() {
     }, 60000);
     iframeRef.current.contentWindow?.postMessage({
       source: "mpos-builder",
-      type: "RUN_APP",
+      type: "RUN_MPK",
       runId,
       packageName: result.package_name,
-      appCode,
-      manifest: JSON.stringify(result.manifest),
+      mpkBase64: result.mpk_base64,
     }, wasmRuntimeOrigin);
   }, [result, wasmReady, sessionState]);
 
@@ -1268,6 +1289,11 @@ export default function App() {
               timeout: true,
               desktop_preview: desktopAvailable,
               web_preview: true,
+              visual_asset_render: true,
+              lvgl_image_convert: true,
+              web_image_search: true,
+              remote_image_fetch: true,
+              external_image_generation: false,
               physical_device: "serial" in navigator,
               browser_webserial: "serial" in navigator,
               serial_port_scan: "serial" in navigator,
@@ -2639,8 +2665,23 @@ export default function App() {
               ? <div className="artifacts">
                   {sessionState?.artifacts.length
                     ? <ul>{sessionState.artifacts.map((artifact) => <li key={artifact.id}><span>▣　{artifact.path}<small>{artifact.role} · {artifact.kind} · {Math.ceil(artifact.size / 1024)} KB</small><small>{artifact.mime} · {artifact.phase}</small><code title={artifact.sha256}>sha256: {artifact.sha256.slice(0, 16)}…</code></span><button onClick={() => void downloadArtifact(artifact)}>{tr("下载", "Download")}</button></li>)}</ul>
-                    : <ul>{result.files.map((file) => <li key={file.path}><span>▣　{file.path}</span><button onClick={() => download(file.path, file.content)}>{tr("下载", "Download")}</button></li>)}</ul>}
-                  <div className="mpk"><div><strong>{result.mpk_filename}</strong><small>{tr("包含真实 MANIFEST.JSON 和 assets/main.py，文件名符合 _rN 发布规则", "Contains MANIFEST.JSON and assets/main.py with the required _rN release name")}</small></div><button onClick={downloadMpk}>{tr("下载真实 .mpk", "Download .mpk")}</button></div>
+                    : <ul>{result.files.map((file) => <li key={file.path}><span>▣　{file.path}</span><button onClick={() => download(file.path, file.content || file.content_base64 || "")}>{tr("下载", "Download")}</button></li>)}</ul>}
+                  {Boolean(result.visual_assets?.length) && (
+                    <div className="capability-state">
+                      <strong>{tr(
+                        `视觉策略：${result.visual_asset_plan?.render_strategy || "hybrid"}`,
+                        `Visual strategy: ${result.visual_asset_plan?.render_strategy || "hybrid"}`,
+                      )}</strong>
+                      {result.visual_assets!.map((asset) => (
+                        <span key={asset.id}>
+                          {asset.id} · {asset.width}×{asset.height} · {Math.ceil(asset.runtime_bytes / 1024)} KB · {asset.generation_mode}
+                          {asset.license ? ` · ${asset.license}` : ""}
+                          {asset.source_page_url && <> · <a href={asset.source_page_url} target="_blank" rel="noreferrer">{tr("来源", "source")}</a></>}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <div className="mpk"><div><strong>{result.mpk_filename}</strong><small>{tr("包含 MANIFEST.JSON、assets/main.py 和已验证图片资源，文件名符合 _rN 发布规则", "Contains MANIFEST.JSON, assets/main.py, and verified image assets with the required _rN release name")}</small></div><button onClick={downloadMpk}>{tr("下载真实 .mpk", "Download .mpk")}</button></div>
                   <div className="publish-guide">
                     <strong>{tr("uPyStore 发布检查", "uPyStore checklist")}</strong>
                     <span>{tr("✓ Manifest　✓ _rN.mpk　△ Web/真机验证　△ PNG/JPEG/WebP 截图。发布材料 ZIP 已进入上方产物列表；这里只提供手工上传引导。", "✓ Manifest  ✓ _rN.mpk  △ Web/device validation  △ PNG/JPEG/WebP screenshot. The publishing ZIP is listed above; upload remains manual.")}</span>
