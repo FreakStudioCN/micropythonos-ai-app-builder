@@ -2751,6 +2751,16 @@ export default function App() {
                         <small>{manualPaymentProvider
                           ? tr("个人收款码无法自动回调。付款后请把支付截图、用户名和所选套餐发给管理员，确认后人工加点。", "Static personal QR codes cannot confirm automatically. Send the receipt, username, and selected plan to the administrator for manual crediting.")
                           : tr("支付完成后此页面会自动更新，请勿重复付款。", "This page updates automatically after payment. Do not pay twice.")}</small>
+                        {manualPaymentProvider && <div className="payment-admin-contact">
+                          <span>{tr("管理员微信", "Administrator WeChat")}</span>
+                          <strong>wxinliliszdyyr</strong>
+                          <button className="secondary-button" onClick={() => {
+                            void navigator.clipboard.writeText("wxinliliszdyyr").then(
+                              () => setToast(tr("管理员微信号已复制", "Administrator WeChat copied")),
+                              () => setToast(tr("复制失败，请手动记录微信号", "Copy failed. Record the WeChat ID manually.")),
+                            );
+                          }}>{tr("复制微信号", "Copy WeChat ID")}</button>
+                        </div>}
                         {manualPaymentProvider && <button className="secondary-button" onClick={() => {
                           const note = `${billingAccount?.username || ""} · ${selectedPlan.name} · ¥${selectedPlan.price}`;
                           void navigator.clipboard.writeText(note).then(
