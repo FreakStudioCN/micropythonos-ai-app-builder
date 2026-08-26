@@ -42,6 +42,15 @@ from .runner_services import (
     script_dispatcher,
 )
 from .session_index import EventLogCache, SessionIndex
+from .visual_assets import (
+    BuiltVisualAsset,
+    VisualAssetError,
+    analyze_visual_asset_plan,
+    binary_file_payload,
+    build_web_asset,
+    native_visual_asset_plan,
+    procedural_spec,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -272,6 +281,11 @@ class SessionService:
                 "timeout": True,
                 "desktop_preview": desktop_capability["available"],
                 "web_preview": True,
+                "visual_asset_render": True,
+                "lvgl_image_convert": True,
+                "web_image_search": True,
+                "remote_image_fetch": True,
+                "external_image_generation": False,
                 "browser_webserial": False,
                 **device_service.capabilities(),
                 "firmware_flash": False,
@@ -303,6 +317,127 @@ class SessionService:
 
     def _state_path(self, session_id: str) -> Path:
         return self._root(session_id) / "session_state.json"
+
+    async def _build_visual_assets(
+        self,
+        state: dict[str, Any],
+        prompt: str,
+    ) -> list[dict[str, Any]]:
+        plan = state.get("visual_asset_plan") or native_visual_asset_plan()
+        assets = plan.get("assets") if isinstance(plan, dict) else []
+        if not isinstance(assets, list) or not assets:
+            state["visual_assets"] = []
+            return []
+        root = self._root(state["session_id"])
+        app_fullname = state["input"]["package_name"]
+        artifact_root = root / "artifacts" / "visual-assets"
+        runtime_root = (
+            root / "project" / "internal_filesystem" / "apps" / app_fullname / "assets" / "images"
+        )
+        artifact_root.mkdir(parents=True, exist_ok=True)
+        runtime_root.mkdir(parents=True, exist_ok=True)
+        budget = int(plan.get("runtime_byte_budget") or 1_048_576)
+        remaining = budget
+        built: list[BuiltVisualAsset] = []
+        warnings = state.setdefault("warnings", [])
+        for asset in assets:
+            if not isinstance(asset, dict):
+                continue
+            asset_id = str(asset.get("id") or "")
+            if not re.fullmatch(r"[a-z][a-z0-9_]{0,63}", asset_id):
+                raise GenerationError("VISUAL_ASSET_SPEC_INVALID: invalid asset id")
+            preview = artifact_root / f"{asset_id}.png"
+            runtime = runtime_root / f"{asset_id}.bin"
+            metadata = artifact_root / f"{asset_id}.build.json"
+            source_record = artifact_root / f"{asset_id}.source.json"
+            item: BuiltVisualAsset | None = None
+            if asset.get("generation_mode") == "web":
+                try:
+                    item = await build_web_asset(
+                        asset,
+                        query=str(asset.get("search_query") or prompt),
+                        preview_path=preview,
+                        runtime_path=runtime,
+                        metadata_path=metadata,
+                        source_record_path=source_record,
+                    )
+                except VisualAssetError as exc:
+                    warnings.append(f"{exc.code}: {exc}; used procedural fallback for {asset_id}")
+            if item is None:
+                spec_path = artifact_root / f"{asset_id}.spec.json"
+                spec_path.write_text(
+                    json.dumps(procedural_spec(asset, prompt), ensure_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+                self._register_artifact(state, spec_path, "mpos-gen-app-web", "source", "visual_asset_spec")
+                result = script_dispatcher.build_visual_asset(
+                    root,
+                    spec_path=spec_path,
+                    preview_path=preview,
+                    runtime_path=runtime,
+                    metadata_path=metadata,
+                    max_runtime_bytes=max(1, remaining),
+                )
+                if not result.get("ok"):
+                    error = result.get("error") or {}
+                    if asset.get("required"):
+                        raise GenerationError(f"{error.get('code', 'VISUAL_ASSET_BUILD_FAILED')}: {error.get('message', 'visual asset build failed')}")
+                    warnings.append(f"{error.get('code', 'VISUAL_ASSET_BUILD_FAILED')}: skipped optional {asset_id}")
+                    continue
+                meta = json.loads(metadata.read_text(encoding="utf-8"))
+                item = BuiltVisualAsset(
+                    asset_id=asset_id,
+                    purpose=str(asset.get("purpose") or "static_artwork"),
+                    runtime_path=f"assets/images/{asset_id}.bin",
+                    preview_path=preview,
+                    runtime_file=runtime,
+                    metadata_path=metadata,
+                    source_record_path=None,
+                    runtime_format=str(meta["runtime_format"]),
+                    width=int(meta["width"]),
+                    height=int(meta["height"]),
+                    runtime_bytes=int(meta["runtime_bytes"]),
+                    runtime_sha256=str(meta["runtime_sha256"]),
+                    fallback=str(asset.get("fallback") or "Show native LVGL fallback"),
+                    generation_mode="procedural",
+                )
+            remaining -= item.runtime_bytes
+            if remaining < 0:
+                raise GenerationError("VISUAL_ASSET_BUDGET_EXCEEDED: visual assets exceed runtime budget")
+            built.append(item)
+            self._register_artifact(state, item.preview_path, "mpos-gen-app-web", "source", "visual_asset_source")
+            self._register_artifact(state, item.runtime_file, "mpos-gen-app-web", "runtime", "app_runtime_image")
+            self._register_artifact(state, item.metadata_path, "mpos-gen-app-web", "log", "visual_asset_build_log")
+            if item.source_record_path and item.source_record_path.is_file():
+                self._register_artifact(state, item.source_record_path, "mpos-gen-app-web", "source", "visual_asset_source_record")
+
+        bundle_path = artifact_root / "bundle.json"
+        bundle = {
+            "schema_version": "mpos-visual-asset-bundle-v1",
+            "runtime_byte_budget": budget,
+            "assets": [
+                {
+                    "runtime_path": str(item.runtime_file.relative_to(root)).replace("\\", "/"),
+                    "runtime_sha256": item.runtime_sha256,
+                }
+                for item in built
+            ],
+        }
+        bundle_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2), encoding="utf-8")
+        validation = script_dispatcher.validate_visual_asset_bundle(root, bundle_path)
+        if not validation.get("ok"):
+            error = validation.get("error") or {}
+            raise GenerationError(f"{error.get('code', 'VISUAL_ASSET_BUDGET_EXCEEDED')}: {error.get('message', 'visual asset bundle validation failed')}")
+        self._register_artifact(state, bundle_path, "mpos-gen-app-web", "result", "visual_asset_bundle")
+        result_assets = [
+            {**item.public_metadata(), **binary_file_payload(item)}
+            for item in built
+        ]
+        state["visual_assets"] = [
+            {key: value for key, value in asset.items() if key != "content_base64"}
+            for asset in result_assets
+        ]
+        return result_assets
 
     def _read(self, session_id: str) -> dict[str, Any]:
         path = self._state_path(session_id)
@@ -1448,6 +1583,48 @@ class GeneratedApp(Activity):
                     },
                 )
                 if action == "analyze":
+                    host_capabilities = state.get("capabilities", {})
+                    allow_web = all(
+                        bool(host_capabilities.get(name))
+                        for name in (
+                            "network_read",
+                            "web_image_search",
+                            "remote_image_fetch",
+                            "lvgl_image_convert",
+                        )
+                    )
+                    visual_plan = await analyze_visual_asset_plan(
+                        user_input["prompt_original"],
+                        allow_web=allow_web,
+                        allow_external=bool(host_capabilities.get("external_image_generation")),
+                    )
+                    visual_plan_path = self._root(session_id) / "artifacts" / "visual_asset_plan.json"
+                    visual_plan_path.write_text(
+                        json.dumps(visual_plan, ensure_ascii=False, indent=2),
+                        encoding="utf-8",
+                    )
+                    validation = script_dispatcher.validate_visual_asset_plan(
+                        self._root(session_id),
+                        visual_plan_path,
+                        allow_web=allow_web,
+                        allow_external=bool(host_capabilities.get("external_image_generation")),
+                    )
+                    if not validation.get("ok"):
+                        visual_plan = native_visual_asset_plan()
+                        visual_plan_path.write_text(
+                            json.dumps(visual_plan, ensure_ascii=False, indent=2),
+                            encoding="utf-8",
+                        )
+                        state.setdefault("warnings", []).append(
+                            "VISUAL_ASSET_SPEC_INVALID: AI visual plan was replaced with lvgl_native fallback"
+                        )
+                    state["visual_asset_plan"] = visual_plan
+                    state["visual_asset_plan_hash"] = hashlib.sha256(
+                        json.dumps(visual_plan, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                    ).hexdigest()
+                    self._register_artifact(
+                        state, visual_plan_path, phase, "result", "visual_asset_plan"
+                    )
                     payload = {
                         "schema_version": "mpos-analyze-app-web-v1",
                         "phase": phase,
@@ -1472,6 +1649,7 @@ class GeneratedApp(Activity):
                             "runtime_fallbacks": state.get("runtime_fallbacks", {}),
                             "physical_validation_required": state.get("physical_validation_required", False),
                         },
+                        "visual_asset_plan": visual_plan,
                         "api_plan": {
                             "mpos_summary": state["api_summary_version"].get(
                                 "mpos_api_summary.json"
@@ -1520,6 +1698,9 @@ class GeneratedApp(Activity):
                     previous_code = request.previous_code or state.get(
                         "pending_repair", {}
                     ).get("previous_code")
+                    visual_files = await self._build_visual_assets(
+                        state, user_input["prompt_original"]
+                    )
                     generated = await generate_app(
                         GenerateRequest(
                             prompt=user_input["prompt_original"],
@@ -1534,6 +1715,8 @@ class GeneratedApp(Activity):
                             required_accessories=state.get("required_accessories", []),
                             runtime_fallbacks=state.get("runtime_fallbacks", {}),
                             physical_validation_required=state.get("physical_validation_required", False),
+                            visual_asset_plan=state.get("visual_asset_plan", native_visual_asset_plan()),
+                            visual_assets=visual_files,
                             ai_provider="auto",
                         )
                     )
@@ -1570,18 +1753,38 @@ class GeneratedApp(Activity):
                             if generated_file.path == "generation_result.json"
                             else app_root / generated_file.path
                         )
+                        resolved_target = target.resolve(strict=False)
+                        allowed_root = (
+                            self._root(session_id) / "artifacts"
+                            if generated_file.path == "generation_result.json"
+                            else app_root
+                        ).resolve(strict=False)
+                        if resolved_target != allowed_root and allowed_root not in resolved_target.parents:
+                            raise GenerationError("VISUAL_ASSET_SPEC_INVALID: generated file path escapes App root")
                         target.parent.mkdir(parents=True, exist_ok=True)
-                        target.write_text(generated_file.content, encoding="utf-8")
-                        role = {
-                            "MANIFEST.JSON": "app_manifest",
-                            "assets/main.py": "app_source",
-                            "generation_result.json": "generation_result",
-                        }[generated_file.path]
+                        if generated_file.encoding == "base64":
+                            try:
+                                raw = base64.b64decode(generated_file.content_base64, validate=True)
+                            except (ValueError, binascii.Error) as exc:
+                                raise GenerationError("VISUAL_ASSET_SPEC_INVALID: invalid binary artifact") from exc
+                            if generated_file.sha256 and hashlib.sha256(raw).hexdigest() != generated_file.sha256:
+                                raise GenerationError("VISUAL_ASSET_SPEC_INVALID: binary artifact hash mismatch")
+                            target.write_bytes(raw)
+                        else:
+                            target.write_text(generated_file.content, encoding="utf-8")
+                        role = (
+                            "generation_result"
+                            if generated_file.path == "generation_result.json"
+                            else "app_runtime_image"
+                            if generated_file.encoding == "base64"
+                            and generated_file.path.startswith("assets/images/")
+                            else generated_file.role
+                        )
                         self._register_artifact(
                             state,
                             target,
                             phase,
-                            "result" if role == "generation_result" else "source",
+                            "result" if role == "generation_result" else "runtime" if role == "app_runtime_image" else "source",
                             role,
                         )
                     self._write_generated_icon(
@@ -1961,6 +2164,9 @@ class GeneratedApp(Activity):
         state["checkpoint_id"] = "session_created"
         state["next_phase"] = "mpos-analyze-app-web"
         state["generation"] = None
+        state["visual_asset_plan"] = None
+        state["visual_asset_plan_hash"] = None
+        state["visual_assets"] = []
         state["artifacts"] = []
         state["last_error"] = None
         state["structured_errors"] = []
@@ -2003,6 +2209,41 @@ class GeneratedApp(Activity):
                         **mpos_skill_adapter.describe("analyze"),
                     },
                 )
+                host_capabilities = state.get("capabilities", {})
+                allow_web = all(
+                    bool(host_capabilities.get(name))
+                    for name in (
+                        "network_read",
+                        "web_image_search",
+                        "remote_image_fetch",
+                        "lvgl_image_convert",
+                    )
+                )
+                visual_plan = await analyze_visual_asset_plan(
+                    user_input["prompt_original"],
+                    allow_web=allow_web,
+                    allow_external=bool(host_capabilities.get("external_image_generation")),
+                )
+                visual_plan_path = self._root(session_id) / "artifacts" / "visual_asset_plan.json"
+                visual_plan_path.write_text(json.dumps(visual_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+                validation = script_dispatcher.validate_visual_asset_plan(
+                    self._root(session_id), visual_plan_path,
+                    allow_web=allow_web,
+                    allow_external=bool(host_capabilities.get("external_image_generation")),
+                )
+                if not validation.get("ok"):
+                    visual_plan = native_visual_asset_plan()
+                    visual_plan_path.write_text(json.dumps(visual_plan, ensure_ascii=False, indent=2), encoding="utf-8")
+                    state.setdefault("warnings", []).append(
+                        "VISUAL_ASSET_SPEC_INVALID: AI visual plan was replaced with lvgl_native fallback"
+                    )
+                state["visual_asset_plan"] = visual_plan
+                state["visual_asset_plan_hash"] = hashlib.sha256(
+                    json.dumps(visual_plan, sort_keys=True, separators=(",", ":")).encode("utf-8")
+                ).hexdigest()
+                self._register_artifact(
+                    state, visual_plan_path, "mpos-analyze-app-web", "result", "visual_asset_plan"
+                )
                 analysis = {
                     "schema_version": "mpos-analyze-app-web-v1",
                     "phase": "mpos-analyze-app-web",
@@ -2033,6 +2274,7 @@ class GeneratedApp(Activity):
                             state.get("pending_repair", {}).get("previous_code")
                         ),
                     },
+                    "visual_asset_plan": visual_plan,
                     "api_plan": {
                         "mpos_summary": state["api_summary_version"].get(
                             "mpos_api_summary.json"
@@ -2111,6 +2353,9 @@ class GeneratedApp(Activity):
                 )
                 state["generation_attempt_run"] = generation_run
                 self._write_state(state)
+                visual_files = await self._build_visual_assets(
+                    state, user_input["prompt_original"]
+                )
                 generated = await generate_app(
                     GenerateRequest(
                         prompt=user_input["prompt_original"],
@@ -2125,6 +2370,8 @@ class GeneratedApp(Activity):
                         required_accessories=state.get("required_accessories", []),
                         runtime_fallbacks=state.get("runtime_fallbacks", {}),
                         physical_validation_required=state.get("physical_validation_required", False),
+                        visual_asset_plan=state.get("visual_asset_plan", native_visual_asset_plan()),
+                        visual_assets=visual_files,
                         ai_provider="auto",
                     ),
                     attempt_sink=lambda record: self._write_generation_attempt(
@@ -2166,18 +2413,38 @@ class GeneratedApp(Activity):
                         target = self._root(session_id) / "artifacts" / generated_file.path
                     else:
                         target = app_root / generated_file.path
+                    resolved_target = target.resolve(strict=False)
+                    allowed_root = (
+                        self._root(session_id) / "artifacts"
+                        if generated_file.path == "generation_result.json"
+                        else app_root
+                    ).resolve(strict=False)
+                    if resolved_target != allowed_root and allowed_root not in resolved_target.parents:
+                        raise GenerationError("VISUAL_ASSET_SPEC_INVALID: generated file path escapes App root")
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    target.write_text(generated_file.content, encoding="utf-8")
-                    role = {
-                        "MANIFEST.JSON": "app_manifest",
-                        "assets/main.py": "app_source",
-                        "generation_result.json": "generation_result",
-                    }[generated_file.path]
+                    if generated_file.encoding == "base64":
+                        try:
+                            raw = base64.b64decode(generated_file.content_base64, validate=True)
+                        except (ValueError, binascii.Error) as exc:
+                            raise GenerationError("VISUAL_ASSET_SPEC_INVALID: invalid binary artifact") from exc
+                        if generated_file.sha256 and hashlib.sha256(raw).hexdigest() != generated_file.sha256:
+                            raise GenerationError("VISUAL_ASSET_SPEC_INVALID: binary artifact hash mismatch")
+                        target.write_bytes(raw)
+                    else:
+                        target.write_text(generated_file.content, encoding="utf-8")
+                    role = (
+                        "generation_result"
+                        if generated_file.path == "generation_result.json"
+                        else "app_runtime_image"
+                        if generated_file.encoding == "base64"
+                        and generated_file.path.startswith("assets/images/")
+                        else generated_file.role
+                    )
                     self._register_artifact(
                         state,
                         target,
                         "mpos-gen-app-web",
-                        "source" if role != "generation_result" else "result",
+                        "result" if role == "generation_result" else "runtime" if role == "app_runtime_image" else "source",
                         role,
                     )
                 self._write_generated_icon(

@@ -2,6 +2,7 @@ fastapi==0.116.1
 boto3>=1.40,<2
 cryptography>=45,<47
 httpx==0.28.1
+Pillow>=11.3,<13
 pydantic==2.11.7
 python-dotenv==1.1.1
 psycopg[binary]>=3.2,<4
