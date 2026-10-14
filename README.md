@@ -18,11 +18,11 @@ Blockless-Make-APP 是面向创客入门、科创教育和 STEM 课堂的 AI App
 6. 可选 ESP32/ESP32-S3 真机部署
 7. 发布前检查与上传指导
 
-当前版本不提供收费、在线充值或自动订阅。每个新账号获得 50 个免费内测点数，
-每个新 App revision 消耗 10 点；点数仅用于控制内测资源。前端不展示购买入口。
+每个新账号获得 50 个免费内测点数，每个新 App revision 消耗 10 点。点数包可用微信/支付宝
+扫码购买（一次性，不是订阅），见 `docs/payments.md`。
 用户使用用户名和密码注册、登录；密码只以加盐 scrypt 哈希保存，登录 token 只以
 SHA-256 哈希保存在后端数据库。会话、权限、生成产物和点数按数据库用户 UUID
-隔离，浏览器不能自行指定计费身份。第一版开放注册，没有密码找回和支付功能。
+隔离，浏览器不能自行指定计费身份。开放注册，没有密码找回。
 
 ## 当前产品能力
 
@@ -55,7 +55,7 @@ SHA-256 哈希保存在后端数据库。会话、权限、生成产物和点数
 ## Clone
 
 ```bash
-git clone --recurse-submodules https://github.com/erkou111/micropythonos-ai-app-builder.git
+git clone --recurse-submodules https://github.com/FreakStudioCN/micropythonos-ai-app-builder.git
 cd micropythonos-ai-app-builder
 git submodule update --init --recursive
 ```
